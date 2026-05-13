@@ -1,0 +1,16 @@
+{
+  "name": "easycodex",
+  "version": "0.1.5",
+  "description": "Terminal-first installer and launcher for EasyCodex mobile + relay",
+  "type": "module",
+  "bin": {
+    "easycodex": "./scripts/easycodex.mjs"
+  },
+  "files": [
+    "scripts/easycodex.mjs"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

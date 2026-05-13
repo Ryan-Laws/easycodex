@@ -1,0 +1,43 @@
+# dependencies
+node_modules/
+
+# local IDE state
+.idea/
+mobile/.idea/
+mobile/.expo/
+
+# Android
+.gradle/
+mobile/.gradle/
+mobile/build/
+mobile/app/build/
+mobile/local.properties
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+
+# Agent Relay build output
+agent-relay/dist/
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+start-easycodex.ps1
+.easycodex-attachments/
+
+# typescript
+*.tsbuildinfo
+.codex-protocol-inspect/
+
+# lock files (keep package-lock in each subfolder)
