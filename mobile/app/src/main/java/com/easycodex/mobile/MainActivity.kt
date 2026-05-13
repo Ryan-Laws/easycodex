@@ -28,6 +28,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -82,7 +83,6 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
@@ -949,6 +949,11 @@ fun MessageComposer(
     var sendAnimationKey by remember { mutableStateOf(0) }
     val sendButtonScale = remember { Animatable(1f) }
     val sendIconTravel = remember { Animatable(0f) }
+    val quickReplyArrowRotation by animateFloatAsState(
+        targetValue = if (quickRepliesExpanded) 180f else 0f,
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+        label = "quick reply arrow rotation",
+    )
     val quickReplyPrompts = remember {
         listOf(
             "先调查，再给修复计划",
@@ -1020,14 +1025,26 @@ fun MessageComposer(
                     enabled = enabled,
                     leadingIcon = {
                         Icon(
-                            if (quickRepliesExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            Icons.Default.KeyboardArrowDown,
                             contentDescription = null,
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier
+                                .size(18.dp)
+                                .graphicsLayer(rotationZ = quickReplyArrowRotation),
                         )
                     },
                     label = { Text("快速回答") },
                 )
-                if (quickRepliesExpanded) {
+                AnimatedVisibility(
+                    visible = quickRepliesExpanded,
+                    enter = expandVertically(
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        expandFrom = Alignment.Top,
+                    ) + fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
+                    exit = shrinkVertically(
+                        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                        shrinkTowards = Alignment.Top,
+                    ) + fadeOut(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
+                ) {
                     quickReplyPrompts.forEach { prompt ->
                         AssistChip(
                             onClick = {
@@ -1040,19 +1057,35 @@ fun MessageComposer(
                     }
                 }
             }
-            if (attachments.isNotEmpty()) {
-                Spacer(Modifier.height(6.dp))
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+            AnimatedVisibility(
+                visible = attachments.isNotEmpty(),
+                enter = expandVertically(
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                    expandFrom = Alignment.Top,
+                ) + fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
+                exit = shrinkVertically(
+                    animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                    shrinkTowards = Alignment.Top,
+                ) + fadeOut(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
+            ) {
+                Column(
+                    modifier = Modifier.animateContentSize(
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                    ),
                 ) {
-                    attachments.forEach { attachment ->
-                        AssistChip(
-                            onClick = { onRemoveAttachment(attachment.path) },
-                            leadingIcon = { Icon(Icons.Default.AttachFile, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                            label = { Text("${attachment.name} ×", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        )
+                    Spacer(Modifier.height(6.dp))
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        attachments.forEach { attachment ->
+                            AssistChip(
+                                onClick = { onRemoveAttachment(attachment.path) },
+                                leadingIcon = { Icon(Icons.Default.AttachFile, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                                label = { Text("${attachment.name} ×", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            )
+                        }
                     }
                 }
             }
@@ -1277,8 +1310,16 @@ private fun AgentRuntimeBar(
     var picker by remember { mutableStateOf<RuntimePicker?>(null) }
     var showProjectPicker by remember { mutableStateOf(false) }
     val selectedModel = agent?.model.orEmpty()
-    val selectedModelLabel = modelOptions.firstOrNull { it.model == selectedModel }?.displayName
-        ?: selectedModel.ifBlank { strings.detectingModel }
+    val displayModel = selectedModel.ifBlank { modelOptions.firstOrNull()?.model.orEmpty() }
+    val selectedModelLabel = modelOptions.firstOrNull { it.model == displayModel }?.displayName
+        ?: displayModel.ifBlank { strings.detectingModel }
+    val displayReasoningEffort = agent?.reasoningEffort?.takeIf { it.isNotBlank() }
+        ?: modelOptions.firstOrNull { it.model == displayModel }?.defaultReasoningEffort?.takeIf { it.isNotBlank() }
+        ?: reasoningOptions.firstOrNull()?.takeIf { it.isNotBlank() }
+        ?: DEFAULT_REASONING_EFFORT
+    val displayServiceTier = agent?.serviceTier?.takeIf { it.isNotBlank() }
+        ?: serviceTierOptions.firstOrNull()?.takeIf { it.isNotBlank() }
+        ?: DEFAULT_SERVICE_TIER
     val selectedProject = agent?.cwd.orEmpty()
     val selectedProjectLabel = cleanNullablePath(selectedProject)?.let { projectNameFromCwd(it) } ?: strings.selectProject
     FlowRow(
@@ -1313,7 +1354,7 @@ private fun AgentRuntimeBar(
                 selected = false,
                 enabled = enabled && reasoningOptions.isNotEmpty(),
                 onClick = { picker = RuntimePicker.Reasoning },
-                label = { Text(reasoningLabel(agent?.reasoningEffort ?: DEFAULT_REASONING_EFFORT, strings)) },
+                label = { Text(reasoningLabel(displayReasoningEffort, strings)) },
             )
         }
         if (showRuntime && runtimeCapabilities.supportsServiceTier && serviceTierOptions.isNotEmpty()) {
@@ -1321,7 +1362,7 @@ private fun AgentRuntimeBar(
                 selected = false,
                 enabled = enabled,
                 onClick = { picker = RuntimePicker.ServiceTier },
-                label = { Text(serviceTierLabel(agent?.serviceTier ?: DEFAULT_SERVICE_TIER, strings)) },
+                label = { Text(serviceTierLabel(displayServiceTier, strings)) },
             )
         }
     }
@@ -1343,7 +1384,7 @@ private fun AgentRuntimeBar(
         RuntimePicker.Model -> RuntimeChoiceDialog(
             title = strings.chooseModel,
             options = modelOptions.map { RuntimeChoice(it.model, it.displayName, it.model) },
-            selected = selectedModel,
+            selected = displayModel,
             onSelect = {
                 onModelChange(it)
                 picker = null
@@ -1354,7 +1395,7 @@ private fun AgentRuntimeBar(
         RuntimePicker.Reasoning -> RuntimeChoiceDialog(
             title = strings.chooseReasoning,
             options = reasoningOptions.map { RuntimeChoice(it, reasoningLabel(it, strings), reasoningDescription(it, strings)) },
-            selected = agent?.reasoningEffort ?: DEFAULT_REASONING_EFFORT,
+            selected = displayReasoningEffort,
             onSelect = {
                 onReasoningEffortChange(it)
                 picker = null
@@ -1365,7 +1406,7 @@ private fun AgentRuntimeBar(
         RuntimePicker.ServiceTier -> RuntimeChoiceDialog(
             title = strings.chooseSpeed,
             options = serviceTierOptions.map { RuntimeChoice(it, serviceTierLabel(it, strings), serviceTierDescription(it, strings)) },
-            selected = agent?.serviceTier ?: DEFAULT_SERVICE_TIER,
+            selected = displayServiceTier,
             onSelect = {
                 onServiceTierChange(it)
                 picker = null

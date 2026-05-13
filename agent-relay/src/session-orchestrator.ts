@@ -286,6 +286,12 @@ function usablePathString(value: unknown): string {
   return trimmed && trimmed.toLowerCase() !== 'null' ? trimmed : '';
 }
 
+function usableString(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  return trimmed && trimmed.toLowerCase() !== 'null' ? trimmed : '';
+}
+
 function readCodexDesktopState(): Record<string, unknown> | null {
   try {
     if (!fs.existsSync(CODEX_GLOBAL_STATE_PATH)) return null;
@@ -1741,15 +1747,19 @@ export class SessionOrchestrator {
     const messages = mergeMessageHistory(turnsToMessages(messageSource), readSessionMessages(thread.path))
       .map(summarizeMessageForMobile);
     const summary = normalizeThreadSummary(thread);
+    const model = usableString(result?.model) || usableString(thread.model);
+    const approvalPolicy = usableString(result?.approvalPolicy) || usableString(thread.approvalPolicy) || 'never';
+    const serviceTier = usableString(result?.serviceTier) || usableString(thread.serviceTier) || 'default';
+    const reasoningEffort = usableString(result?.reasoningEffort) || usableString(thread.reasoningEffort) || 'medium';
     const status = inferThreadStatus(summary.status, messages);
     const activityLabel = status === 'working' ? inferThreadActivity(messages) : null;
     return {
       ...summary,
       status,
-      model: typeof result?.model === 'string' ? result.model : '',
-      approvalPolicy: typeof result?.approvalPolicy === 'string' ? result.approvalPolicy : 'never',
-      serviceTier: typeof result?.serviceTier === 'string' ? result.serviceTier : 'default',
-      reasoningEffort: typeof result?.reasoningEffort === 'string' ? result.reasoningEffort : 'medium',
+      model,
+      approvalPolicy,
+      serviceTier,
+      reasoningEffort,
       activityLabel,
       messages,
     };
@@ -1762,30 +1772,35 @@ export class SessionOrchestrator {
     const data = Array.isArray(result?.data) ? result.data : [];
     return data
       .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
-      .map((entry) => ({
-        id: typeof entry.id === 'string' ? entry.id : '',
-        model: typeof entry.model === 'string' ? entry.model : '',
-        displayName: typeof entry.displayName === 'string' ? entry.displayName : (typeof entry.model === 'string' ? entry.model : ''),
-        description: typeof entry.description === 'string' ? entry.description : '',
-        hidden: Boolean(entry.hidden),
-        defaultReasoningEffort: typeof entry.defaultReasoningEffort === 'string' ? entry.defaultReasoningEffort : 'medium',
-        supportedReasoningEfforts: Array.isArray(entry.supportedReasoningEfforts)
-          ? entry.supportedReasoningEfforts
-            .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
-            .map((item) => ({
-              reasoningEffort: typeof item.reasoningEffort === 'string' ? item.reasoningEffort : '',
-              description: typeof item.description === 'string' ? item.description : '',
-            }))
-          : [],
-        additionalSpeedTiers: Array.isArray(entry.additionalSpeedTiers)
-          ? entry.additionalSpeedTiers.filter((item): item is string => typeof item === 'string')
-          : [],
-        isDefault: Boolean(entry.isDefault),
-        supportsPersonality: Boolean(entry.supportsPersonality),
-        inputModalities: Array.isArray(entry.inputModalities)
-          ? entry.inputModalities.filter((item): item is string => typeof item === 'string')
-          : [],
-      }));
+      .map((entry) => {
+        const id = usableString(entry.id);
+        const model = usableString(entry.model) || id;
+        return {
+          id,
+          model,
+          displayName: usableString(entry.displayName) || model,
+          description: usableString(entry.description),
+          hidden: Boolean(entry.hidden),
+          defaultReasoningEffort: usableString(entry.defaultReasoningEffort) || 'medium',
+          supportedReasoningEfforts: Array.isArray(entry.supportedReasoningEfforts)
+            ? entry.supportedReasoningEfforts
+              .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+              .map((item) => ({
+                reasoningEffort: usableString(item.reasoningEffort),
+                description: usableString(item.description),
+              }))
+            : [],
+          additionalSpeedTiers: Array.isArray(entry.additionalSpeedTiers)
+            ? entry.additionalSpeedTiers.map(usableString).filter(Boolean)
+            : [],
+          isDefault: Boolean(entry.isDefault),
+          supportsPersonality: Boolean(entry.supportsPersonality),
+          inputModalities: Array.isArray(entry.inputModalities)
+            ? entry.inputModalities.map(usableString).filter(Boolean)
+            : [],
+        };
+      })
+      .filter((entry) => entry.model);
   }
 
   listAgents() {

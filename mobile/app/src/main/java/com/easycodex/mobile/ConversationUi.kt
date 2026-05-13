@@ -2,9 +2,14 @@ package com.easycodex.mobile
 
 import android.content.ClipData
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
@@ -23,7 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -41,6 +46,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -136,17 +142,9 @@ fun Conversation(
     val metrics = conversationLayoutMetrics(layoutMode)
     val strings = LocalAppStrings.current
     val listState = rememberLazyListState()
+    val scrollScope = rememberCoroutineScope()
     var filter by remember(agent?.id) { mutableStateOf(ConversationFilter.All) }
-    val messageCount = agent?.messages?.size ?: 0
-    val lastMessage = agent?.messages?.lastOrNull()
-    val lastMessageStreamMarker = lastMessage?.let { "${it.stableKey()}:${it.text.length}:${it.streaming}" }
-    LaunchedEffect(agent?.id, messageCount, lastMessageStreamMarker) {
-        if (messageCount <= 0) return@LaunchedEffect
-        val lastListIndex = messageCount
-        val visibleItems = listState.layoutInfo.visibleItemsInfo
-        val shouldFollowOutput = visibleItems.isEmpty() || (visibleItems.lastOrNull()?.index ?: 0) >= lastListIndex - 1
-        if (shouldFollowOutput) listState.scrollToItem(lastListIndex)
-    }
+    var initializedAtBottom by remember(agent?.id, filter) { mutableStateOf(false) }
 
     if (agent == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -165,43 +163,108 @@ fun Conversation(
         }
         }
     }
+    val filteredMessageKeys = remember(filteredMessages) { filteredMessages.uniqueLazyKeys() }
+    val lastListIndex = filteredMessages.size
+    val lastMessage = filteredMessages.lastOrNull()
+    val lastMessageStreamMarker = lastMessage?.let { "${it.stableKey()}:${it.text.length}:${it.streaming}" }
+    val isAtBottom by remember(listState, lastListIndex) {
+        derivedStateOf {
+            val visibleItems = listState.layoutInfo.visibleItemsInfo
+            visibleItems.isEmpty() || (visibleItems.lastOrNull()?.index ?: 0) >= lastListIndex
+        }
+    }
+    val shouldFollowOutput by remember(listState, lastListIndex) {
+        derivedStateOf {
+            val visibleItems = listState.layoutInfo.visibleItemsInfo
+            visibleItems.isEmpty() || (visibleItems.lastOrNull()?.index ?: 0) >= (lastListIndex - 1).coerceAtLeast(0)
+        }
+    }
+    LaunchedEffect(agent.id, filter, lastListIndex) {
+        if (lastListIndex > 0 && !initializedAtBottom) {
+            listState.animateScrollToItem(lastListIndex)
+            initializedAtBottom = true
+        }
+    }
+    LaunchedEffect(agent.id, filter, lastListIndex, lastMessageStreamMarker) {
+        if (lastListIndex > 0 && shouldFollowOutput) listState.animateScrollToItem(lastListIndex)
+    }
 
-    LazyColumn(
-        state = listState,
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(metrics.itemSpacing),
-        contentPadding = metrics.listPadding,
-    ) {
-        item {
-            ConversationStatusHeader(
-                agent = agent,
-                filter = filter,
-                notificationLevelState = notificationLevelState,
-                onFilterChange = { filter = it },
-                onInterrupt = onInterrupt,
-                onOpenDiffReview = onOpenDiffReview,
-                onNotificationLevelChange = onNotificationLevelChange,
-            )
-            if (!agent.activity.isNullOrBlank()) {
-                Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
-                    Text(agent.activity, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(metrics.itemSpacing),
+            contentPadding = metrics.listPadding,
+        ) {
+            item {
+                ConversationStatusHeader(
+                    agent = agent,
+                    filter = filter,
+                    notificationLevelState = notificationLevelState,
+                    onFilterChange = { filter = it },
+                    onInterrupt = onInterrupt,
+                    onOpenDiffReview = onOpenDiffReview,
+                    onNotificationLevelChange = onNotificationLevelChange,
+                )
+                AnimatedVisibility(
+                    visible = !agent.activity.isNullOrBlank(),
+                    enter = expandVertically(
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        expandFrom = Alignment.Top,
+                    ) + fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
+                    exit = shrinkVertically(
+                        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                        shrinkTowards = Alignment.Top,
+                    ) + fadeOut(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
+                ) {
+                    Column {
+                        Spacer(Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(agent.activity.orEmpty(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+                if (filter != ConversationFilter.All && filteredMessages.isEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(strings.noMessagesForFilter, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            if (filter != ConversationFilter.All && filteredMessages.isEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                Text(strings.noMessagesForFilter, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            itemsIndexed(
+                filteredMessages,
+                key = { index, message -> filteredMessageKeys.getOrNull(index) ?: "${message.stableKey()}#$index" },
+            ) { _, message ->
+                MessageBubble(
+                    message = message,
+                    metrics = metrics,
+                    onOpenPlan = { onOpenPlan(message) },
+                    onOpenDiffReview = onOpenDiffReview,
+                )
             }
         }
-        items(filteredMessages, key = { message -> message.stableKey() }) { message ->
-            MessageBubble(
-                message = message,
-                metrics = metrics,
-                onOpenPlan = { onOpenPlan(message) },
-                onOpenDiffReview = onOpenDiffReview,
-            )
+
+        AnimatedVisibility(
+            visible = lastListIndex > 0 && !isAtBottom,
+            enter = fadeIn() + scaleIn(),
+            exit = fadeOut() + scaleOut(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp),
+        ) {
+            FloatingActionButton(
+                onClick = {
+                    scrollScope.launch {
+                        listState.animateScrollToItem(lastListIndex)
+                    }
+                },
+                shape = CircleShape,
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Icon(Icons.Default.KeyboardArrowDown, contentDescription = strings.scrollToBottom)
+            }
         }
     }
 }
@@ -353,6 +416,21 @@ fun agentStatusLabel(agent: Agent): String {
 
 fun AgentMessage.stableKey(): String {
     return itemId ?: "${timestamp}_${role}_${type}"
+}
+
+private fun List<AgentMessage>.uniqueLazyKeys(): List<String> {
+    val totals = groupingBy { it.stableKey() }.eachCount()
+    val seen = mutableMapOf<String, Int>()
+    return map { message ->
+        val baseKey = message.stableKey()
+        if ((totals[baseKey] ?: 0) <= 1) {
+            baseKey
+        } else {
+            val occurrence = seen.getOrDefault(baseKey, 0)
+            seen[baseKey] = occurrence + 1
+            "$baseKey#$occurrence"
+        }
+    }
 }
 
 private data class MarkdownBlock(
@@ -608,7 +686,7 @@ private fun PlanMessageCard(message: AgentMessage, onOpenPlan: () -> Unit) {
         }
         Text(
             message.text.lineSequence().firstOrNull { it.isNotBlank() } ?: "可以单独查看完整计划。",
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodyLarge,
             maxLines = 3,
             overflow = TextOverflow.Ellipsis,
         )
@@ -676,8 +754,23 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        AnimatedVisibility(visible = expanded, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(
+                animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                expandFrom = Alignment.Top,
+            ) + fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
+            exit = shrinkVertically(
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                shrinkTowards = Alignment.Top,
+            ) + fadeOut(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
+        ) {
+            Column(
+                modifier = Modifier.animateContentSize(
+                    animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
+                ),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     AssistChip(
                         onClick = { copyText(detail.body.ifBlank { message.text }) },
@@ -710,7 +803,7 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
                             .heightIn(max = 260.dp)
                             .verticalScroll(rememberScrollState())
                             .padding(10.dp),
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodyMedium,
                         fontFamily = FontFamily.Monospace,
                     )
                 }
@@ -775,7 +868,12 @@ fun MarkdownMessageContent(text: String, previewLongContent: Boolean = false) {
         if (isLong && !expanded) messagePreviewText(text) else text
     }
     val blocks = remember(visibleText) { markdownBlocks(visibleText) }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        modifier = Modifier.animateContentSize(
+            animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
+        ),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         blocks.forEach { block ->
             if (block.isCode) {
                 MarkdownCodeBlock(block)
@@ -828,7 +926,9 @@ private fun MarkdownCodeBlock(block: MarkdownBlock) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(8.dp),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .animateContentSize(animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing)),
     ) {
         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -844,7 +944,7 @@ private fun MarkdownCodeBlock(block: MarkdownBlock) {
             }
             Text(
                 visibleText.ifBlank { "..." },
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodyMedium,
                 fontFamily = FontFamily.Monospace,
             )
             if (isLong) {
@@ -875,7 +975,7 @@ private fun MarkdownTextLine(line: String) {
             1 -> MaterialTheme.typography.titleLarge
             2 -> MaterialTheme.typography.titleMedium
             3 -> MaterialTheme.typography.titleSmall
-            else -> MaterialTheme.typography.bodyMedium
+            else -> MaterialTheme.typography.bodyLarge
         },
         fontWeight = if (headingLevel > 0) FontWeight.SemiBold else null,
     )

@@ -2,126 +2,109 @@
   <img src="mobile/app/src/main/res/drawable-nodpi/easy_code_app_icon.png" alt="EasyCodex 標識" width="96" height="96">
 
   <h1>EasyCodex</h1>
-  <p><strong>讓 Codex 在電腦上執行，用 Android 手機遠端掌控。</strong></p>
+  <p><strong>在電腦上啟動 Codex，用 Android 手機遠端控制。</strong></p>
   <p>
     <a href="README.md">English</a> |
     <a href="README.zh-CN.md">简体中文</a> |
     <a href="README.zh-TW.md">繁體中文</a>
   </p>
   <p>
-    <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/Ryan-Laws/easycodex?style=flat-square"></a>
-    <a href="https://github.com/Ryan-Laws/easycodex/releases"><img alt="Release" src="https://img.shields.io/github/v/release/Ryan-Laws/easycodex?include_prereleases&style=flat-square"></a>
-    <a href="https://github.com/Ryan-Laws/easycodex/actions/workflows/release-desktop-relay.yml"><img alt="Desktop Relay workflow" src="https://img.shields.io/github/actions/workflow/status/Ryan-Laws/easycodex/release-desktop-relay.yml?branch=main&label=desktop%20relay&style=flat-square"></a>
-    <a href="package.json"><img alt="Node.js >=18" src="https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white&style=flat-square"></a>
-    <a href="mobile/app/build.gradle.kts"><img alt="Android API 26+" src="https://img.shields.io/badge/android-API%2026%2B-3DDC84?logo=android&logoColor=white&style=flat-square"></a>
-    <a href="mobile/"><img alt="Kotlin" src="https://img.shields.io/badge/kotlin-native%20android-7F52FF?logo=kotlin&logoColor=white&style=flat-square"></a>
-    <a href="mobile/app/build.gradle.kts"><img alt="Jetpack Compose" src="https://img.shields.io/badge/Jetpack%20Compose-Material%203-4285F4?logo=jetpackcompose&logoColor=white&style=flat-square"></a>
-    <a href="agent-relay/"><img alt="TypeScript" src="https://img.shields.io/badge/typescript-relay-3178C6?logo=typescript&logoColor=white&style=flat-square"></a>
-    <a href="desktop-relay/"><img alt="Electron" src="https://img.shields.io/badge/electron-desktop%20relay-47848F?logo=electron&logoColor=white&style=flat-square"></a>
+    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.0"><img alt="Release v0.1.0" src="https://img.shields.io/badge/release-v0.1.0-2f80ed?style=flat-square"></a>
+    <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green?style=flat-square"></a>
+    <img alt="Windows" src="https://img.shields.io/badge/Windows-relay%20app-0078D4?logo=windows&logoColor=white&style=flat-square">
+    <img alt="Android" src="https://img.shields.io/badge/Android-mobile%20APK-3DDC84?logo=android&logoColor=white&style=flat-square">
+    <img alt="macOS" src="https://img.shields.io/badge/macOS-relay%20app-000000?logo=apple&logoColor=white&style=flat-square">
+    <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-Android-7F52FF?logo=kotlin&logoColor=white&style=flat-square">
+    <img alt="Electron" src="https://img.shields.io/badge/Electron-desktop%20relay-47848F?logo=electron&logoColor=white&style=flat-square">
     <a href="https://visitor-badge.laobi.icu/"><img alt="Visitors" src="https://visitor-badge.laobi.icu/badge?page_id=Ryan-Laws.easycodex"></a>
+  </p>
+  <p>
+    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.0"><strong>下載 EasyCodex 0.1.0</strong></a>
+    ·
+    <a href="https://github.com/Ryan-Laws/easycodex/releases">全部 Release</a>
   </p>
 </div>
 
-EasyCodex 可以把 Android 手機變成 Codex 程式開發智能體的遠端控制台。Codex 執行環境和本機中繼仍然留在你自己的電腦和程式碼倉庫旁邊，行動端則提供原生介面，用來啟動對話、和智能體聊天、追蹤長時間任務、查看檔案和 diff，並回應核准請求。
+EasyCodex 是一個本機優先的 Codex 程式開發智能體遠端控制應用。你在電腦上執行桌面端中繼，在 Android 手機上安裝行動端，掃描 QR Code 連線後，就可以用手機管理 Codex 對話，而真正的智能體執行仍然留在你的電腦上。
 
-它適合希望 Codex 在本機持續工作，同時又不想一直守在終端視窗前的開發者。
+目前公開版本已經提供可直接使用的 Windows 中繼程式和 Android APK。一般使用者不需要 clone 倉庫才能體驗。
 
-## 專案數據
+## 安裝 EasyCodex
 
-| 指標 | Badge |
-| --- | --- |
-| 訪問量 | ![Visitors](https://visitor-badge.laobi.icu/badge?page_id=Ryan-Laws.easycodex) |
-| Stars | ![GitHub stars](https://img.shields.io/github/stars/Ryan-Laws/easycodex?style=social) |
-| Forks | ![GitHub forks](https://img.shields.io/github/forks/Ryan-Laws/easycodex?style=social) |
-| 最新 Release | ![GitHub release](https://img.shields.io/github/v/release/Ryan-Laws/easycodex?include_prereleases) |
-| License | ![GitHub license](https://img.shields.io/github/license/Ryan-Laws/easycodex) |
-| 桌面端發布流程 | ![GitHub Actions workflow status](https://img.shields.io/github/actions/workflow/status/Ryan-Laws/easycodex/release-desktop-relay.yml?branch=main) |
+從 [EasyCodex 0.1.0](https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.0) 下載目前版本。在 GitHub 頁面上，也可以從倉庫右側的 **Releases** 入口進入發布頁，再選擇最新的 EasyCodex 版本。
 
-## 為什麼使用 EasyCodex
+| 平台 | 下載 | 用途 |
+| --- | --- | --- |
+| Windows | [`EasyCodex.Relay.Setup.0.1.0.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.Setup.0.1.0.exe) | 推薦的 Windows 桌面端中繼安裝包 |
+| Windows | [`EasyCodex.Relay.0.1.0.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.0.1.0.exe) | 免安裝可攜版 Windows 中繼 |
+| Android | [`EasyCodex.Mobile.0.1.0.apk`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Mobile.0.1.0.apk) | Android 手機應用 |
+| macOS | [`EasyCodex.Relay-0.1.0-arm64.dmg`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay-0.1.0-arm64.dmg) | Apple Silicon 桌面端中繼 |
+| macOS | [`EasyCodex.Relay-0.1.0-arm64-mac.zip`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay-0.1.0-arm64-mac.zip) | macOS 中繼壓縮包 |
 
-- 讓 Codex 智能體繼續在電腦上執行，同時用手機控制它們。
-- 不必一直坐在電腦前，也能追蹤串流回覆和長時間程式開發任務。
-- 在原生 Android 介面中管理多個智能體、Codex 執行緒、工作目錄、模型和核准設定。
-- 在做決定前查看工作區檔案、diff、分支和 Git worktree。
-- 敏感執行保持在本機：中繼執行在你的倉庫旁邊，並要求用戶端提供 API Key。
+## 快速開始
 
-## 功能特色
+1. 在電腦上安裝並登入 OpenAI Codex CLI。
+2. 在 Windows 或 macOS 上安裝並開啟 **EasyCodex Relay**。
+3. 在桌面端應用裡點擊啟動中繼。它會顯示中繼狀態、連線位址、API Key 和 QR Code。
+4. 在 Android 手機上安裝 `EasyCodex.Mobile.0.1.0.apk`。
+5. 用手機掃描 QR Code，或在應用內開啟連線連結。
+6. 選擇工作區，建立或恢復 Codex 對話，然後用手機控制智能體。
 
-- 建立、恢復、中斷和停止多個 Codex 智能體對話。
-- 即時串流接收來自 `codex app-server` 的智能體回覆。
-- 智能體忙碌時可將訊息加入佇列。
-- 在手機上回應 Codex 請求的操作核准。
-- 瀏覽檔案、讀取工作區內容、查看 Git diff、檢查分支，並使用 Git worktree。
-- 透過掃描 QR Code 或開啟 `easycodex://connect` deep link 完成連線。
+手機不會直接執行 Codex。它透過 WebSocket 連線到桌面端中繼，由中繼在本機倉庫旁邊啟動 `codex app-server`。
+
+## 你可以做什麼
+
+- 建立、恢復、中斷和停止 Codex 智能體對話。
+- 在手機上即時查看 Codex 串流回覆。
+- 智能體忙碌時繼續佇列傳送訊息。
+- 在本機操作執行前，透過手機處理核准提示。
+- 瀏覽工作區檔案、檢查 Git 狀態、查看 diff，並使用分支和 worktree。
 - 在任務完成時接收本機中繼事件和可選的手機通知。
-- 使用 Windows 和 macOS 的 Electron 桌面端啟動並監控本機中繼。
-- 偏好命令列時，也可以使用終端優先的安裝腳本。
+- 透過 QR Code 或 `easycodex://connect` deep link 快速配對。
 
 ## 技術棧
 
 | 模組 | 技術 |
 | --- | --- |
 | Android 應用 | Kotlin、原生 Android、Jetpack Compose、Material 3、OkHttp、Google Code Scanner |
+| 桌面端中繼 | Electron、electron-builder、內建本機中繼啟動器 |
 | Agent Relay | Node.js 18+、TypeScript、Express、`ws`、`simple-git`、Codex `app-server` JSON-RPC |
-| 桌面端中繼 | Electron、electron-builder、本機 QR Code 連線介面 |
-| CLI 與安裝腳本 | Node.js ESM 腳本，命令對 PowerShell 友善 |
+| 開發工具 | PowerShell 友善的 Node.js 腳本和 GitHub Actions 發布建置 |
 
 ## 架構
 
 ```text
-Android app <-> Agent Relay <-> codex app-server <-> Codex thread
+Android app <-> EasyCodex Relay <-> codex app-server <-> Codex thread
 ```
 
-手機不會直接啟動 Codex。它會透過 WebSocket 和 relay API Key 連線到本機 Agent Relay。中繼負責驗證用戶端、啟動和管理 `codex app-server`、轉換 JSON-RPC 事件，並向應用程式暴露明確的檔案、Git、倉庫、模型和執行環境操作。
-
-## 快速開始
-
-### 1. 使用桌面端中繼
-
-```powershell
-Set-Location desktop-relay
-npm install
-npm start
-```
-
-桌面端中繼會提供一個本機控制視窗，顯示中繼狀態、連線資訊和用於手機配對的 QR Code。
-
-### 2. 使用終端安裝流程
-
-在倉庫根目錄執行：
-
-```powershell
-node scripts/setup-and-start.mjs
-```
-
-腳本會詢問中繼連接埠，在你留空時自動產生 API Key，可選安裝相依套件，啟動中繼，並列印 QR Code 連線資訊。
-
-### 3. 手動執行全部元件
-
-啟動 Agent Relay：
-
-```powershell
-Set-Location agent-relay
-npm install
-npm run dev
-```
-
-用 Android Studio 建置或執行 Android 應用。如果本機 `PATH` 已設定 Gradle 和 Android SDK，也可以執行：
-
-```powershell
-Set-Location mobile
-gradle assembleDebug
-```
-
-用手機相機掃描中繼列印的 QR Code。Android 會開啟 EasyCodex，並自動保存 WebSocket 位址和 API Key。
+中繼採用本機優先設計。它使用 relay API Key 驗證行動端用戶端，啟動和管理 Codex 程序，轉換 Codex JSON-RPC 事件，並向應用程式暴露明確的檔案、Git、工作區操作。
 
 ## 環境需求
 
-- Node.js 18 或更新版本
-- 已安裝並登入 OpenAI Codex CLI
+- 用於執行桌面端中繼的 Windows 或 macOS 電腦
 - Android 實體裝置或模擬器
-- 電腦和手機在同一個可信網路內，或透過 Tailscale 等私人網路連線
-- 用於建置行動端的 Android Studio，或已設定好的 Android SDK/Gradle 環境
+- 電腦上已安裝並登入 OpenAI Codex CLI
+- 手機和電腦在同一個可信網路內，或透過 Tailscale 等私人網路連線
+
+## 從源碼建置
+
+大多數使用者應該從 Release 頁面安裝。只有在開發 EasyCodex 本身時才需要這些命令。
+
+```powershell
+# 桌面端中繼
+Set-Location desktop-relay
+npm install
+npm start
+
+# Agent Relay
+Set-Location agent-relay
+npm install
+npm run build
+
+# Android 應用
+Set-Location mobile
+gradle assembleDebug
+```
 
 ## 倉庫結構
 
@@ -133,59 +116,18 @@ EasyCodex/
 └── scripts/         CLI 和本機安裝輔助腳本
 ```
 
-## 常用指令
-
-```powershell
-# Agent Relay
-Set-Location agent-relay
-npm run build
-npm run dev
-
-# 桌面端中繼
-Set-Location desktop-relay
-npm start
-npm run dist:win
-
-# Android 應用
-Set-Location mobile
-gradle assembleDebug
-```
-
 ## 安全模型
 
 - 中繼要求 WebSocket 用戶端和健康檢查提供 API Key。
 - 請把中繼存取視為高權限存取：它可以讀取工作區檔案、檢查 Git 狀態，並在工作目錄中啟動 Codex。
 - 日常使用建議放在可信 LAN 或私人網路內。
-- 如果要在私人網路之外暴露中繼，請透過正確設定的反向代理使用 `wss://`。
-- 不要提交 API Key、中繼金鑰、OpenAI Token 或私人環境檔案。
+- 不要提交 API Key、中繼金鑰、OpenAI Token、本機 agent 狀態或私人環境檔案。
 
 ## 文件
 
 - [APP.md](APP.md) 介紹應用架構和本機執行模型。
 - [AGENT.md](AGENT.md) 說明由中繼管理的 Codex 智能體、WebSocket action 和執行環境行為。
 - [desktop-relay/README.md](desktop-relay/README.md) 說明桌面端中繼的打包和發布建置。
-
-## 貢獻
-
-歡迎貢獻。請保持改動聚焦，遵循現有專案結構，除非能明確改善功能或維護體驗，否則不要引入新的相依套件。
-
-提交 Pull Request 前，請針對你修改的區域執行最相關的檢查：
-
-```powershell
-# Relay
-Set-Location agent-relay
-npm run build
-
-# Android
-Set-Location mobile
-gradle assembleDebug
-
-# 桌面端中繼
-Set-Location desktop-relay
-npm run dist:win
-```
-
-如果修改了中繼智能體行為或 WebSocket action，請更新 [AGENT.md](AGENT.md)。如果修改了應用架構，請更新 [APP.md](APP.md)。
 
 ## 授權
 

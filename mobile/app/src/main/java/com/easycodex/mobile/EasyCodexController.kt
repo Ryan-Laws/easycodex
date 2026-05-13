@@ -60,6 +60,7 @@ class EasyCodexController(private val context: android.content.Context) {
     private var agentsRefreshQueued = false
     private var agentsRefreshRunnable: Runnable? = null
     private val prefs = context.getSharedPreferences("easycodex", android.content.Context.MODE_PRIVATE)
+        .also(::applyDaylightThemeDefault)
     private val preferenceListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == PREF_APP_LANGUAGE) {
             val nextLanguage = prefs.getString(PREF_APP_LANGUAGE, DEFAULT_APP_LANGUAGE)?.ifBlank { DEFAULT_APP_LANGUAGE }
@@ -475,7 +476,7 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     fun reasoningOptionsFor(agent: Agent?): List<String> {
-        val selectedModel = agent?.model ?: defaultModel
+        val selectedModel = agent?.model?.takeIf { it.isNotBlank() } ?: defaultModel
         val fromModel = codexModels.firstOrNull { it.model == selectedModel }?.supportedReasoningEfforts
             ?.filter { it.isNotBlank() }
             .orEmpty()
@@ -484,7 +485,7 @@ class EasyCodexController(private val context: android.content.Context) {
 
     fun serviceTierOptionsFor(agent: Agent?): List<String> {
         if (!runtimeCapabilities.supportsServiceTier) return emptyList()
-        val selectedModel = agent?.model ?: defaultModel
+        val selectedModel = agent?.model?.takeIf { it.isNotBlank() } ?: defaultModel
         val additional = codexModels.firstOrNull { it.model == selectedModel }?.additionalSpeedTiers
             ?.filter { it.isNotBlank() }
             .orEmpty()
@@ -498,7 +499,7 @@ class EasyCodexController(private val context: android.content.Context) {
             draftServiceTier = if (draftServiceTier in speedTiers) draftServiceTier else DEFAULT_SERVICE_TIER
             return
         }
-        val currentTier = normalizeServiceTier(activeAgent?.serviceTier ?: defaultServiceTier)
+        val currentTier = normalizeServiceTier(activeAgent?.serviceTier?.takeIf { it.isNotBlank() } ?: defaultServiceTier)
         val speedTiers = serviceTierOptionsFor(activeAgent?.copy(model = model))
         val nextTier = if (currentTier in speedTiers) currentTier else DEFAULT_SERVICE_TIER
         updateActiveConfig(model = model, serviceTier = nextTier)
@@ -2123,12 +2124,12 @@ class EasyCodexController(private val context: android.content.Context) {
         return Agent(
             id = json.optString("id"),
             name = json.optString("name", "EasyCodex"),
-            model = json.optString("model", DEFAULT_AGENT_MODEL),
+            model = json.optString("model", DEFAULT_AGENT_MODEL).ifBlank { DEFAULT_AGENT_MODEL },
             cwd = json.optString("cwd", "."),
             projectRoot = cleanNullablePath(json.optString("projectRoot")),
             status = json.optString("status", "stopped"),
-            serviceTier = normalizeServiceTier(json.optString("serviceTier", DEFAULT_SERVICE_TIER)),
-            reasoningEffort = json.optString("reasoningEffort", DEFAULT_REASONING_EFFORT),
+            serviceTier = normalizeServiceTier(json.optString("serviceTier", DEFAULT_SERVICE_TIER).ifBlank { DEFAULT_SERVICE_TIER }),
+            reasoningEffort = json.optString("reasoningEffort", DEFAULT_REASONING_EFFORT).ifBlank { DEFAULT_REASONING_EFFORT },
             activity = json.optString("activityLabel")
                 .ifBlank { json.optString("activity") }
                 .takeIf { it.isNotBlank() },
@@ -2155,12 +2156,17 @@ class EasyCodexController(private val context: android.content.Context) {
         return Agent(
             id = "codex_$threadId",
             name = name,
-            model = json.optString("model", defaultModel.ifBlank { DEFAULT_AGENT_MODEL }),
+            model = json.optString("model", defaultModel.ifBlank { DEFAULT_AGENT_MODEL })
+                .ifBlank { defaultModel.ifBlank { DEFAULT_AGENT_MODEL } },
             cwd = cwd,
             projectRoot = cleanNullablePath(json.optString("projectRoot")),
             status = codexThreadStatus(json),
-            serviceTier = normalizeServiceTier(json.optString("serviceTier", defaultServiceTier.ifBlank { DEFAULT_SERVICE_TIER })),
-            reasoningEffort = json.optString("reasoningEffort", defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT }),
+            serviceTier = normalizeServiceTier(
+                json.optString("serviceTier", defaultServiceTier.ifBlank { DEFAULT_SERVICE_TIER })
+                    .ifBlank { defaultServiceTier.ifBlank { DEFAULT_SERVICE_TIER } },
+            ),
+            reasoningEffort = json.optString("reasoningEffort", defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT })
+                .ifBlank { defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT } },
             activity = json.optString("activityLabel")
                 .ifBlank { json.optString("activity") }
                 .takeIf { it.isNotBlank() },
@@ -2231,7 +2237,8 @@ class EasyCodexController(private val context: android.content.Context) {
         return CodexModelOption(
             model = model,
             displayName = json.optString("displayName", model).ifBlank { model },
-            defaultReasoningEffort = json.optString("defaultReasoningEffort", DEFAULT_REASONING_EFFORT),
+            defaultReasoningEffort = json.optString("defaultReasoningEffort", DEFAULT_REASONING_EFFORT)
+                .ifBlank { DEFAULT_REASONING_EFFORT },
             supportedReasoningEfforts = parsedEfforts,
             additionalSpeedTiers = parsedSpeedTiers,
             isDefault = json.optBoolean("isDefault", false),
@@ -2453,6 +2460,35 @@ class EasyCodexController(private val context: android.content.Context) {
         )
     }
 
+    private fun List<AgentMessage>.indexOfLastCollapsibleDuplicate(incoming: AgentMessage): Int {
+        if (!incoming.isCollapsibleDuplicateCandidate()) return -1
+        val incomingKey = incoming.collapsibleDuplicateKey()
+        return indexOfLast { existing ->
+            existing.isCollapsibleDuplicateCandidate() && existing.collapsibleDuplicateKey() == incomingKey
+        }
+    }
+
+    private fun AgentMessage.isCollapsibleDuplicateCandidate(): Boolean {
+        if (role != "agent") return false
+        return type in setOf("command", "command_output", "thinking", "status") && text.collapsibleTextKey(type).isNotBlank()
+    }
+
+    private fun AgentMessage.collapsibleDuplicateKey(): Triple<String, String, String> {
+        return Triple(role, type, text.collapsibleTextKey(type))
+    }
+
+    private fun String.collapsibleTextKey(type: String): String {
+        val normalized = trim()
+            .replace(Regex("\\s+"), " ")
+            .trimEnd('。', '.', '!')
+        return when {
+            type == "command" && normalized in setOf("正在运行命令", "命令已开始执行", "命令执行完成") -> "command_placeholder"
+            type == "command_output" && normalized.contains("命令") && normalized.contains("输出") && (normalized.contains("省略") || normalized.contains("返回")) -> "command_output_placeholder"
+            type == "thinking" && normalized in setOf("正在思考中", "正在思考中...") -> "thinking_placeholder"
+            else -> normalized
+        }
+    }
+
     private fun updateAgent(agentId: String, transform: (Agent) -> Agent) {
         val index = agents.indexOfFirst { it.id == agentId }
         if (index >= 0) {
@@ -2479,7 +2515,17 @@ class EasyCodexController(private val context: android.content.Context) {
 
     private fun appendMessage(agentId: String, message: AgentMessage) {
         val capped = message.copy(text = capMobileMessageText(simplifyUserMessageForDisplay(message.text, message.role, message.type), message.type))
-        updateAgent(agentId) { it.copy(messages = it.messages + capped, updatedAt = capped.timestamp) }
+        updateAgent(agentId) { agent ->
+            val nextMessages = agent.messages.toMutableList()
+            val duplicateIndex = nextMessages.indexOfLastCollapsibleDuplicate(capped)
+            if (duplicateIndex >= 0) {
+                val existing = nextMessages[duplicateIndex]
+                nextMessages[duplicateIndex] = mergeMessage(existing, capped)
+            } else {
+                nextMessages.add(capped)
+            }
+            agent.copy(messages = nextMessages, updatedAt = capped.timestamp)
+        }
     }
 
     private fun appendDelta(agentId: String, itemId: String, delta: String, type: String) {
@@ -2522,8 +2568,11 @@ class EasyCodexController(private val context: android.content.Context) {
         flushPendingDelta(agentId, itemId)
         val cappedIncoming = capMobileMessageText(text, type)
         updateAgent(agentId) { agent ->
-            val index = agent.messages.indexOfLast { it.itemId == itemId }
             val nextMessages = agent.messages.toMutableList()
+            val incoming = AgentMessage("agent", type, cappedIncoming, System.currentTimeMillis(), itemId, streaming)
+            val index = nextMessages.indexOfLast { it.itemId == itemId }
+                .takeIf { it >= 0 }
+                ?: nextMessages.indexOfLastCollapsibleDuplicate(incoming)
             if (index >= 0) {
                 val existing = nextMessages[index]
                 val nextText = if (existing.type == type) {
@@ -2531,9 +2580,9 @@ class EasyCodexController(private val context: android.content.Context) {
                 } else {
                     cappedIncoming
                 }
-                nextMessages[index] = existing.copy(text = nextText, type = type, streaming = streaming)
+                nextMessages[index] = existing.copy(text = nextText, type = type, itemId = itemId.ifBlank { existing.itemId.orEmpty() }, streaming = streaming)
             } else {
-                nextMessages.add(AgentMessage("agent", type, cappedIncoming, System.currentTimeMillis(), itemId, streaming))
+                nextMessages.add(incoming)
             }
             agent.copy(messages = nextMessages, updatedAt = System.currentTimeMillis())
         }

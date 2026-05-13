@@ -49,6 +49,8 @@ mobile/local.properties
 *.key
 
 # build and release output
+.release-secrets/
+.release-v*/
 agent-relay/dist/
 desktop-relay/release/
 desktop-relay/dist/

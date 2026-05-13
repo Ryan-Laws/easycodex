@@ -57,10 +57,13 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.Translate
+import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
@@ -130,6 +133,7 @@ const val PREF_THEME_COLOR = "theme_color"
 const val PREF_APP_LAYOUT = "app_layout"
 const val PREF_OLED_MODE = "oled_mode"
 const val PREF_USAGE_GUIDE_SEEN = "usage_guide_seen"
+const val PREF_DAYLIGHT_THEME_DEFAULT_APPLIED = "daylight_theme_default_applied"
 
 const val DEFAULT_RELAY_URL = "ws://10.0.2.2:3001"
 const val DEFAULT_AGENT_MODEL = "gpt-5.5"
@@ -148,6 +152,15 @@ private fun normalizeDefaultServiceTier(value: String): String {
         "", "auto", "standard", "flex" -> DEFAULT_SERVICE_TIER
         else -> value.trim().lowercase()
     }
+}
+
+fun applyDaylightThemeDefault(prefs: android.content.SharedPreferences) {
+    if (prefs.getBoolean(PREF_DAYLIGHT_THEME_DEFAULT_APPLIED, false)) return
+    prefs.edit()
+        .putString(PREF_THEME_MODE, DEFAULT_THEME_MODE)
+        .putBoolean(PREF_OLED_MODE, false)
+        .putBoolean(PREF_DAYLIGHT_THEME_DEFAULT_APPLIED, true)
+        .apply()
 }
 
 data class EasyCodexConnectionConfig(
@@ -232,6 +245,9 @@ private enum class SettingsDestination {
     Connection,
     SessionDefaults,
     Notifications,
+    Language,
+    Theme,
+    ChatLayout,
     App,
 }
 
@@ -239,7 +255,10 @@ private enum class SettingsDestination {
 @Composable
 fun SettingsApp(onClose: () -> Unit) {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences(EASY_CODEX_PREFS, android.content.Context.MODE_PRIVATE) }
+    val prefs = remember {
+        context.getSharedPreferences(EASY_CODEX_PREFS, android.content.Context.MODE_PRIVATE)
+            .also(::applyDaylightThemeDefault)
+    }
     var relayUrl by remember { mutableStateOf(prefs.getString(PREF_RELAY_URL, DEFAULT_RELAY_URL) ?: DEFAULT_RELAY_URL) }
     var apiKey by remember { mutableStateOf(prefs.getString(PREF_API_KEY, "") ?: "") }
     var defaultModel by remember { mutableStateOf(prefs.getString(PREF_DEFAULT_MODEL, DEFAULT_AGENT_MODEL) ?: DEFAULT_AGENT_MODEL) }
@@ -425,6 +444,9 @@ fun SettingsApp(onClose: () -> Unit) {
                                     SettingsDestination.Connection -> strings.connectionSettings
                                     SettingsDestination.SessionDefaults -> strings.sessionDefaults
                                     SettingsDestination.Notifications -> strings.notifications
+                                    SettingsDestination.Language -> strings.appLanguage
+                                    SettingsDestination.Theme -> strings.themeMode
+                                    SettingsDestination.ChatLayout -> strings.chatLayout
                                     SettingsDestination.App -> strings.app
                                     null -> strings.settings
                                 },
@@ -489,6 +511,30 @@ fun SettingsApp(onClose: () -> Unit) {
                                     subtitle = strings.notificationsSubtitle,
                                     icon = Icons.Default.Notifications,
                                     onClick = { destination = SettingsDestination.Notifications },
+                                )
+                            }
+                            item {
+                                SettingsMenuItem(
+                                    title = strings.appLanguage,
+                                    subtitle = strings.appLanguageSubtitle,
+                                    icon = Icons.Default.Translate,
+                                    onClick = { destination = SettingsDestination.Language },
+                                )
+                            }
+                            item {
+                                SettingsMenuItem(
+                                    title = strings.themeMode,
+                                    subtitle = strings.themeSubtitle,
+                                    icon = Icons.Default.Palette,
+                                    onClick = { destination = SettingsDestination.Theme },
+                                )
+                            }
+                            item {
+                                SettingsMenuItem(
+                                    title = strings.chatLayout,
+                                    subtitle = strings.chatLayoutSubtitle,
+                                    icon = Icons.Default.ViewAgenda,
+                                    onClick = { destination = SettingsDestination.ChatLayout },
                                 )
                             }
                             item {
@@ -654,16 +700,12 @@ fun SettingsApp(onClose: () -> Unit) {
                             }
                         }
 
-                        SettingsDestination.App -> item {
+                        SettingsDestination.Language -> item {
                             SettingsSection(
-                                title = strings.app,
-                                subtitle = strings.appSubtitle,
-                                icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                title = strings.appLanguage,
+                                subtitle = strings.appLanguageSubtitle,
+                                icon = { Icon(Icons.Default.Translate, contentDescription = null) },
                             ) {
-                                InfoRow(title = strings.version, detail = "1.0.0")
-                                InfoRow(title = strings.connectionInstructions, detail = strings.connectionInstructionsDetail)
-                                HorizontalDivider()
-                                Text(strings.appLanguage, style = MaterialTheme.typography.labelLarge)
                                 ChipOptionRow(
                                     options = appLanguageOptions().map { ChipOption(it.value, it.label) },
                                     selected = appLanguage,
@@ -674,6 +716,22 @@ fun SettingsApp(onClose: () -> Unit) {
                                         saveState = appStringsFor(it).saved
                                     },
                                 )
+                                if (saveState.isNotBlank()) {
+                                    Text(
+                                        saveState,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
+                        }
+
+                        SettingsDestination.Theme -> item {
+                            SettingsSection(
+                                title = strings.themeMode,
+                                subtitle = strings.themeSubtitle,
+                                icon = { Icon(Icons.Default.Palette, contentDescription = null) },
+                            ) {
                                 Text(strings.themeMode, style = MaterialTheme.typography.labelLarge)
                                 ChipOptionRow(
                                     options = listOf(
@@ -708,7 +766,24 @@ fun SettingsApp(onClose: () -> Unit) {
                                         save()
                                     },
                                 )
-                                Text(strings.chatLayout, style = MaterialTheme.typography.labelLarge)
+                                SwitchSettingRow(
+                                    title = strings.oledBlack,
+                                    detail = strings.oledBlackDetail,
+                                    checked = oledMode,
+                                    onCheckedChange = {
+                                        oledMode = it
+                                        save()
+                                    },
+                                )
+                            }
+                        }
+
+                        SettingsDestination.ChatLayout -> item {
+                            SettingsSection(
+                                title = strings.chatLayout,
+                                subtitle = strings.chatLayoutSubtitle,
+                                icon = { Icon(Icons.Default.ViewAgenda, contentDescription = null) },
+                            ) {
                                 ChipOptionRow(
                                     options = listOf(
                                         ChipOption("compact", strings.compact),
@@ -721,15 +796,17 @@ fun SettingsApp(onClose: () -> Unit) {
                                         save()
                                     },
                                 )
-                                SwitchSettingRow(
-                                    title = strings.oledBlack,
-                                    detail = strings.oledBlackDetail,
-                                    checked = oledMode,
-                                    onCheckedChange = {
-                                        oledMode = it
-                                        save()
-                                    },
-                                )
+                            }
+                        }
+
+                        SettingsDestination.App -> item {
+                            SettingsSection(
+                                title = strings.app,
+                                subtitle = strings.appSubtitle,
+                                icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                            ) {
+                                InfoRow(title = strings.version, detail = "1.0.0")
+                                InfoRow(title = strings.connectionInstructions, detail = strings.connectionInstructionsDetail)
                                 HorizontalDivider()
                                 InfoRow(
                                     title = strings.dataAndSecurity,

@@ -1,5 +1,14 @@
 package com.easycodex.mobile
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,7 +33,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material3.AlertDialog
@@ -49,6 +57,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -257,13 +266,31 @@ fun AgentDrawer(
                         onCreate = { onCreateInProject(projectPath) },
                     )
                 }
-                if (expanded) {
-                    items(projectAgents, key = { agent -> "agent_${agent.id}" }) { agent ->
-                        DrawerAgentProjectRow(
-                            agent = agent,
-                            selected = agent.id == activeAgentId,
-                            onClick = { onSelect(agent.id) },
-                        )
+                item("project_agents_$projectPath") {
+                    AnimatedVisibility(
+                        visible = expanded,
+                        enter = expandVertically(
+                            animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                            expandFrom = Alignment.Top,
+                        ) + fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
+                        exit = shrinkVertically(
+                            animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                            shrinkTowards = Alignment.Top,
+                        ) + fadeOut(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
+                    ) {
+                        Column(
+                            modifier = Modifier.animateContentSize(
+                                animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
+                            ),
+                        ) {
+                            projectAgents.forEach { agent ->
+                                DrawerAgentProjectRow(
+                                    agent = agent,
+                                    selected = agent.id == activeAgentId,
+                                    onClick = { onSelect(agent.id) },
+                                )
+                            }
+                        }
                     }
                 }
                 item("project_spacer_$projectPath") {
@@ -351,9 +378,15 @@ fun ProjectHeader(
     onCreate: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "project header arrow rotation",
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .animateContentSize(animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing))
             .padding(start = 16.dp, end = 12.dp, top = 8.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -385,9 +418,11 @@ fun ProjectHeader(
             modifier = Modifier.size(36.dp),
         ) {
             Icon(
-                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                Icons.Default.KeyboardArrowDown,
                 contentDescription = if (expanded) strings.projectTaskCollapse else strings.projectTaskExpand,
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier
+                    .size(22.dp)
+                    .graphicsLayer(rotationZ = arrowRotation),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
