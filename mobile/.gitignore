@@ -1,5 +1,29 @@
 # Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
 
+# local AI agent / Codex workspace state
+.codex/
+.agents/
+.claude/
+.cursor/
+.continue/
+.aider*/
+AGENTS.local.md
+AGENT.local.md
+agents.json
+codex-agents.json
+codex-sessions/
+codex-threads/
+agent-sessions/
+agent-workspaces/
+sessions/
+threads/
+conversations/
+transcripts/
+*.session.json
+*.thread.json
+*.conversation.json
+*.transcript.json
+
 # Android / Kotlin
 .gradle/
 build/

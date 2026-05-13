@@ -65,6 +65,12 @@ const AGENTS_STATE_PATH = path.join(os.homedir(), '.easycodex', 'agents.json');
 const CODEX_GLOBAL_STATE_PATH = path.join(os.homedir(), '.codex', '.codex-global-state.json');
 const FILE_SNAPSHOT_LIMIT_BYTES = 512 * 1024;
 const FILE_DIFF_LIMIT_CHARS = 16000;
+const MOBILE_MESSAGE_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_MESSAGE_TEXT_LIMIT || 20000);
+const MOBILE_DETAIL_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_DETAIL_TEXT_LIMIT || 12000);
+const MOBILE_TRUNCATED_NOTICE = '\n\n[EasyCodex mobile truncated this long output. Use the desktop relay/Codex session for the full text.]';
+const PLAN_MODE_PREFIX = '请先进入计划模式处理下面的需求。';
+const PLAN_MODE_DEMAND_MARKER = '需求：';
+const CONTEXT_PLACEHOLDER = '已加载项目上下文。';
 
 interface PersistedAgent {
   id: string;
@@ -119,6 +125,104 @@ export interface CodexThreadDetail extends CodexThreadSummary {
   reasoningEffort: string;
   activityLabel?: string | null;
   messages: { role: string; type: string; text: string; timestamp: number; _itemId?: string }[];
+}
+
+function mobileTextLimit(type: string): number {
+  return ['command_output', 'file_change', 'sub_agent', 'thinking'].includes(type)
+    ? MOBILE_DETAIL_TEXT_LIMIT
+    : MOBILE_MESSAGE_TEXT_LIMIT;
+}
+
+function truncateForMobile(text: string, type: string): string {
+  const limit = mobileTextLimit(type);
+  if (!text || text.length <= limit || text.endsWith(MOBILE_TRUNCATED_NOTICE)) return text;
+  return `${text.slice(0, limit).trimEnd()}${MOBILE_TRUNCATED_NOTICE}`;
+}
+
+function diffSummary(text: string): { files: string[]; additions: number; deletions: number } {
+  const files = new Set<string>();
+  let additions = 0;
+  let deletions = 0;
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith('+') && !line.startsWith('+++')) additions += 1;
+    if (line.startsWith('-') && !line.startsWith('---')) deletions += 1;
+
+    const diffPath = line.match(/^diff --git a\/(.+?) b\/(.+)$/)?.[2];
+    const newPath = line.match(/^\+\+\+ b\/(.+)$/)?.[1];
+    const oldPath = line.match(/^--- a\/(.+)$/)?.[1];
+    const plainPath = !line.startsWith('+') && !line.startsWith('-') && !line.startsWith('@@')
+      ? line.trim()
+      : '';
+    for (const candidate of [diffPath, newPath, oldPath, plainPath]) {
+      const normalized = normalizeFilePath(candidate || '');
+      if (normalized && normalized !== '/dev/null' && (normalized.includes('/') || normalized.includes('\\') || normalized.includes('.'))) {
+        files.add(normalized);
+      }
+    }
+  }
+  return { files: Array.from(files), additions, deletions };
+}
+
+function summarizeFileChangeForMobile(text: string): string {
+  const summary = diffSummary(text);
+  if (summary.files.length === 0) return '文件已修改。';
+  const lines = summary.files.slice(0, 8).map((filePath) => {
+    const stats = summary.additions + summary.deletions > 0 ? ` (+${summary.additions} -${summary.deletions})` : '';
+    return `- ${filePath}${stats}`;
+  });
+  if (summary.files.length > lines.length) lines.push(`- 另有 ${summary.files.length - lines.length} 个文件`);
+  return `文件改动\n${lines.join('\n')}`;
+}
+
+function summarizeMessageForMobile<T extends { type: string; text: string }>(message: T): T {
+  if ((message as T & { role?: string }).role === 'user' || message.type === 'user') {
+    return { ...message, text: truncateForMobile(simplifyUserMessageForMobile(message.text), 'user') };
+  }
+  switch (message.type) {
+    case 'command':
+      return { ...message, text: '正在运行命令。' };
+    case 'command_output':
+      return { ...message, text: '命令已完成，输出已省略。' };
+    case 'file_change':
+      return { ...message, text: summarizeFileChangeForMobile(message.text) };
+    case 'sub_agent':
+      return { ...message, text: '子代理已返回结果，详细内容已省略。' };
+    case 'thinking':
+      return { ...message, text: '正在思考中。' };
+    default:
+      return { ...message, text: truncateForMobile(message.text, message.type) };
+  }
+}
+
+function simplifyUserMessageForMobile(text: string): string {
+  const withoutContext = stripInjectedContextForMobile(text.trim());
+  if (!withoutContext.startsWith(PLAN_MODE_PREFIX)) return withoutContext;
+  const markerIndex = withoutContext.lastIndexOf(PLAN_MODE_DEMAND_MARKER);
+  if (markerIndex < 0) return withoutContext;
+  return withoutContext.slice(markerIndex + PLAN_MODE_DEMAND_MARKER.length).trim() || withoutContext;
+}
+
+function stripInjectedContextForMobile(text: string): string {
+  if (!looksLikeInjectedContext(text)) return text;
+  const endMarkers = ['</environment_context>', '</INSTRUCTIONS>'];
+  let cursor = -1;
+  for (const marker of endMarkers) {
+    const index = text.lastIndexOf(marker);
+    if (index >= 0) cursor = Math.max(cursor, index + marker.length);
+  }
+  if (cursor < 0) return CONTEXT_PLACEHOLDER;
+  const rest = text.slice(cursor).trim();
+  if (!rest || looksLikeInjectedContext(rest)) return CONTEXT_PLACEHOLDER;
+  return rest;
+}
+
+function looksLikeInjectedContext(text: string): boolean {
+  const trimmed = text.trimStart();
+  return trimmed.startsWith('# AGENTS.md instructions for ') ||
+    trimmed.startsWith('<INSTRUCTIONS>') ||
+    trimmed.startsWith('<environment_context>') ||
+    trimmed.includes('\n<INSTRUCTIONS>') ||
+    trimmed.includes('\n<environment_context>');
 }
 
 function toTimestampMs(value: unknown, fallback = 0): number {
@@ -1634,7 +1738,8 @@ export class SessionOrchestrator {
       entries: (thread as Record<string, unknown>).entries ?? result.entries ?? result.items ?? result.events,
       turns: (thread as Record<string, unknown>).turns ?? result.turns,
     };
-    const messages = mergeMessageHistory(turnsToMessages(messageSource), readSessionMessages(thread.path));
+    const messages = mergeMessageHistory(turnsToMessages(messageSource), readSessionMessages(thread.path))
+      .map(summarizeMessageForMobile);
     const summary = normalizeThreadSummary(thread);
     const status = inferThreadStatus(summary.status, messages);
     const activityLabel = status === 'working' ? inferThreadActivity(messages) : null;
@@ -1742,7 +1847,7 @@ export class SessionOrchestrator {
       codexThreadId: agent.codexThreadId,
       codexPath: agent.codexPath,
       source: agent.source,
-      messages: agent.messages,
+      messages: agent.messages.map(summarizeMessageForMobile),
     };
   }
 

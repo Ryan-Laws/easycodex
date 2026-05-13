@@ -40,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,6 +55,34 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import java.util.Locale
+
+private data class DrawerAgentItem(
+    val id: String,
+    val name: String,
+    val projectPath: String,
+    val status: String,
+    val activity: String?,
+    val updatedAt: Long,
+) {
+    fun isBusy(): Boolean {
+        return status.trim().lowercase(Locale.ROOT) in setOf(
+            "initializing",
+            "resuming",
+            "working",
+            "running",
+            "active",
+            "in_progress",
+            "inprogress",
+            "in-progress",
+            "pending",
+            "processing",
+            "queued",
+            "starting",
+            "streaming",
+        )
+    }
+}
+
 @Composable
 fun AgentDrawer(
     agents: List<Agent>,
@@ -70,17 +99,35 @@ fun AgentDrawer(
         debouncedQuery = query
     }
     val normalizedQuery = debouncedQuery.trim().lowercase(Locale.ROOT)
-    val visibleAgents = if (normalizedQuery.isBlank()) {
-        agents
-    } else {
-        agents.filter { agent ->
-            listOf(agent.name, agent.cwd, agent.projectRoot.orEmpty(), agent.status, agent.activity.orEmpty())
-                .any { it.lowercase(Locale.ROOT).contains(normalizedQuery) }
+    val drawerAgents by remember {
+        derivedStateOf {
+            agents.map { agent ->
+                DrawerAgentItem(
+                    id = agent.id,
+                    name = agent.name,
+                    projectPath = cleanNullablePath(agent.projectRoot) ?: cleanNullablePath(agent.cwd) ?: DEFAULT_AGENT_CWD,
+                    status = agent.status,
+                    activity = agent.activity,
+                    updatedAt = agent.updatedAt,
+                )
+            }
         }
     }
-    val groupedAgents = visibleAgents
-        .sortedByDescending { it.updatedAt }
-        .groupBy { cleanNullablePath(it.projectRoot) ?: cleanNullablePath(it.cwd) ?: DEFAULT_AGENT_CWD }
+    val visibleAgents = remember(drawerAgents, normalizedQuery) {
+        if (normalizedQuery.isBlank()) {
+            drawerAgents
+        } else {
+            drawerAgents.filter { agent ->
+                listOf(agent.name, agent.projectPath, agent.status, agent.activity.orEmpty())
+                    .any { it.lowercase(Locale.ROOT).contains(normalizedQuery) }
+            }
+        }
+    }
+    val groupedAgents = remember(visibleAgents) {
+        visibleAgents
+            .sortedByDescending { it.updatedAt }
+            .groupBy { it.projectPath }
+    }
     val projectPaths = groupedAgents.keys.toList()
     var collapsedProjectPaths by remember { mutableStateOf(emptySet<String>()) }
     val allProjectsCollapsed = projectPaths.isNotEmpty() && projectPaths.all { it in collapsedProjectPaths }
@@ -212,7 +259,7 @@ fun AgentDrawer(
                 }
                 if (expanded) {
                     items(projectAgents, key = { agent -> "agent_${agent.id}" }) { agent ->
-                        AgentProjectRow(
+                        DrawerAgentProjectRow(
                             agent = agent,
                             selected = agent.id == activeAgentId,
                             onClick = { onSelect(agent.id) },
@@ -222,6 +269,74 @@ fun AgentDrawer(
                 item("project_spacer_$projectPath") {
                     Spacer(Modifier.height(8.dp))
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DrawerAgentProjectRow(agent: DrawerAgentItem, selected: Boolean, onClick: () -> Unit) {
+    val strings = LocalAppStrings.current
+    val rowColor = if (selected) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent
+    Surface(
+        color = rowColor,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 28.dp, end = 12.dp, top = 2.dp, bottom = 2.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = when {
+                    agent.isBusy() -> MaterialTheme.colorScheme.primary
+                    agent.status.equals("error", ignoreCase = true) -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.outlineVariant
+                },
+                modifier = Modifier.size(8.dp),
+            ) {}
+            Spacer(Modifier.width(10.dp))
+            Text(
+                agent.name,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.width(8.dp))
+            if (agent.isBusy()) {
+                Row(
+                    modifier = Modifier.weight(0.72f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(15.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        agent.activity?.takeIf { it.isNotBlank() } ?: "加载中",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            } else {
+                Text(
+                    relativeTime(agent.updatedAt, strings),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
             }
         }
     }

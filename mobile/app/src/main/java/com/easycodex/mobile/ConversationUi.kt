@@ -86,7 +86,10 @@ private enum class ConversationFilter {
 }
 
 private const val LONG_DETAIL_TEXT_LIMIT = 6_000
-private const val LONG_CODE_TEXT_LIMIT = 4_000
+private const val LONG_MESSAGE_TEXT_LIMIT = 1_600
+private const val MESSAGE_PREVIEW_TEXT_LIMIT = 900
+private const val MESSAGE_PREVIEW_LINE_LIMIT = 14
+private const val LONG_CODE_TEXT_LIMIT = 1_200
 
 private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMetrics {
     return when (layoutMode) {
@@ -407,36 +410,43 @@ private fun AgentMessage.detailDisplay(): DetailDisplay {
 }
 
 private fun commandDisplay(raw: String, isOutput: Boolean): DetailDisplay {
-    val lines = raw.lines()
-    val status = lines.firstOrNull { it.startsWith("status:", ignoreCase = true) }
-        ?.substringAfter(':')
-        ?.trim()
-        .orEmpty()
-    val exit = lines.firstOrNull { it.startsWith("exit:", ignoreCase = true) }
-        ?.substringAfter(':')
-        ?.trim()
-        .orEmpty()
-    val duration = lines.firstOrNull { it.startsWith("duration:", ignoreCase = true) }
-        ?.substringAfter(':')
-        ?.trim()
-        ?.let(::formatDurationToken)
-        .orEmpty()
-    val command = lines.firstOrNull { line ->
+    var status = ""
+    var exit = ""
+    var duration = ""
+    var command = ""
+    raw.lineSequence().take(80).forEach { line ->
         val trimmed = line.trim()
-        trimmed.isNotBlank() &&
-            !trimmed.startsWith("cwd:", ignoreCase = true) &&
-            !trimmed.startsWith("status:", ignoreCase = true) &&
-            !trimmed.startsWith("exit:", ignoreCase = true) &&
-            !trimmed.startsWith("duration:", ignoreCase = true)
-    }.orEmpty()
+        when {
+            status.isBlank() && trimmed.startsWith("status:", ignoreCase = true) -> {
+                status = trimmed.substringAfter(':').trim()
+            }
+
+            exit.isBlank() && trimmed.startsWith("exit:", ignoreCase = true) -> {
+                exit = trimmed.substringAfter(':').trim()
+            }
+
+            duration.isBlank() && trimmed.startsWith("duration:", ignoreCase = true) -> {
+                duration = formatDurationToken(trimmed.substringAfter(':').trim())
+            }
+
+            command.isBlank() &&
+                trimmed.isNotBlank() &&
+                !trimmed.startsWith("cwd:", ignoreCase = true) &&
+                !trimmed.startsWith("status:", ignoreCase = true) &&
+                !trimmed.startsWith("exit:", ignoreCase = true) &&
+                !trimmed.startsWith("duration:", ignoreCase = true) -> {
+                command = trimmed
+            }
+        }
+    }
     val title = when {
         isOutput && duration.isNotBlank() -> "已处理 $duration"
         isOutput -> status.ifBlank { "已处理" }
-        command.isNotBlank() -> command.trim()
+        command.isNotBlank() -> command
         else -> "命令"
     }
     val subtitleParts = if (isOutput) {
-        listOf(command.trim(), exit.takeIf { it.isNotBlank() }?.let { "exit $it" }.orEmpty(), status)
+        listOf(command, exit.takeIf { it.isNotBlank() }?.let { "exit $it" }.orEmpty(), status)
     } else {
         listOf(status.ifBlank { "已开始" }, duration)
     }
@@ -573,7 +583,7 @@ private fun MessageBubble(
                 when {
                     message.type == "plan" -> PlanMessageCard(message, onOpenPlan)
                     message.isDetailMessage() -> DetailMessageCard(message, onOpenDiffReview)
-                    else -> MarkdownMessageContent(message.text.ifBlank { "..." })
+                    else -> MarkdownMessageContent(message.text.ifBlank { "..." }, previewLongContent = true)
                 }
             }
         }
@@ -758,8 +768,13 @@ private fun FileChangeSummary(detail: DetailDisplay) {
 }
 
 @Composable
-fun MarkdownMessageContent(text: String) {
-    val blocks = remember(text) { markdownBlocks(text) }
+fun MarkdownMessageContent(text: String, previewLongContent: Boolean = false) {
+    var expanded by remember(text) { mutableStateOf(false) }
+    val isLong = previewLongContent && textNeedsPreview(text)
+    val visibleText = remember(text, expanded, previewLongContent) {
+        if (isLong && !expanded) messagePreviewText(text) else text
+    }
+    val blocks = remember(visibleText) { markdownBlocks(visibleText) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         blocks.forEach { block ->
             if (block.isCode) {
@@ -770,7 +785,31 @@ fun MarkdownMessageContent(text: String) {
                 }
             }
         }
+        if (isLong) {
+            OutlinedButton(
+                onClick = { expanded = !expanded },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (expanded) LocalAppStrings.current.collapse else LocalAppStrings.current.expandMore)
+            }
+        }
     }
+}
+
+private fun textNeedsPreview(text: String): Boolean {
+    return text.length > LONG_MESSAGE_TEXT_LIMIT || text.lineSequence().take(MESSAGE_PREVIEW_LINE_LIMIT + 1).count() > MESSAGE_PREVIEW_LINE_LIMIT
+}
+
+private fun messagePreviewText(text: String): String {
+    val lineLimited = text.lineSequence()
+        .take(MESSAGE_PREVIEW_LINE_LIMIT)
+        .joinToString("\n")
+    val charLimited = if (lineLimited.length > MESSAGE_PREVIEW_TEXT_LIMIT) {
+        lineLimited.take(MESSAGE_PREVIEW_TEXT_LIMIT).trimEnd()
+    } else {
+        lineLimited.trimEnd()
+    }
+    return "$charLimited\n..."
 }
 
 @Composable

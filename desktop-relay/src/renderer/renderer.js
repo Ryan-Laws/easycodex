@@ -39,6 +39,9 @@ const dictionaries = {
     invalidPort: 'Invalid port',
     offline: 'Offline',
     starting: 'Starting',
+    installing: 'Installing relay',
+    launching: 'Starting relay',
+    stopping: 'Stopping relay',
     online: 'Online',
     waiting: 'Waiting for relay',
     healthPending: 'Health check pending',
@@ -73,6 +76,9 @@ const dictionaries = {
     invalidPort: '端口无效',
     offline: '未启动',
     starting: '启动中',
+    installing: '正在安装/构建',
+    launching: '正在启动中继',
+    stopping: '正在停止中继',
     online: '在线',
     waiting: '等待中继',
     healthPending: '等待健康检查',
@@ -107,6 +113,9 @@ const dictionaries = {
     invalidPort: '連接埠無效',
     offline: '未啟動',
     starting: '啟動中',
+    installing: '正在安裝/建置',
+    launching: '正在啟動中繼',
+    stopping: '正在停止中繼',
     online: '線上',
     waiting: '等待中繼',
     healthPending: '等待健康檢查',
@@ -315,6 +324,7 @@ const elements = {
 let currentState = null;
 let currentLanguage = 'en';
 let portPreviewTimer = null;
+let pendingAction = null;
 
 function t(key, ...args) {
   const dict = dictionaries[currentLanguage] || dictionaries.en;
@@ -346,6 +356,24 @@ function setPortStatus(kind, message) {
   elements.portStatus.textContent = message;
 }
 
+function setControlsBusy(isBusy) {
+  elements.installButton.disabled = isBusy || currentState?.installRunning || currentState?.relayRunning;
+  elements.startButton.disabled = isBusy || currentState?.installRunning || currentState?.relayRunning || !currentState?.relayReady || !currentState?.portAvailable;
+  elements.stopButton.disabled = isBusy || !currentState?.relayRunning;
+  elements.refreshKeyButton.disabled = isBusy || currentState?.relayRunning;
+  elements.portInput.disabled = isBusy || currentState?.relayRunning;
+  elements.browseButton.disabled = isBusy;
+}
+
+function renderPendingStatus() {
+  if (!pendingAction) return;
+  elements.statusCard.dataset.state = 'starting';
+  elements.statusCard.dataset.busy = 'true';
+  elements.statusText.textContent = t(pendingAction);
+  elements.healthText.textContent = t('healthPending');
+  setControlsBusy(true);
+}
+
 function renderLanguageOptions(state) {
   if (elements.languageSelect.childElementCount === 0) {
     for (const [value, label] of languageOptions) {
@@ -369,63 +397,74 @@ function renderState(state) {
   elements.apiKeyInput.value = state.apiKey;
   elements.qrImage.src = state.qrDataUrl;
   elements.firstUseGuide.hidden = !state.guideVisible;
+  elements.statusCard.dataset.busy = 'false';
   elements.statusCard.dataset.state = state.relayRunning ? 'starting' : 'offline';
   elements.statusText.textContent = state.relayRunning ? t('starting') : t('offline');
-  elements.installButton.disabled = state.installRunning || state.relayRunning;
-  elements.startButton.disabled = state.installRunning || state.relayRunning || !state.relayReady || !state.portAvailable;
-  elements.stopButton.disabled = !state.relayRunning;
-  elements.refreshKeyButton.disabled = state.relayRunning;
-  elements.portInput.disabled = state.relayRunning;
+  setControlsBusy(false);
   if (state.portAvailable) setPortStatus('ok', t('portAvailable'));
   else setPortStatus('error', t('portBusy'));
   renderHealth(state.health);
+  renderPendingStatus();
 }
 
 function renderHealth(health) {
+  if (pendingAction) {
+    renderPendingStatus();
+    return;
+  }
   if (!currentState?.relayRunning) {
+    elements.statusCard.dataset.busy = 'false';
     elements.statusCard.dataset.state = 'offline';
     elements.statusText.textContent = t('offline');
     elements.healthText.textContent = t('waiting');
     return;
   }
   if (!health?.online) {
+    elements.statusCard.dataset.busy = currentState?.relayRunning ? 'true' : 'false';
     elements.statusCard.dataset.state = 'starting';
     elements.statusText.textContent = t('starting');
     elements.healthText.textContent = t('healthPending');
     return;
   }
   const clients = health.data?.connectedClients ?? 0;
+  elements.statusCard.dataset.busy = 'false';
   elements.statusCard.dataset.state = 'online';
   elements.statusText.textContent = t('online');
   elements.healthText.textContent = clients > 0 ? t('phoneConnected', clients) : t('ready');
 }
 
-async function runAction(button, action) {
+async function runAction(button, action, pendingKey) {
   button.disabled = true;
+  pendingAction = pendingKey;
+  renderPendingStatus();
   let nextState = null;
   try {
     nextState = await action();
   } catch (error) {
     appendLog(`Error: ${error.message || error}`);
   } finally {
+    pendingAction = null;
     if (nextState) renderState(nextState);
-    else button.disabled = false;
+    else {
+      if (currentState) renderState(currentState);
+      else button.disabled = false;
+    }
   }
 }
 
 elements.installButton.addEventListener('click', () => {
-  runAction(elements.installButton, () => window.easyCodexRelay.installAndBuild());
+  runAction(elements.installButton, () => window.easyCodexRelay.installAndBuild(), 'installing');
 });
 
 elements.startButton.addEventListener('click', () => {
   runAction(elements.startButton, () => window.easyCodexRelay.startRelay({
     port: elements.portInput.value,
     workspace: elements.workspaceInput.value,
-  }));
+  }), 'launching');
 });
 
 elements.stopButton.addEventListener('click', () => {
-  runAction(elements.stopButton, () => window.easyCodexRelay.stopRelay());
+  runAction(elements.stopButton, () => window.easyCodexRelay.stopRelay(), 'stopping');
 });
 
 elements.browseButton.addEventListener('click', async () => {

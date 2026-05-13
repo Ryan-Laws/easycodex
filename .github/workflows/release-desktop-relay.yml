@@ -10,92 +10,66 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
-    name: Build Windows
-    runs-on: windows-latest
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            script: dist:win
+            artifacts: |
+              desktop-relay/release/*.exe
+              desktop-relay/release/*.blockmap
+          - name: macOS
+            os: macos-latest
+            script: dist:mac
+            artifacts: |
+              desktop-relay/release/*.dmg
+              desktop-relay/release/*.zip
+              desktop-relay/release/*.blockmap
+
     steps:
-      - name: Checkout
+      - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: |
             agent-relay/package-lock.json
             desktop-relay/package-lock.json
 
-      - name: Install relay dependencies
-        run: npm ci --prefix agent-relay
-
       - name: Install desktop dependencies
-        run: npm ci --prefix desktop-relay
+        run: npm ci
+        working-directory: desktop-relay
 
-      - name: Build Windows desktop relay
+      - name: Build desktop relay
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npm --prefix desktop-relay run dist:win
+        run: npm run ${{ matrix.script }}
+        working-directory: desktop-relay
 
-      - name: Upload Windows artifact
+      - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: easycodex-relay-windows
-          path: |
-            desktop-relay/release/*.exe
-            desktop-relay/release/*.blockmap
+          name: desktop-relay-${{ matrix.name }}
+          path: ${{ matrix.artifacts }}
           if-no-files-found: error
 
-      - name: Attach Windows files to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            desktop-relay/release/*.exe
-            desktop-relay/release/*.blockmap
-
-  build-macos:
-    name: Build macOS
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: |
-            agent-relay/package-lock.json
-            desktop-relay/package-lock.json
-
-      - name: Install relay dependencies
-        run: npm ci --prefix agent-relay
-
-      - name: Install desktop dependencies
-        run: npm ci --prefix desktop-relay
-
-      - name: Build macOS desktop relay
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npm --prefix desktop-relay run dist:mac
-
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: easycodex-relay-macos
-          path: |
-            desktop-relay/release/*.dmg
-            desktop-relay/release/*.zip
-            desktop-relay/release/*.blockmap
-          if-no-files-found: error
-
-      - name: Attach macOS files to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            desktop-relay/release/*.dmg
-            desktop-relay/release/*.zip
-            desktop-relay/release/*.blockmap
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG_NAME" >/dev/null 2>&1 || gh release create "$TAG_NAME" --title "$TAG_NAME" --notes-file CHANGELOG.md
+          while IFS= read -r artifact; do
+            [ -n "$artifact" ] || continue
+            gh release upload "$TAG_NAME" "$artifact" --clobber
+          done < <(find desktop-relay/release -maxdepth 1 \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.blockmap' \) -type f)

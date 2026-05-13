@@ -130,9 +130,7 @@ EasyCodex/
 ├── mobile/          Android 原生手机应用
 ├── agent-relay/     Codex 的 Node.js Agent Relay
 ├── desktop-relay/   Electron Windows/macOS 桌面端中继
-├── scripts/         CLI 和本地安装辅助脚本
-├── docs/            项目笔记和支持文档
-└── site/            公开站点资源
+└── scripts/         CLI 和本地安装辅助脚本
 ```
 
 ## 常用命令

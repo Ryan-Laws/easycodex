@@ -6,6 +6,31 @@ node_modules/
 mobile/.idea/
 mobile/.expo/
 
+# local AI agent / Codex workspace state
+.codex/
+.agents/
+.claude/
+.cursor/
+.continue/
+.aider*/
+.codex-protocol-inspect/
+AGENTS.local.md
+AGENT.local.md
+agents.json
+codex-agents.json
+codex-sessions/
+codex-threads/
+agent-sessions/
+agent-workspaces/
+sessions/
+threads/
+conversations/
+transcripts/
+*.session.json
+*.thread.json
+*.conversation.json
+*.transcript.json
+
 # Android
 .gradle/
 mobile/.gradle/
@@ -30,6 +55,7 @@ desktop-relay/dist/
 desktop-relay/out/
 desktop-relay/.vite/
 desktop-relay/.cache/
+desktop-relay/.relay-bundle/
 *.blockmap
 *.dmg
 
@@ -55,6 +81,5 @@ start-easycodex.ps1
 
 # typescript
 *.tsbuildinfo
-.codex-protocol-inspect/
 
 # lock files (keep package-lock in each subfolder)

@@ -35,6 +35,15 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
+private const val CONNECTION_STATUS_CHANNEL_ID = "easycodex-connection-status"
+private const val CONNECTION_STATUS_NOTIFICATION_ID = 72001
+private const val MAX_MOBILE_MESSAGE_TEXT_CHARS = 20_000
+private const val MAX_MOBILE_DETAIL_TEXT_CHARS = 12_000
+private const val MOBILE_TEXT_TRUNCATED_NOTICE = "\n\n[EasyCodex mobile truncated this long output. Use the desktop relay/Codex session for the full text.]"
+private const val PLAN_MODE_PREFIX_FOR_DISPLAY = "请先进入计划模式处理下面的需求。"
+private const val PLAN_MODE_DEMAND_MARKER_FOR_DISPLAY = "需求："
+private const val CONTEXT_PLACEHOLDER_FOR_DISPLAY = "已加载项目上下文。"
+
 class EasyCodexController(private val context: android.content.Context) {
     private val client = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
@@ -268,24 +277,27 @@ class EasyCodexController(private val context: android.content.Context) {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                val msg = runCatching { JSONObject(text) }.getOrNull() ?: return
                 main.post {
-                    if (generation == connectionGeneration) handleIncoming(text)
+                    if (generation == connectionGeneration) handleIncoming(msg)
                 }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 main.post {
                     if (generation != connectionGeneration) return@post
+                    val notifyDisconnected = connectionStatus == "connected"
                     this@EasyCodexController.webSocket = null
                     val error = localizedConnectionError(t.message)
                     failPending(error)
-                    scheduleReconnect(error)
+                    scheduleReconnect(error, notifyDisconnected)
                 }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 main.post {
                     if (generation != connectionGeneration) return@post
+                    val notifyDisconnected = connectionStatus == "connected"
                     this@EasyCodexController.webSocket = null
                     val error = if (reason.isBlank()) strings.connectionClosed else localizedConnectionError(reason)
                     failPending(error)
@@ -293,7 +305,7 @@ class EasyCodexController(private val context: android.content.Context) {
                         connectionStatus = "disconnected"
                         statusText = error
                     } else {
-                        scheduleReconnect(error)
+                        scheduleReconnect(error, notifyDisconnected)
                     }
                 }
             }
@@ -1353,7 +1365,7 @@ class EasyCodexController(private val context: android.content.Context) {
         sendRaw("update_client_language", mapOf("language" to resolvedAppLanguage(appLanguage))) { _, _ -> }
     }
 
-    private fun scheduleReconnect(error: String) {
+    private fun scheduleReconnect(error: String, notifyDisconnected: Boolean = false) {
         if (relayUrl.isBlank() || apiKey.isBlank() || manuallyDisconnected) {
             connectionStatus = "disconnected"
             statusText = error
@@ -1362,11 +1374,21 @@ class EasyCodexController(private val context: android.content.Context) {
         val delayMillis = reconnectDelayMillis()
         reconnectAttempts += 1
         val seconds = delayMillis / 1000
-        connectionStatus = "connecting"
-        statusText = if (strings.settings == "Settings") "$error, reconnecting in ${seconds}s" else "$error，${seconds} 秒后自动重连"
+        connectionStatus = "disconnected"
+        statusText = disconnectedStatusMessage(seconds)
+        if (notifyDisconnected) showConnectionDisconnectedNotification(seconds)
         cancelReconnect()
         reconnectRunnable = Runnable { connect() }
         main.postDelayed(reconnectRunnable!!, delayMillis)
+    }
+
+    private fun disconnectedStatusMessage(seconds: Long): String {
+        val reconnecting = strings.reconnectingIn(seconds)
+        return if (strings.settings == "Settings") {
+            "${strings.connectionDisconnected}. $reconnecting"
+        } else {
+            "${strings.connectionDisconnected}，$reconnecting"
+        }
     }
 
     private fun reconnectDelayMillis(): Long {
@@ -1441,8 +1463,7 @@ class EasyCodexController(private val context: android.content.Context) {
         }
     }
 
-    private fun handleIncoming(raw: String) {
-        val msg = runCatching { JSONObject(raw) }.getOrNull() ?: return
+    private fun handleIncoming(msg: JSONObject) {
         val requestId = msg.optString("requestId")
         if (requestId.isNotBlank() && (msg.optString("type") == "response" || msg.optString("type") == "error")) {
             pendingTimeoutRunnables.remove(requestId)?.let { main.removeCallbacks(it) }
@@ -1674,9 +1695,7 @@ class EasyCodexController(private val context: android.content.Context) {
             }
             "thread/tokenUsage/updated" -> {
                 val turnId = data.optString("turnId").ifBlank { data.optString("turn_id") }.ifBlank { "turn_${System.currentTimeMillis()}" }
-                val tokenUsage = data.optJSONObject("tokenUsage")
-                val text = tokenUsage?.let { "Token usage\n${jsonSummary(it)}" }.orEmpty()
-                if (text.isNotBlank()) finalizeMessage(agentId, "tokens_$turnId", text, "status")
+                finalizeMessage(agentId, "tokens_$turnId", "Token usage updated.", "status")
             }
             "event_msg" -> {
                 handleEventMessage(agentId, data.optJSONObject("payload") ?: data)
@@ -1725,10 +1744,7 @@ class EasyCodexController(private val context: android.content.Context) {
             "exec_command_end",
             "mcp_tool_call_end" -> {
                 val itemId = itemId(payload).ifBlank { "output_${System.currentTimeMillis()}" }
-                val text = listOf("aggregated_output", "output", "stdout", "stderr")
-                    .firstNotNullOfOrNull { key -> payload.optString(key).takeIf { it.isNotBlank() } }
-                    .orEmpty()
-                if (text.isNotBlank()) finalizeMessage(agentId, itemId, text, "command_output")
+                finalizeMessage(agentId, itemId, "命令输出已省略。", "command_output")
             }
             "mcp_tool_call_begin" -> {
                 val itemId = itemId(payload).ifBlank { "mcp_${System.currentTimeMillis()}" }
@@ -1748,14 +1764,10 @@ class EasyCodexController(private val context: android.content.Context) {
                 finalizeMessage(agentId, itemId, text, "file_change")
             }
             "token_count" -> {
-                val text = payload.optJSONObject("info")?.let { "Token usage\n${jsonSummary(it)}" }
-                    ?: payload.optJSONObject("rate_limits")?.let { "Rate limits\n${jsonSummary(it)}" }
-                    ?: ""
-                if (text.isNotBlank()) finalizeMessage(agentId, "tokens_${System.currentTimeMillis()}", text, "status")
+                finalizeMessage(agentId, "tokens_${System.currentTimeMillis()}", "Token usage updated.", "status")
             }
             "web_search_end" -> {
-                val text = jsonSummary(payload)
-                if (text.isNotBlank()) finalizeMessage(agentId, "web_${System.currentTimeMillis()}", text, "command_output")
+                finalizeMessage(agentId, "web_${System.currentTimeMillis()}", "网页搜索已完成，详细结果已省略。", "command_output")
             }
         }
     }
@@ -1819,6 +1831,54 @@ class EasyCodexController(private val context: android.content.Context) {
                 main.postDelayed({ release() }, 260)
             }
         }
+    }
+
+    private fun showConnectionDisconnectedNotification(seconds: Long) {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        runCatching {
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return
+            ensureConnectionStatusChannel(manager)
+            val openAppIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                CONNECTION_STATUS_NOTIFICATION_ID,
+                openAppIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val detail = "${strings.connectionDisconnectedNotificationBody} ${strings.reconnectingIn(seconds)}"
+            val smallIcon = if (context.applicationInfo.icon != 0) context.applicationInfo.icon else R.mipmap.ic_launcher
+            val notification = Notification.Builder(context, CONNECTION_STATUS_CHANNEL_ID)
+                .setSmallIcon(smallIcon)
+                .setContentTitle(strings.connectionDisconnected)
+                .setContentText(detail)
+                .setStyle(Notification.BigTextStyle().bigText(detail))
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(true)
+                .setShowWhen(true)
+                .setWhen(System.currentTimeMillis())
+                .setCategory(Notification.CATEGORY_STATUS)
+                .build()
+            manager.notify(CONNECTION_STATUS_NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun ensureConnectionStatusChannel(manager: NotificationManager) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val channel = NotificationChannel(
+            CONNECTION_STATUS_CHANNEL_ID,
+            "EasyCodex 连接状态",
+            NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply {
+            description = "连接断开和自动重连提醒"
+        }
+        manager.createNotificationChannel(channel)
     }
 
     private fun showAgentSystemNotification(alert: AgentAlert) {
@@ -1897,6 +1957,18 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun streamItemText(item: JSONObject, type: String, started: Boolean): String {
+        when (type) {
+            "command" -> return if (started) "正在运行命令。" else "命令执行完成。"
+            "command_output" -> return "命令输出已省略。"
+            "file_change" -> {
+                val changes = fileChangesText(item.optJSONArray("changes")).ifBlank { fileChangesText(item.optJSONObject("changes")) }
+                if (changes.isNotBlank()) return changes
+                val path = item.optString("path").ifBlank { item.optString("file") }.ifBlank { item.optString("filePath") }
+                return if (path.isNotBlank()) "文件改动\n- $path" else if (started) "正在修改文件。" else "文件已修改。"
+            }
+            "sub_agent" -> return if (started) "子代理正在工作。" else "子代理已返回结果，详细内容已省略。"
+            "thinking" -> return "正在思考中。"
+        }
         val direct = listOf("text", "command", "output", "diff", "patch", "path", "file", "message", "aggregatedOutput", "aggregated_output", "stdout", "stderr")
             .firstNotNullOfOrNull { key -> item.optString(key).takeIf { it.isNotBlank() } }
         if (!direct.isNullOrBlank()) {
@@ -1971,10 +2043,10 @@ class EasyCodexController(private val context: android.content.Context) {
             val change = array.optJSONObject(index) ?: continue
             val path = change.optString("path")
             val kind = change.optString("kind").ifBlank { change.optString("type") }
-            val diff = change.optString("diff").ifBlank { change.optString("unified_diff") }.ifBlank { change.optString("content") }
-            blocks.add(listOf(path, if (kind.isNotBlank()) "status: $kind" else "", diff).filter { it.isNotBlank() }.joinToString("\n"))
+            val stats = diffStats(change.optString("diff").ifBlank { change.optString("unified_diff") }.ifBlank { change.optString("content") })
+            blocks.add(fileChangeSummaryLine(path, kind, stats))
         }
-        return blocks.filter { it.isNotBlank() }.joinToString("\n\n")
+        return blocks.filter { it.isNotBlank() }.joinToString("\n").takeIf { it.isNotBlank() }?.let { "文件改动\n$it" }.orEmpty()
     }
 
     private fun fileChangesText(obj: JSONObject?): String {
@@ -1985,14 +2057,32 @@ class EasyCodexController(private val context: android.content.Context) {
             val path = keys.next()
             val change = obj.optJSONObject(path)
             if (change == null) {
-                blocks.add(path)
+                blocks.add("- $path")
                 continue
             }
             val kind = change.optString("kind").ifBlank { change.optString("type") }
-            val diff = change.optString("diff").ifBlank { change.optString("unified_diff") }.ifBlank { change.optString("content") }
-            blocks.add(listOf(path, if (kind.isNotBlank()) "status: $kind" else "", diff).filter { it.isNotBlank() }.joinToString("\n"))
+            val stats = diffStats(change.optString("diff").ifBlank { change.optString("unified_diff") }.ifBlank { change.optString("content") })
+            blocks.add(fileChangeSummaryLine(path, kind, stats))
         }
-        return blocks.filter { it.isNotBlank() }.joinToString("\n\n")
+        return blocks.filter { it.isNotBlank() }.joinToString("\n").takeIf { it.isNotBlank() }?.let { "文件改动\n$it" }.orEmpty()
+    }
+
+    private fun fileChangeSummaryLine(path: String, kind: String, stats: Pair<Int, Int>): String {
+        if (path.isBlank()) return ""
+        val statText = if (stats.first + stats.second > 0) " (+${stats.first} -${stats.second})" else ""
+        val kindText = kind.takeIf { it.isNotBlank() }?.let { " [$it]" }.orEmpty()
+        return "- $path$statText$kindText"
+    }
+
+    private fun diffStats(diff: String): Pair<Int, Int> {
+        if (diff.isBlank()) return 0 to 0
+        var additions = 0
+        var deletions = 0
+        diff.lineSequence().forEach { line ->
+            if (line.startsWith("+") && !line.startsWith("+++")) additions += 1
+            if (line.startsWith("-") && !line.startsWith("---")) deletions += 1
+        }
+        return additions to deletions
     }
 
     private fun planText(plan: JSONArray?): String {
@@ -2017,12 +2107,10 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun eventCommandText(payload: JSONObject): String {
-        val direct = listOf("command", "cmd", "text", "name", "tool", "tool_name", "toolName")
-            .firstNotNullOfOrNull { key -> payload.optString(key).takeIf { it.isNotBlank() } }
-        if (!direct.isNullOrBlank()) return direct
         val server = payload.optString("server").ifBlank { payload.optString("server_name") }
         val tool = payload.optString("tool").ifBlank { payload.optString("name") }
-        return listOf(server, tool).filter { it.isNotBlank() }.joinToString(".").ifBlank { "Tool call started." }
+        val label = listOf(server, tool).filter { it.isNotBlank() }.joinToString(".")
+        return if (label.isNotBlank()) "正在运行命令：$label" else "正在运行命令。"
     }
 
     private fun parseAgent(json: JSONObject): Agent {
@@ -2249,10 +2337,12 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun parseMessage(json: JSONObject): AgentMessage {
+        val type = json.optString("type", "agent")
+        val role = json.optString("role", "agent")
         return AgentMessage(
-            role = json.optString("role", "agent"),
-            type = json.optString("type", "agent"),
-            text = json.optString("text"),
+            role = role,
+            type = type,
+            text = capMobileMessageText(simplifyUserMessageForDisplay(json.optString("text"), role, type), type),
             timestamp = json.optLong("timestamp", System.currentTimeMillis()),
             itemId = json.optString("_itemId").ifBlank { json.optString("itemId") }.takeIf { it.isNotBlank() },
         )
@@ -2340,23 +2430,25 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun mergeMessage(current: AgentMessage, incoming: AgentMessage): AgentMessage {
+        val cleanIncoming = incoming.copy(text = simplifyUserMessageForDisplay(incoming.text, incoming.role, incoming.type))
         val text = when {
-            current.streaming && current.text.startsWith(incoming.text) -> current.text
-            incoming.text.startsWith(current.text) -> incoming.text
-            current.text.startsWith(incoming.text) -> incoming.text
-            else -> mergeStreamingText(current.text, incoming.text)
+            current.streaming && current.text.startsWith(cleanIncoming.text) -> current.text
+            cleanIncoming.text.startsWith(current.text) -> cleanIncoming.text
+            current.text.startsWith(cleanIncoming.text) -> cleanIncoming.text
+            else -> mergeStreamingText(current.text, cleanIncoming.text, cleanIncoming.type)
         }
-        val keepCurrentStreaming = current.streaming && text == current.text && text.length >= incoming.text.length
-        val timestamp = if (current.itemId.isNullOrBlank() && incoming.itemId.isNullOrBlank() && current.text == incoming.text) {
+        val cappedText = capMobileMessageText(text, cleanIncoming.type)
+        val keepCurrentStreaming = current.streaming && cappedText == current.text && cappedText.length >= cleanIncoming.text.length
+        val timestamp = if (current.itemId.isNullOrBlank() && cleanIncoming.itemId.isNullOrBlank() && current.text == cleanIncoming.text) {
             current.timestamp
         } else {
-            maxOf(current.timestamp, incoming.timestamp)
+            maxOf(current.timestamp, cleanIncoming.timestamp)
         }
         return current.copy(
-            type = incoming.type,
-            text = text,
+            type = cleanIncoming.type,
+            text = cappedText,
             timestamp = timestamp,
-            itemId = current.itemId ?: incoming.itemId,
+            itemId = current.itemId ?: cleanIncoming.itemId,
             streaming = keepCurrentStreaming,
         )
     }
@@ -2386,20 +2478,28 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun appendMessage(agentId: String, message: AgentMessage) {
-        updateAgent(agentId) { it.copy(messages = it.messages + message, updatedAt = message.timestamp) }
+        val capped = message.copy(text = capMobileMessageText(simplifyUserMessageForDisplay(message.text, message.role, message.type), message.type))
+        updateAgent(agentId) { it.copy(messages = it.messages + capped, updatedAt = capped.timestamp) }
     }
 
     private fun appendDelta(agentId: String, itemId: String, delta: String, type: String) {
         if (agentId.isBlank() || itemId.isBlank() || delta.isBlank()) return
+        val safeDelta = when (type) {
+            "command_output" -> "命令输出已省略。"
+            "file_change" -> "正在修改文件。"
+            "sub_agent" -> "子代理正在工作。"
+            "thinking" -> "正在思考中。"
+            else -> delta
+        }
         val key = streamDeltaKey(agentId, itemId)
         val pendingDelta = pendingStreamDeltas[key]
         if (pendingDelta == null) {
             pendingStreamDeltas[key] = PendingStreamDelta(agentId, itemId, type).also {
-                it.text.append(delta)
+                appendCappedDelta(it.text, safeDelta, type)
             }
         } else {
             pendingDelta.type = type
-            pendingDelta.text.append(delta)
+            if (pendingDelta.text.toString() != safeDelta) appendCappedDelta(pendingDelta.text, safeDelta, type)
         }
         scheduleStreamDeltaFlush()
     }
@@ -2410,9 +2510,9 @@ class EasyCodexController(private val context: android.content.Context) {
             val nextMessages = agent.messages.toMutableList()
             if (index >= 0) {
                 val existing = nextMessages[index]
-                nextMessages[index] = existing.copy(text = mergeStreamingText(existing.text, delta), type = type, streaming = true)
+                nextMessages[index] = existing.copy(text = mergeStreamingText(existing.text, delta, type), type = type, streaming = true)
             } else {
-                nextMessages.add(AgentMessage("agent", type, delta, System.currentTimeMillis(), itemId, true))
+                nextMessages.add(AgentMessage("agent", type, capMobileMessageText(delta, type), System.currentTimeMillis(), itemId, true))
             }
             agent.copy(messages = nextMessages, updatedAt = System.currentTimeMillis())
         }
@@ -2420,19 +2520,20 @@ class EasyCodexController(private val context: android.content.Context) {
 
     private fun finalizeMessage(agentId: String, itemId: String, text: String, type: String, streaming: Boolean = false) {
         flushPendingDelta(agentId, itemId)
+        val cappedIncoming = capMobileMessageText(text, type)
         updateAgent(agentId) { agent ->
             val index = agent.messages.indexOfLast { it.itemId == itemId }
             val nextMessages = agent.messages.toMutableList()
             if (index >= 0) {
                 val existing = nextMessages[index]
                 val nextText = if (existing.type == type) {
-                    mergeFinalText(existing.text, text, streaming)
+                    mergeFinalText(existing.text, cappedIncoming, type, streaming)
                 } else {
-                    text
+                    cappedIncoming
                 }
                 nextMessages[index] = existing.copy(text = nextText, type = type, streaming = streaming)
             } else {
-                nextMessages.add(AgentMessage("agent", type, text, System.currentTimeMillis(), itemId, streaming))
+                nextMessages.add(AgentMessage("agent", type, cappedIncoming, System.currentTimeMillis(), itemId, streaming))
             }
             agent.copy(messages = nextMessages, updatedAt = System.currentTimeMillis())
         }
@@ -2480,25 +2581,86 @@ class EasyCodexController(private val context: android.content.Context) {
 
     private fun streamDeltaKey(agentId: String, itemId: String): String = "$agentId\u0000$itemId"
 
-    private fun mergeStreamingText(current: String, incoming: String): String {
+    private fun mergeStreamingText(current: String, incoming: String, type: String = "agent"): String {
         if (incoming.isBlank()) return current
         if (current.isBlank() || isStreamingPlaceholder(current)) return incoming
         if (isStreamingPlaceholder(incoming)) return current
         if (incoming == current) return current
         if (incoming.startsWith(current)) return incoming
         if (current.startsWith(incoming)) return current
+        if (isMobileTextTruncated(current, type)) return current
         val overlap = longestSuffixPrefixLength(current, incoming)
-        return current + incoming.drop(overlap)
+        return capMobileMessageText(current + incoming.drop(overlap), type)
     }
 
-    private fun mergeFinalText(current: String, incoming: String, streaming: Boolean): String {
-        if (streaming) return mergeStreamingText(current, incoming)
+    private fun mergeFinalText(current: String, incoming: String, type: String, streaming: Boolean): String {
+        if (streaming) return mergeStreamingText(current, incoming, type)
         if (incoming.isBlank()) return current
         if (current.isBlank() || isStreamingPlaceholder(current)) return incoming
         if (incoming == current) return current
         if (incoming.startsWith(current)) return incoming
         if (current.startsWith(incoming)) return incoming
-        return mergeStreamingText(current, incoming)
+        return mergeStreamingText(current, incoming, type)
+    }
+
+    private fun mobileTextLimit(type: String): Int {
+        return when (type) {
+            "command_output", "file_change", "sub_agent", "thinking" -> MAX_MOBILE_DETAIL_TEXT_CHARS
+            else -> MAX_MOBILE_MESSAGE_TEXT_CHARS
+        }
+    }
+
+    private fun simplifyUserMessageForDisplay(text: String, role: String, type: String): String {
+        if (role != "user" && type != "user") return text
+        val trimmed = stripInjectedContextForDisplay(text.trim())
+        if (!trimmed.startsWith(PLAN_MODE_PREFIX_FOR_DISPLAY)) return trimmed
+        val markerIndex = trimmed.lastIndexOf(PLAN_MODE_DEMAND_MARKER_FOR_DISPLAY)
+        if (markerIndex < 0) return trimmed
+        return trimmed.substring(markerIndex + PLAN_MODE_DEMAND_MARKER_FOR_DISPLAY.length).trim().ifBlank { trimmed }
+    }
+
+    private fun stripInjectedContextForDisplay(text: String): String {
+        if (!looksLikeInjectedContext(text)) return text
+        val markers = listOf("</environment_context>", "</INSTRUCTIONS>")
+        val cursor = markers
+            .map { marker -> text.lastIndexOf(marker).takeIf { it >= 0 }?.let { it + marker.length } ?: -1 }
+            .maxOrNull()
+            ?: -1
+        if (cursor < 0) return CONTEXT_PLACEHOLDER_FOR_DISPLAY
+        val rest = text.substring(cursor).trim()
+        if (rest.isBlank() || looksLikeInjectedContext(rest)) return CONTEXT_PLACEHOLDER_FOR_DISPLAY
+        return rest
+    }
+
+    private fun looksLikeInjectedContext(text: String): Boolean {
+        val trimmed = text.trimStart()
+        return trimmed.startsWith("# AGENTS.md instructions for ") ||
+            trimmed.startsWith("<INSTRUCTIONS>") ||
+            trimmed.startsWith("<environment_context>") ||
+            trimmed.contains("\n<INSTRUCTIONS>") ||
+            trimmed.contains("\n<environment_context>")
+    }
+
+    private fun capMobileMessageText(text: String, type: String): String {
+        val limit = mobileTextLimit(type)
+        if (text.length <= limit || text.endsWith(MOBILE_TEXT_TRUNCATED_NOTICE)) return text
+        return text.take(limit).trimEnd() + MOBILE_TEXT_TRUNCATED_NOTICE
+    }
+
+    private fun isMobileTextTruncated(text: String, type: String): Boolean {
+        return text.length >= mobileTextLimit(type) && text.endsWith(MOBILE_TEXT_TRUNCATED_NOTICE)
+    }
+
+    private fun appendCappedDelta(builder: StringBuilder, delta: String, type: String) {
+        if (delta.isBlank()) return
+        val current = builder.toString()
+        if (isMobileTextTruncated(current, type)) return
+        builder.append(delta)
+        val capped = capMobileMessageText(builder.toString(), type)
+        if (capped.length != builder.length || capped.endsWith(MOBILE_TEXT_TRUNCATED_NOTICE)) {
+            builder.clear()
+            builder.append(capped)
+        }
     }
 
     private fun isStreamingPlaceholder(text: String): Boolean {

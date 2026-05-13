@@ -6,13 +6,14 @@
   "main": "src/main.cjs",
   "private": true,
   "scripts": {
-    "prepack": "npm run build:relay",
-    "predist": "npm run build:relay",
-    "predist:win": "npm run build:relay",
-    "predist:mac": "npm run build:relay",
+    "prepack": "npm run prepare:relay-bundle",
+    "predist": "npm run prepare:relay-bundle",
+    "predist:win": "npm run prepare:relay-bundle",
+    "predist:mac": "npm run prepare:relay-bundle",
     "start": "electron .",
     "dev": "electron .",
     "build:relay": "npm --prefix ../agent-relay run build",
+    "prepare:relay-bundle": "node scripts/prepare-relay-bundle.cjs",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "dist:win": "electron-builder --win nsis portable",
@@ -46,7 +47,7 @@
         "to": "icon.ico"
       },
       {
-        "from": "../agent-relay",
+        "from": ".relay-bundle",
         "to": "agent-relay",
         "filter": [
           "package.json",
@@ -55,11 +56,16 @@
           "src/**/*",
           "tsconfig.json"
         ]
+      },
+      {
+        "from": ".relay-bundle/node_modules",
+        "to": "agent-relay/node_modules",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
-    "afterPack": "scripts/after-pack.cjs",
     "win": {
-      "icon": "build/icon.ico",
       "target": [
         "nsis",
         "portable"

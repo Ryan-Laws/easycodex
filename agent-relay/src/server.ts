@@ -419,6 +419,8 @@ const wss = new WebSocketServer({ server });
 const clients = new Map<WebSocket, ClientSession>();
 const STREAM_HISTORY_LIMIT = Number(process.env.STREAM_HISTORY_LIMIT || 5000);
 const CODEX_WATCH_DEBOUNCE_MS = Number(process.env.CODEX_WATCH_DEBOUNCE_MS || 150);
+const MOBILE_STREAM_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_STREAM_TEXT_LIMIT || 12000);
+const MOBILE_STREAM_TRUNCATED_NOTICE = '\n\n[EasyCodex mobile truncated this long output. Use the desktop relay/Codex session for the full text.]';
 let nextStreamSeq = 1;
 const streamHistory: StreamHistoryEntry[] = [];
 let codexWatchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -432,6 +434,95 @@ function getConnectedAuthenticatedCount(): number {
   return count;
 }
 
+function emitDesktopRelayEvent(type: string, data: Record<string, unknown> = {}) {
+  console.log(`[relay:event] ${JSON.stringify({ type, timestamp: Date.now(), ...data })}`);
+}
+
+function emitClientState(reason: string) {
+  emitDesktopRelayEvent('clients', {
+    reason,
+    connectedClients: getConnectedAuthenticatedCount(),
+    notificationClients: getRegisteredClientCount(),
+    notificationTokens: getRegisteredTokenCount(),
+    lastClientLanguage,
+  });
+}
+
+function compactStreamText(value: string, fallback = '详细内容已省略。'): string {
+  if (!value.trim()) return value;
+  if (value.length <= MOBILE_STREAM_TEXT_LIMIT && !value.includes('\n')) return value;
+  return fallback;
+}
+
+function streamDiffSummary(text: string): { files: string[]; additions: number; deletions: number } {
+  const files = new Set<string>();
+  let additions = 0;
+  let deletions = 0;
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith('+') && !line.startsWith('+++')) additions += 1;
+    if (line.startsWith('-') && !line.startsWith('---')) deletions += 1;
+    for (const candidate of [
+      line.match(/^diff --git a\/(.+?) b\/(.+)$/)?.[2],
+      line.match(/^\+\+\+ b\/(.+)$/)?.[1],
+      line.match(/^--- a\/(.+)$/)?.[1],
+    ]) {
+      if (candidate && candidate !== '/dev/null') files.add(candidate.replace(/\\/g, '/'));
+    }
+  }
+  return { files: Array.from(files), additions, deletions };
+}
+
+function summarizeFileStreamText(value: string): string {
+  const summary = streamDiffSummary(value);
+  if (summary.files.length === 0) return '文件已修改。';
+  const stats = summary.additions + summary.deletions > 0 ? ` (+${summary.additions} -${summary.deletions})` : '';
+  return `文件改动\n${summary.files.slice(0, 8).map((filePath) => `- ${filePath}${stats}`).join('\n')}`;
+}
+
+function sanitizeStreamData(value: unknown, event = ''): unknown {
+  if (typeof value === 'string') {
+    if (event.includes('commandOutput')) return '命令输出已省略。';
+    if (event.includes('fileChange') || event.includes('diff')) return summarizeFileStreamText(value);
+    return compactStreamText(value);
+  }
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((item) => sanitizeStreamData(item, event));
+
+  const result: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const heavyText = [
+      'text',
+      'output',
+      'aggregatedOutput',
+      'aggregated_output',
+      'stdout',
+      'stderr',
+      'diff',
+      'patch',
+      'content',
+      'command',
+      'input',
+      'arguments',
+    ].includes(key);
+    if (typeof child === 'string' && heavyText) {
+      if (key === 'command') {
+        result[key] = '正在运行命令。';
+      } else if (key === 'input' || key === 'arguments') {
+        result[key] = '参数已省略。';
+      } else if (event.includes('commandOutput') || key === 'stdout' || key === 'stderr' || key === 'aggregated_output' || key === 'aggregatedOutput' || key === 'output') {
+        result[key] = '命令输出已省略。';
+      } else if (event.includes('fileChange') || event.includes('diff') || key === 'diff' || key === 'patch') {
+        result[key] = summarizeFileStreamText(child);
+      } else {
+        result[key] = compactStreamText(child);
+      }
+    } else {
+      result[key] = sanitizeStreamData(child, event);
+    }
+  }
+  return result;
+}
+
 function rememberStreamEvent(agentId: string, event: string, data: unknown): StreamHistoryEntry {
   const entry: StreamHistoryEntry = {
     type: 'stream',
@@ -440,7 +531,7 @@ function rememberStreamEvent(agentId: string, event: string, data: unknown): Str
     timestamp: Date.now(),
     agentId,
     event,
-    data,
+    data: sanitizeStreamData(data, event),
   };
   streamHistory.push(entry);
   if (streamHistory.length > STREAM_HISTORY_LIMIT) {
@@ -642,6 +733,7 @@ wss.on('connection', (ws, req) => {
       session.clientId = requestedClientId || crypto.randomUUID();
       clearTimeout(authTimeout);
       console.log(`Authenticated client ${session.clientId} (${remoteAddress})`);
+      emitClientState('authenticated');
       reply({ ok: true, clientId: session.clientId });
       return;
     }
@@ -886,6 +978,7 @@ wss.on('connection', (ws, req) => {
           updateClientLanguage(session.clientId, language);
           if (typeof language === 'string' && language.trim()) {
             lastClientLanguage = language.trim();
+            emitClientState('language_changed');
           }
           reply({ ok: true, language });
           break;
@@ -1133,6 +1226,7 @@ wss.on('connection', (ws, req) => {
     clients.delete(ws);
     const reasonText = reason.length > 0 ? ` reason="${reason.toString('utf8')}"` : '';
     console.log(`Client disconnected (${session.clientId || 'unauthenticated'}) code=${code}${reasonText} remote=${remoteAddress}`);
+    if (session.authenticated) emitClientState('disconnected');
   });
 });
 
@@ -1154,5 +1248,15 @@ server.listen(PORT, '0.0.0.0', () => {
   }
   console.log(`\n  QR payload: ${qrPayload}\n`);
   console.log(`  Deep link: ${deepLink}\n`);
+  emitDesktopRelayEvent('ready', {
+    status: 'ok',
+    sessionId: relaySessionId,
+    workspaceRoot: getPrimaryWorkspaceRoot(),
+    reposRoot: getReposRoot(),
+    connectedClients: getConnectedAuthenticatedCount(),
+    notificationClients: getRegisteredClientCount(),
+    notificationTokens: getRegisteredTokenCount(),
+    lastClientLanguage,
+  });
   startCodexStateWatcher();
 });

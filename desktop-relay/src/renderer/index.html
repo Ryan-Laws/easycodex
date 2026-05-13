@@ -24,8 +24,9 @@
         <h1 data-i18n="title">EasyCodex Relay</h1>
         <p class="subtitle" data-i18n="subtitle">Start the local relay so your phone can control Codex on this computer.</p>
       </div>
-      <div class="status-card" id="statusCard">
+      <div class="status-card" id="statusCard" role="status" aria-live="polite">
         <span class="status-light"></span>
+        <span class="status-spinner" aria-hidden="true"></span>
         <div>
           <strong id="statusText">Offline</strong>
           <small id="healthText">Waiting for relay</small>

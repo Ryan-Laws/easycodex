@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -48,6 +50,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+
+private const val PLAN_REVIEW_PREVIEW_LINE_LIMIT = 80
+private const val PLAN_REVIEW_PREVIEW_CHAR_LIMIT = 8_000
 @Composable
 fun ConnectionBanner(
     status: String,
@@ -157,15 +162,12 @@ fun PlanReviewDialog(
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Column(
+                    PlanReviewPreview(
+                        text = review.message.text.ifBlank { "计划内容为空。" },
                         modifier = Modifier
                             .heightIn(max = 360.dp)
-                            .verticalScroll(rememberScrollState())
                             .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        MarkdownMessageContent(review.message.text.ifBlank { "计划内容为空。" })
-                    }
+                    )
                 }
             }
         },
@@ -185,6 +187,54 @@ fun PlanReviewDialog(
             }
         },
     )
+}
+
+@Composable
+private fun PlanReviewPreview(text: String, modifier: Modifier = Modifier) {
+    val preview = remember(text) { planPreviewLines(text) }
+    LazyColumn(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(preview.lines) { line ->
+            Text(
+                line,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        if (preview.truncated) {
+            item {
+                Text(
+                    "计划内容较长，移动端仅显示前 ${preview.lines.size} 行摘要。",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+private data class PlanPreviewLines(
+    val lines: List<String>,
+    val truncated: Boolean,
+)
+
+private fun planPreviewLines(text: String): PlanPreviewLines {
+    var totalChars = 0
+    var truncated = false
+    val lines = mutableListOf<String>()
+    for (line in text.lineSequence()) {
+        if (lines.size >= PLAN_REVIEW_PREVIEW_LINE_LIMIT || totalChars >= PLAN_REVIEW_PREVIEW_CHAR_LIMIT) {
+            truncated = true
+            break
+        }
+        val normalized = line.trimEnd().take(220)
+        totalChars += normalized.length
+        if (normalized.isNotBlank()) lines.add(normalized)
+    }
+    return PlanPreviewLines(lines.ifEmpty { listOf("计划内容为空。") }, truncated)
 }
 
 @Composable

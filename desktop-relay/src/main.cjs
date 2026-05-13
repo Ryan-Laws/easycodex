@@ -36,6 +36,9 @@ let tray = null;
 let lastHealth = { online: false };
 let relayRunning = false;
 let allowQuit = false;
+let relayEventData = null;
+let relayOutputBuffer = '';
+let relayLogClientIds = new Set();
 
 function commandForShell(command) {
   if (process.platform !== 'win32') return command;
@@ -92,7 +95,7 @@ function npmCommandArgs(args) {
   const npm = firstExistingFile(npmCommandCandidates()) || 'npm.cmd';
   return {
     command: cmd,
-    args: ['/d', '/s', '/c', [npm, ...args].map(commandForShell).join(' ')],
+    args: ['/d', '/s', '/c', ['call', npm, ...args].map(commandForShell).join(' ')],
   };
 }
 
@@ -312,10 +315,10 @@ async function appState() {
     installRunning: Boolean(installProcess),
     portAvailable,
     guideVisible: !config.guideSeen,
-    health: lastHealth,
+    health: mergeRelayEventHealth(lastHealth),
     languageMode: config.languageMode,
     language: config.language,
-    effectiveLanguage: effectiveLanguage(config, lastHealth),
+    effectiveLanguage: effectiveLanguage(config, mergeRelayEventHealth(lastHealth)),
     supportedLanguages,
     qrDataUrl: await QRCode.toDataURL(details.connectUrl, {
       margin: 1,
@@ -336,6 +339,65 @@ async function broadcastState() {
 
 function appendLog(line) {
   send('log', String(line));
+}
+
+function mergeRelayEventHealth(health) {
+  if (!relayRunning || !relayEventData) return health;
+  const data = { ...(health?.data || {}), ...relayEventData };
+  if (health?.online) return { ...health, data };
+  if (relayEventData.status === 'ok') return { online: true, data };
+  return health;
+}
+
+function updateRelayEventData(data) {
+  relayEventData = {
+    ...(relayEventData || {}),
+    status: 'ok',
+    ...data,
+  };
+  lastHealth = mergeRelayEventHealth(lastHealth);
+  send('health', lastHealth);
+  void broadcastState();
+}
+
+function handleRelayOutputLine(rawLine) {
+  const line = String(rawLine || '').trim();
+  const eventMatch = line.match(/^\[relay:event\]\s+(\{.*\})$/);
+  if (eventMatch) {
+    try {
+      const event = JSON.parse(eventMatch[1]);
+      if (event.type !== 'ready' && event.type !== 'clients') return;
+      updateRelayEventData({
+        connectedClients: Number.isInteger(event.connectedClients) ? event.connectedClients : relayEventData?.connectedClients,
+        notificationClients: Number.isInteger(event.notificationClients) ? event.notificationClients : relayEventData?.notificationClients,
+        notificationTokens: Number.isInteger(event.notificationTokens) ? event.notificationTokens : relayEventData?.notificationTokens,
+        lastClientLanguage: typeof event.lastClientLanguage === 'string' ? event.lastClientLanguage : relayEventData?.lastClientLanguage,
+      });
+    } catch {}
+    return;
+  }
+
+  const authMatch = line.match(/^Authenticated client\s+(\S+)/);
+  if (authMatch) {
+    relayLogClientIds.add(authMatch[1]);
+    updateRelayEventData({ connectedClients: relayLogClientIds.size });
+    return;
+  }
+
+  const disconnectMatch = line.match(/^Client disconnected \(([^)]+)\)/);
+  if (disconnectMatch && disconnectMatch[1] !== 'unauthenticated') {
+    relayLogClientIds.delete(disconnectMatch[1]);
+    updateRelayEventData({ connectedClients: relayLogClientIds.size });
+  }
+}
+
+function handleRelayOutput(chunk) {
+  const text = chunk.toString();
+  appendLog(text);
+  relayOutputBuffer += text;
+  const lines = relayOutputBuffer.split(/\r?\n/);
+  relayOutputBuffer = lines.pop() || '';
+  for (const line of lines) handleRelayOutputLine(line);
 }
 
 function redactPathList(value) {
@@ -362,6 +424,7 @@ function runCommand(command, args, cwd, env, onDone) {
       cwd,
       shell: false,
       windowsHide: true,
+      windowsVerbatimArguments: process.platform === 'win32' && path.basename(command).toLowerCase() === 'cmd.exe',
       env: commandEnv,
     });
   } catch (error) {
@@ -389,10 +452,10 @@ function runNpmCommand(args, cwd, env, onDone) {
   return runCommand(commandLine.command, commandLine.args, cwd, env, onDone);
 }
 
-function healthRequest(port, apiKey) {
+function healthRequestHost(host, port, apiKey) {
   return new Promise((resolve) => {
     const req = http.get(
-      `http://127.0.0.1:${port}/health?key=${encodeURIComponent(apiKey)}`,
+      `http://${host}:${port}/health?key=${encodeURIComponent(apiKey)}`,
       { timeout: 1800 },
       (res) => {
         let raw = '';
@@ -416,11 +479,20 @@ function healthRequest(port, apiKey) {
   });
 }
 
+async function healthRequest(port, apiKey) {
+  const hosts = Array.from(new Set(['127.0.0.1', localIPv4()]));
+  for (const host of hosts) {
+    const health = await healthRequestHost(host, port, apiKey);
+    if (health.online) return { ...health, host };
+  }
+  return { online: false };
+}
+
 function startHealthPolling() {
   if (healthTimer) clearInterval(healthTimer);
   healthTimer = setInterval(async () => {
     const config = loadDesktopConfig();
-    lastHealth = await healthRequest(config.port, loadApiKey());
+    lastHealth = mergeRelayEventHealth(await healthRequest(config.port, loadApiKey()));
     if (lastHealth.online && config.languageMode === 'follow-phone') {
       const phoneLanguage = normalizeLanguage(lastHealth.data?.lastClientLanguage);
       if (phoneLanguage !== 'system') saveDesktopConfig({ language: phoneLanguage });
@@ -480,20 +552,24 @@ async function startRelay(input) {
   const args = nodeScript.args;
   appendLog('Starting relay...');
   appendLog(`> ${command} ${args.join(' ')}`);
+  relayEventData = null;
+  relayOutputBuffer = '';
+  relayLogClientIds = new Set();
 
   const relayEnv = {
-      ...process.env,
-      ...nodeScript.env,
-      PORT: String(port),
-      API_KEY: loadApiKey(),
-      CODEX_CWD: workspace,
-      EASYCODEX_NO_TERMINAL_QR: '1',
+    ...process.env,
+    ...nodeScript.env,
+    PORT: String(port),
+    API_KEY: loadApiKey(),
+    CODEX_CWD: workspace,
+    EASYCODEX_NO_TERMINAL_QR: '1',
   };
   try {
     relayProcess = spawn(command, args, {
       cwd,
       shell: false,
       windowsHide: true,
+      windowsVerbatimArguments: false,
       env: relayEnv,
     });
   } catch (error) {
@@ -504,18 +580,24 @@ async function startRelay(input) {
     throw error;
   }
   relayRunning = true;
-  relayProcess.stdout.on('data', (chunk) => appendLog(chunk.toString()));
+  relayProcess.stdout.on('data', handleRelayOutput);
   relayProcess.stderr.on('data', (chunk) => appendLog(chunk.toString()));
   relayProcess.on('error', async (error) => {
     appendLog(`Relay failed to start: ${error.message}`);
     relayProcess = null;
     relayRunning = false;
+    relayEventData = null;
+    relayOutputBuffer = '';
+    relayLogClientIds = new Set();
     await broadcastState();
   });
   relayProcess.on('close', async (code) => {
     appendLog(`Relay exited with code ${code ?? 'unknown'}.`);
     relayProcess = null;
     relayRunning = false;
+    relayEventData = null;
+    relayOutputBuffer = '';
+    relayLogClientIds = new Set();
     lastHealth = { online: false };
     await broadcastState();
   });
@@ -525,12 +607,18 @@ async function startRelay(input) {
 async function stopRelay() {
   if (!relayProcess) {
     relayRunning = false;
+    relayEventData = null;
+    relayOutputBuffer = '';
+    relayLogClientIds = new Set();
     await broadcastState();
     return;
   }
   relayProcess.kill();
   relayProcess = null;
   relayRunning = false;
+  relayEventData = null;
+  relayOutputBuffer = '';
+  relayLogClientIds = new Set();
   lastHealth = { online: false };
   appendLog('Relay stopped.');
   await broadcastState();

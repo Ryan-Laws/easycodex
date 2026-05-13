@@ -174,7 +174,7 @@ private const val EMOJI_ROWS = 5
 private const val EMOJI_PAGE_SIZE = EMOJI_COLUMNS * EMOJI_ROWS
 const val AGENTS_REFRESH_DEBOUNCE_MS = 500L
 const val AGENT_ACTIVITY_UPDATE_THROTTLE_MS = 500L
-const val STREAM_DELTA_FLUSH_MS = 48L
+const val STREAM_DELTA_FLUSH_MS = 250L
 const val CODEX_THREAD_DETAIL_PREFETCH_LIMIT = 10
 const val CODEX_THREAD_DETAIL_MAX_RETRIES = 3
 const val CODEX_THREAD_DETAIL_RETRY_BASE_MS = 1_200L
@@ -945,9 +945,18 @@ fun MessageComposer(
 ) {
     val strings = LocalAppStrings.current
     var activePanel by remember { mutableStateOf(ComposerPanel.None) }
+    var quickRepliesExpanded by remember { mutableStateOf(false) }
     var sendAnimationKey by remember { mutableStateOf(0) }
     val sendButtonScale = remember { Animatable(1f) }
     val sendIconTravel = remember { Animatable(0f) }
+    val quickReplyPrompts = remember {
+        listOf(
+            "先调查，再给修复计划",
+            "修复并测试",
+            "基于上次任务解释报错",
+            "继续上次任务",
+        )
+    }
 
     LaunchedEffect(sendAnimationKey) {
         if (sendAnimationKey == 0) return@LaunchedEffect
@@ -1006,17 +1015,29 @@ fun MessageComposer(
                     enabled = enabled,
                     label = { Text(strings.planFirst) },
                 )
-                listOf(
-                    "先调查再给计划",
-                    "修复并测试",
-                    "解释这段报错",
-                    "继续上次任务",
-                ).forEach { prompt ->
-                    AssistChip(
-                        onClick = { onTextChange(if (text.isBlank()) prompt else "${text.trimEnd()}\n$prompt") },
-                        enabled = enabled,
-                        label = { Text(prompt) },
-                    )
+                AssistChip(
+                    onClick = { quickRepliesExpanded = !quickRepliesExpanded },
+                    enabled = enabled,
+                    leadingIcon = {
+                        Icon(
+                            if (quickRepliesExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    },
+                    label = { Text("快速回答") },
+                )
+                if (quickRepliesExpanded) {
+                    quickReplyPrompts.forEach { prompt ->
+                        AssistChip(
+                            onClick = {
+                                onTextChange(if (text.isBlank()) prompt else "${text.trimEnd()}\n$prompt")
+                                quickRepliesExpanded = false
+                            },
+                            enabled = enabled,
+                            label = { Text(prompt) },
+                        )
+                    }
                 }
             }
             if (attachments.isNotEmpty()) {

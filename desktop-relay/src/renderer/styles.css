@@ -152,6 +152,11 @@ h2 {
   box-shadow: var(--shadow);
 }
 
+.status-card[data-busy="true"] {
+  border-color: rgba(211, 154, 47, 0.42);
+  background: rgba(255, 248, 235, 0.92);
+}
+
 .status-card strong,
 .status-card small {
   display: block;
@@ -169,13 +174,38 @@ h2 {
   background: #a9a192;
 }
 
+.status-spinner {
+  display: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(211, 154, 47, 0.25);
+  border-top-color: #d39a2f;
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
 .status-card[data-state="starting"] .status-light {
   background: #d39a2f;
+  box-shadow: 0 0 0 7px rgba(211, 154, 47, 0.13);
+}
+
+.status-card[data-busy="true"] .status-light {
+  display: none;
+}
+
+.status-card[data-busy="true"] .status-spinner {
+  display: block;
 }
 
 .status-card[data-state="online"] .status-light {
   background: var(--accent);
   box-shadow: 0 0 0 7px rgba(36, 120, 93, 0.13);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .content-grid {

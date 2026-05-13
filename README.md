@@ -130,9 +130,7 @@ EasyCodex/
 ├── mobile/          Native Android app
 ├── agent-relay/     Node.js Agent Relay for Codex
 ├── desktop-relay/   Electron Windows/macOS relay desktop app
-├── scripts/         CLI and local setup helpers
-├── docs/            Project notes and supporting docs
-└── site/            Public site assets
+└── scripts/         CLI and local setup helpers
 ```
 
 ## Useful Commands
