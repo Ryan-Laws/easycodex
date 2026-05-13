@@ -14,25 +14,42 @@ mobile/app/build/
 mobile/local.properties
 .kotlin/
 *.orig.*
+*.apk
+*.ap_
+*.aab
 *.jks
+*.keystore
 *.p8
 *.p12
 *.key
 
-# Agent Relay build output
+# build and release output
 agent-relay/dist/
+desktop-relay/release/
+desktop-relay/dist/
+desktop-relay/out/
+desktop-relay/.vite/
+desktop-relay/.cache/
+*.blockmap
+*.dmg
 
 # debug
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+pnpm-debug.*
+*.log
 
 # macOS
 .DS_Store
 *.pem
 
 # local env files
+.env
+.env.*
 .env*.local
+!.env.example
+!.env.*.example
 start-easycodex.ps1
 .easycodex-attachments/
 

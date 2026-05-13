@@ -509,6 +509,7 @@ function startCodexStateWatcher() {
 
 const manager = new SessionOrchestrator(broadcast);
 const startedAt = Date.now();
+let lastClientLanguage: string | null = null;
 
 app.get('/health', (req, res) => {
   const key = extractAuthKey(req);
@@ -528,6 +529,7 @@ app.get('/health', (req, res) => {
     connectedClients: getConnectedAuthenticatedCount(),
     notificationClients: getRegisteredClientCount(),
     notificationTokens: getRegisteredTokenCount(),
+    lastClientLanguage,
     runtime: manager.getRuntimeCapabilities(),
     system: {
       hostname: os.hostname(),
@@ -882,6 +884,9 @@ wss.on('connection', (ws, req) => {
             break;
           }
           updateClientLanguage(session.clientId, language);
+          if (typeof language === 'string' && language.trim()) {
+            lastClientLanguage = language.trim();
+          }
           reply({ ok: true, language });
           break;
         }

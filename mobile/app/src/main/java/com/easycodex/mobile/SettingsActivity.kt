@@ -61,6 +61,8 @@ import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -97,6 +99,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -115,6 +118,9 @@ import java.util.concurrent.TimeUnit
 const val EASY_CODEX_PREFS = "easycodex"
 const val PREF_RELAY_URL = "relay_url"
 const val PREF_API_KEY = "api_key"
+const val PREF_LAST_STREAM_SESSION_ID = "last_stream_session_id"
+const val PREF_LAST_STREAM_SEQ = "last_stream_seq"
+const val PREF_CLIENT_ID = "client_id"
 const val PREF_DEFAULT_MODEL = "default_model"
 const val PREF_DEFAULT_CWD = "default_cwd"
 const val PREF_DEFAULT_REASONING_EFFORT = "default_reasoning_effort"
@@ -250,6 +256,7 @@ fun SettingsApp(onClose: () -> Unit) {
     var appLanguage by remember { mutableStateOf(prefs.getString(PREF_APP_LANGUAGE, DEFAULT_APP_LANGUAGE) ?: DEFAULT_APP_LANGUAGE) }
     var oledMode by remember { mutableStateOf(prefs.getBoolean(PREF_OLED_MODE, false)) }
     var saveState by remember { mutableStateOf("") }
+    var apiKeyVisible by remember { mutableStateOf(false) }
     val strings = appStringsFor(appLanguage)
     var destination by remember { mutableStateOf<SettingsDestination?>(null) }
     var notificationAgents by remember { mutableStateOf<List<NotificationAgentPreference>>(emptyList()) }
@@ -283,6 +290,21 @@ fun SettingsApp(onClose: () -> Unit) {
             .apply()
         (context as? Activity)?.setResult(Activity.RESULT_OK)
         saveState = strings.saved
+    }
+
+    fun clearConnectionConfig() {
+        relayUrl = DEFAULT_RELAY_URL
+        apiKey = ""
+        relayClient?.close()
+        relayClient = null
+        notificationAgents = emptyList()
+        notificationHistory = emptyList()
+        prefs.edit()
+            .remove(PREF_RELAY_URL)
+            .remove(PREF_API_KEY)
+            .apply()
+        (context as? Activity)?.setResult(Activity.RESULT_OK)
+        saveState = strings.connectionConfigCleared
     }
 
     fun importConnectionConfig(config: EasyCodexConnectionConfig) {
@@ -497,8 +519,24 @@ fun SettingsApp(onClose: () -> Unit) {
                                     onValueChange = { apiKey = it },
                                     label = { Text(strings.apiKey) },
                                     singleLine = true,
-                                    visualTransformation = PasswordVisualTransformation(),
+                                    visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                                    trailingIcon = {
+                                        IconButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
+                                            Icon(
+                                                if (apiKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                                contentDescription = if (apiKeyVisible) strings.hideApiKey else strings.showApiKey,
+                                            )
+                                        }
+                                    },
                                     modifier = Modifier.fillMaxWidth(),
+                                )
+                                InfoRow(
+                                    title = strings.connectionTarget,
+                                    detail = relayUrl.ifBlank { DEFAULT_RELAY_URL },
+                                )
+                                InfoRow(
+                                    title = strings.connectionSecurity,
+                                    detail = strings.connectionSecurityDetail,
                                 )
                                 FlowRow(
                                     modifier = Modifier.fillMaxWidth(),
@@ -511,6 +549,10 @@ fun SettingsApp(onClose: () -> Unit) {
                                     }
                                     Button(onClick = ::save) {
                                         Text(strings.saveSettings)
+                                    }
+                                    TextButton(onClick = ::clearConnectionConfig) {
+                                        Icon(Icons.Default.Security, contentDescription = null)
+                                        Text(strings.clearConnectionConfig)
                                     }
                                     if (saveState.isNotBlank()) {
                                         Text(

@@ -1,0 +1,101 @@
+name: Release Desktop Relay
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            agent-relay/package-lock.json
+            desktop-relay/package-lock.json
+
+      - name: Install relay dependencies
+        run: npm ci --prefix agent-relay
+
+      - name: Install desktop dependencies
+        run: npm ci --prefix desktop-relay
+
+      - name: Build Windows desktop relay
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm --prefix desktop-relay run dist:win
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: easycodex-relay-windows
+          path: |
+            desktop-relay/release/*.exe
+            desktop-relay/release/*.blockmap
+          if-no-files-found: error
+
+      - name: Attach Windows files to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desktop-relay/release/*.exe
+            desktop-relay/release/*.blockmap
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            agent-relay/package-lock.json
+            desktop-relay/package-lock.json
+
+      - name: Install relay dependencies
+        run: npm ci --prefix agent-relay
+
+      - name: Install desktop dependencies
+        run: npm ci --prefix desktop-relay
+
+      - name: Build macOS desktop relay
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm --prefix desktop-relay run dist:mac
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: easycodex-relay-macos
+          path: |
+            desktop-relay/release/*.dmg
+            desktop-relay/release/*.zip
+            desktop-relay/release/*.blockmap
+          if-no-files-found: error
+
+      - name: Attach macOS files to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desktop-relay/release/*.dmg
+            desktop-relay/release/*.zip
+            desktop-relay/release/*.blockmap

@@ -7,7 +7,11 @@ app/build/
 local.properties
 .kotlin/
 *.orig.*
+*.apk
+*.ap_
+*.aab
 *.jks
+*.keystore
 *.p8
 *.p12
 *.key
@@ -16,10 +20,16 @@ local.properties
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+pnpm-debug.*
+*.log
 
 # macOS
 .DS_Store
 *.pem
 
 # local env files
+.env
+.env.*
 .env*.local
+!.env.example
+!.env.*.example

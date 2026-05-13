@@ -1,0 +1,91 @@
+{
+  "name": "easycodex-desktop-relay",
+  "version": "0.1.0",
+  "description": "Cross-platform desktop relay launcher for EasyCodex",
+  "author": "EasyCodex Team",
+  "main": "src/main.cjs",
+  "private": true,
+  "scripts": {
+    "prepack": "npm run build:relay",
+    "predist": "npm run build:relay",
+    "predist:win": "npm run build:relay",
+    "predist:mac": "npm run build:relay",
+    "start": "electron .",
+    "dev": "electron .",
+    "build:relay": "npm --prefix ../agent-relay run build",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win nsis portable",
+    "dist:mac": "electron-builder --mac dmg zip"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1",
+    "rcedit": "^5.0.1"
+  },
+  "build": {
+    "appId": "dev.easycodex.desktop-relay",
+    "productName": "EasyCodex Relay",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "src/assets/icon.png",
+        "to": "icon.png"
+      },
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "../agent-relay",
+        "to": "agent-relay",
+        "filter": [
+          "package.json",
+          "package-lock.json",
+          "dist/**/*",
+          "src/**/*",
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "afterPack": "scripts/after-pack.cjs",
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": false,
+      "shortcutName": "EasyCodex Relay",
+      "include": "build/installer.nsh",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
+    },
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "identity": null
+    }
+  }
+}

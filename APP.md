@@ -8,6 +8,7 @@ EasyCodex is a mobile app for controlling Codex coding agents from a phone. It i
 | --- | --- | --- |
 | Mobile app | `mobile/` | Native Android Kotlin/Jetpack Compose app for connecting to the relay, managing agents, and chatting with Codex. |
 | Agent Relay | `agent-relay/` | Node.js WebSocket server that authenticates clients and manages Codex agent processes. |
+| Desktop relay | `desktop-relay/` | Electron Windows/macOS app for installing, building, starting, stopping, and monitoring the local relay. |
 | CLI/setup | `scripts/` | Terminal setup flow for installing dependencies and starting the relay. |
 
 ## First Local Run
@@ -18,6 +19,14 @@ From the repository root:
 node scripts/setup-and-start.mjs
 ```
 
+Or use the desktop relay app:
+
+```powershell
+Set-Location desktop-relay
+npm install
+npm start
+```
+
 The setup script asks for:
 
 - relay port, usually `3001`
@@ -25,6 +34,8 @@ The setup script asks for:
 - whether to install dependencies
 
 It starts the agent relay and prints a QR code containing the WebSocket URL and API key. Scan it with the phone camera to open EasyCodex and save the connection automatically.
+
+The desktop relay app shows the same connection information and QR code in a native desktop window. Packaged builds copy the relay runtime into `~/.easycodex/desktop-relay-runtime/` so the app can install dependencies and build outside read-only app bundle locations.
 
 ## Manual Run
 

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EasyCodex Relay</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="titlebar">
+    <div class="titlebar-drag">
+      <img class="app-mark" src="../assets/icon.png" alt="">
+      <span data-i18n="windowTitle">EasyCodex Relay</span>
+    </div>
+    <div class="window-actions">
+      <button id="windowMinimizeButton" title="Minimize" aria-label="Minimize">-</button>
+      <button id="windowCloseButton" title="Close" aria-label="Close">x</button>
+    </div>
+  </header>
+  <main class="shell">
+    <section class="topbar">
+      <div>
+        <p class="eyebrow" data-i18n="eyebrow">Desktop Relay</p>
+        <h1 data-i18n="title">EasyCodex Relay</h1>
+        <p class="subtitle" data-i18n="subtitle">Start the local relay so your phone can control Codex on this computer.</p>
+      </div>
+      <div class="status-card" id="statusCard">
+        <span class="status-light"></span>
+        <div>
+          <strong id="statusText">Offline</strong>
+          <small id="healthText">Waiting for relay</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="content-grid">
+      <section class="panel control-panel">
+        <div class="panel-title">
+          <div>
+            <h2 data-i18n="launch">Launch</h2>
+            <p id="relayPath"></p>
+          </div>
+          <label class="language-picker">
+            <span data-i18n="language">Language</span>
+            <select id="languageSelect"></select>
+          </label>
+        </div>
+
+        <div class="form-grid">
+          <label class="field small-field">
+            <span data-i18n="port">Port</span>
+            <input id="portInput" inputmode="numeric" autocomplete="off">
+            <small class="field-status" id="portStatus"></small>
+          </label>
+
+          <label class="field">
+            <span data-i18n="workspace">Default workspace</span>
+            <div class="row">
+              <input id="workspaceInput" autocomplete="off">
+              <button id="browseButton" class="icon-button" title="Browse" aria-label="Browse">...</button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span data-i18n="relayUrl">Relay URL</span>
+            <div class="row">
+              <input id="relayUrlInput" readonly>
+              <button id="copyConnectionButton" data-i18n="copy">Copy</button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span data-i18n="apiKey">API Key</span>
+            <div class="row">
+              <input id="apiKeyInput" readonly type="password">
+              <button id="copyKeyButton" data-i18n="copy">Copy</button>
+              <button id="refreshKeyButton" data-i18n="refresh">Refresh</button>
+            </div>
+          </label>
+        </div>
+
+        <div class="guide" id="firstUseGuide">
+          <strong data-i18n="firstUseTitle">First time?</strong>
+          <p data-i18n="firstUseBody">Run Install/build once before starting the relay.</p>
+        </div>
+
+        <div class="actions">
+          <button id="installButton" class="secondary" data-i18n="installBuild">Install/build</button>
+          <button id="startButton" class="primary" data-i18n="startRelay">Start relay</button>
+          <button id="stopButton" class="secondary danger" data-i18n="stop">Stop</button>
+        </div>
+      </section>
+
+      <aside class="panel qr-panel">
+        <div class="panel-title">
+          <div>
+            <h2 data-i18n="quickConnect">Quick connect</h2>
+            <p data-i18n="qrHint">Scan with your phone camera to import URL and key.</p>
+          </div>
+        </div>
+        <div class="qr-box">
+          <img id="qrImage" alt="EasyCodex relay QR">
+        </div>
+        <button id="copyDeepLinkButton" class="secondary full" data-i18n="copyDeepLink">Copy deep link</button>
+      </aside>
+    </section>
+
+    <section class="panel log-panel">
+      <div class="log-header">
+        <h2 data-i18n="logs">Logs</h2>
+        <button id="clearLogsButton" class="text-button" data-i18n="clear">Clear</button>
+      </div>
+      <pre id="logOutput"></pre>
+    </section>
+  </main>
+  <script src="./renderer.js"></script>
+</body>
+</html>
