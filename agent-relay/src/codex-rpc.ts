@@ -119,6 +119,22 @@ export function codexThreadReadCall(threadId: string, includeTurns = true): stri
   return rpcCall('thread/read', { threadId, includeTurns });
 }
 
+export function codexThreadTurnsListCall(
+  threadId: string,
+  params: {
+    limit?: number;
+    cursor?: string;
+    sortDirection?: 'asc' | 'desc';
+  } = {},
+): string {
+  return rpcCall('thread/turns/list', {
+    threadId,
+    limit: params.limit,
+    cursor: params.cursor,
+    sortDirection: params.sortDirection,
+  });
+}
+
 export function codexModelListCall(includeHidden = true): string {
   return rpcCall('model/list', { includeHidden });
 }

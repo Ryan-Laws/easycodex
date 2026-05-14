@@ -10,6 +10,7 @@ import {
   codexThreadResumeCall,
   codexThreadListCall,
   codexThreadReadCall,
+  codexThreadTurnsListCall,
   codexModelListCall,
   codexTurnStartCall,
   codexTurnInterruptCall,
@@ -67,6 +68,8 @@ const FILE_SNAPSHOT_LIMIT_BYTES = 512 * 1024;
 const FILE_DIFF_LIMIT_CHARS = 16000;
 const MOBILE_MESSAGE_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_MESSAGE_TEXT_LIMIT || 20000);
 const MOBILE_DETAIL_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_DETAIL_TEXT_LIMIT || 12000);
+const MOBILE_THREAD_TURN_PAGE_LIMIT = Number(process.env.EASY_CODEX_MOBILE_THREAD_TURN_PAGE_LIMIT || 50);
+const MOBILE_THREAD_TURN_MAX_PAGES = Number(process.env.EASY_CODEX_MOBILE_THREAD_TURN_MAX_PAGES || 5);
 const MOBILE_TRUNCATED_NOTICE = '\n\n[EasyCodex mobile truncated this long output. Use the desktop relay/Codex session for the full text.]';
 const PLAN_MODE_PREFIX = '请先进入计划模式处理下面的需求。';
 const PLAN_MODE_DEMAND_MARKER = '需求：';
@@ -1732,19 +1735,56 @@ export class SessionOrchestrator {
     };
   }
 
+  private async readCodexThreadTurns(threadId: string): Promise<Record<string, unknown>[] | null> {
+    const turns: Record<string, unknown>[] = [];
+    let cursor: string | null = null;
+    let page = 0;
+
+    do {
+      const response = await this.sendOneOffRequest(codexThreadTurnsListCall(threadId, {
+        limit: MOBILE_THREAD_TURN_PAGE_LIMIT,
+        cursor: cursor || undefined,
+        sortDirection: 'asc',
+      }));
+      if (response.error) return null;
+      const result = response.result as Record<string, unknown>;
+      const data = Array.isArray(result?.data) ? result.data : [];
+      turns.push(...data.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object'));
+      cursor = typeof result?.nextCursor === 'string' && result.nextCursor.trim()
+        ? result.nextCursor
+        : null;
+      page += 1;
+    } while (cursor && page < MOBILE_THREAD_TURN_MAX_PAGES);
+
+    return turns;
+  }
+
   async readCodexThread(threadId: string): Promise<CodexThreadDetail> {
-    const response = await this.sendOneOffRequest(codexThreadReadCall(threadId, true));
+    let response = await this.sendOneOffRequest(codexThreadReadCall(threadId, false));
     if (response.error) throw new Error(response.error.message);
     const result = response.result as Record<string, unknown>;
-    const thread = result?.thread as Record<string, unknown> | undefined;
+    let thread = result?.thread as Record<string, unknown> | undefined;
     if (!thread) throw new Error('Thread not found');
+    let turns = await this.readCodexThreadTurns(threadId);
+    if (turns === null) {
+      response = await this.sendOneOffRequest(codexThreadReadCall(threadId, true));
+      if (response.error) throw new Error(response.error.message);
+      const fallbackResult = response.result as Record<string, unknown>;
+      const fallbackThread = fallbackResult?.thread as Record<string, unknown> | undefined;
+      if (!fallbackThread) throw new Error('Thread not found');
+      thread = fallbackThread;
+      turns = Array.isArray(fallbackThread.turns)
+        ? fallbackThread.turns.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
+        : [];
+    }
     const messageSource = {
       ...result,
       ...thread,
       entries: (thread as Record<string, unknown>).entries ?? result.entries ?? result.items ?? result.events,
-      turns: (thread as Record<string, unknown>).turns ?? result.turns,
+      turns: turns.length > 0 ? turns : (thread as Record<string, unknown>).turns ?? result.turns,
     };
     const messages = mergeMessageHistory(turnsToMessages(messageSource), readSessionMessages(thread.path))
+      .sort((a, b) => a.timestamp - b.timestamp)
       .map(summarizeMessageForMobile);
     const summary = normalizeThreadSummary(thread);
     const model = usableString(result?.model) || usableString(thread.model);

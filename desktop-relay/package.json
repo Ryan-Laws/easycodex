@@ -1,6 +1,6 @@
 {
   "name": "easycodex-desktop-relay",
-  "version": "0.1.1",
+  "version": "0.1.0",
   "description": "Cross-platform desktop relay launcher for EasyCodex",
   "author": "EasyCodex Team",
   "main": "src/main.cjs",
