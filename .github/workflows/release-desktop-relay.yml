@@ -29,14 +29,14 @@ jobs:
               desktop-relay/release/*.exe
               desktop-relay/release/*.blockmap
           - name: macos-x64
-            os: macos-13
+            os: macos-15-intel
             script: dist:mac:x64
             artifacts: |
               desktop-relay/release/*.dmg
               desktop-relay/release/*.zip
               desktop-relay/release/*.blockmap
           - name: macos-arm64
-            os: macos-13
+            os: macos-15
             script: dist:mac:arm64
             artifacts: |
               desktop-relay/release/*.dmg
