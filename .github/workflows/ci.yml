@@ -115,13 +115,21 @@ jobs:
             "$ALIGNED"
           "$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED"
 
+      - name: Enable KVM for Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
       - name: Launch release APK on emulator
         uses: reactivecircus/android-emulator-runner@v2
+        timeout-minutes: 15
         with:
-          api-level: 35
+          api-level: 29
           target: google_apis
           arch: x86_64
           profile: pixel_6
+          emulator-boot-timeout: 600
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: |
             set -euo pipefail
