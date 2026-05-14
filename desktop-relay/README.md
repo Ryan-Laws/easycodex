@@ -1,6 +1,6 @@
 # EasyCodex Relay Desktop
 
-This is the Electron desktop relay app for EasyCodex. It packages a Windows and macOS desktop control surface for the existing `agent-relay`.
+This is the Electron desktop relay app for EasyCodex. It packages Windows, macOS, and Linux desktop control surfaces for the existing `agent-relay`.
 
 ## Run Locally
 
@@ -35,16 +35,35 @@ npm run dist:mac
 
 macOS artifacts are written to `desktop-relay/release/`. The first release is unsigned, so macOS may require right-clicking the app and choosing Open. Teams with Apple Developer credentials can wire signing into Electron Builder later.
 
-## GitHub Release Builds
+Architecture-specific builds are available through:
 
-You do not need a MacBook to publish the macOS build. Push a version tag and GitHub Actions will build Windows on `windows-latest` and macOS on `macos-latest`:
-
-```powershell
-git tag v0.1.0
-git push origin v0.1.0
+```zsh
+npm run dist:mac:x64
+npm run dist:mac:arm64
 ```
 
-The workflow uploads the Windows installer, Windows portable app, macOS DMG, and macOS ZIP to the GitHub Release for that tag.
+## Package Linux
+
+Run this on Linux:
+
+```bash
+cd desktop-relay
+npm install
+npm run dist:linux
+```
+
+Linux artifacts are written to `desktop-relay/release/` as AppImage and deb packages.
+
+## GitHub Release Builds
+
+You do not need a MacBook or Linux workstation to publish the desktop builds. Push a version tag and GitHub Actions will build Windows x64, macOS x64, macOS arm64, and Linux x64:
+
+```powershell
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+The workflow uploads the Windows installer, Windows portable app, macOS DMG/ZIP builds for both Intel and Apple Silicon, and Linux AppImage/deb builds to the GitHub Release for that tag.
 
 ## Behavior
 

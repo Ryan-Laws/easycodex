@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 - 2026-05-14
+
+### Improved
+
+- Added desktop relay release builds for macOS Intel, macOS Apple Silicon, and Linux x64.
+- Fixed Windows relay installer icon metadata, system-wide install location, high-DPI awareness, and installer language selection.
+- Published desktop release assets with platform and architecture names so users can choose the correct installer.
+
 ## 0.1.0 - 2026-05-14
 
 Initial public release of EasyCodex.

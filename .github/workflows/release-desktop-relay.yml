@@ -17,18 +17,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Windows
+          - name: windows-x64
             os: windows-latest
             script: dist:win
             artifacts: |
               desktop-relay/release/*.exe
               desktop-relay/release/*.blockmap
-          - name: macOS
-            os: macos-latest
-            script: dist:mac
+          - name: macos-x64
+            os: macos-13
+            script: dist:mac:x64
             artifacts: |
               desktop-relay/release/*.dmg
               desktop-relay/release/*.zip
+              desktop-relay/release/*.blockmap
+          - name: macos-arm64
+            os: macos-13
+            script: dist:mac:arm64
+            artifacts: |
+              desktop-relay/release/*.dmg
+              desktop-relay/release/*.zip
+              desktop-relay/release/*.blockmap
+          - name: linux-x64
+            os: ubuntu-latest
+            script: dist:linux
+            artifacts: |
+              desktop-relay/release/*.AppImage
+              desktop-relay/release/*.deb
               desktop-relay/release/*.blockmap
 
     steps:
@@ -61,15 +75,27 @@ jobs:
           path: ${{ matrix.artifacts }}
           if-no-files-found: error
 
-      - name: Upload release assets
-        if: startsWith(github.ref, 'refs/tags/')
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download workflow artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: desktop-relay-*
+          merge-multiple: true
+
+      - name: Publish release assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          gh release view "$TAG_NAME" >/dev/null 2>&1 || gh release create "$TAG_NAME" --title "$TAG_NAME" --notes-file CHANGELOG.md
-          while IFS= read -r artifact; do
-            [ -n "$artifact" ] || continue
-            gh release upload "$TAG_NAME" "$artifact" --clobber
-          done < <(find desktop-relay/release -maxdepth 1 \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.blockmap' \) -type f)
+          gh release view "$TAG_NAME" >/dev/null 2>&1 || gh release create "$TAG_NAME" --title "EasyCodex ${TAG_NAME#v}" --notes-file CHANGELOG.md
+          find release-assets -maxdepth 1 -type f -print0 | sort -z | xargs -0 gh release upload "$TAG_NAME" --clobber

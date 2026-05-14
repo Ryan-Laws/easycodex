@@ -1,6 +1,6 @@
 {
   "name": "easycodex-desktop-relay",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cross-platform desktop relay launcher for EasyCodex",
   "author": "EasyCodex Team",
   "main": "src/main.cjs",
@@ -10,6 +10,7 @@
     "predist": "npm run prepare:relay-bundle",
     "predist:win": "npm run prepare:relay-bundle",
     "predist:mac": "npm run prepare:relay-bundle",
+    "predist:linux": "npm run prepare:relay-bundle",
     "start": "electron .",
     "dev": "electron .",
     "build:relay": "npm --prefix ../agent-relay run build",
@@ -17,7 +18,10 @@
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "dist:win": "electron-builder --win nsis portable",
-    "dist:mac": "electron-builder --mac dmg zip"
+    "dist:mac": "electron-builder --mac dmg zip",
+    "dist:mac:x64": "electron-builder --mac dmg zip --x64",
+    "dist:mac:arm64": "electron-builder --mac dmg zip --arm64",
+    "dist:linux": "electron-builder --linux AppImage deb --x64"
   },
   "dependencies": {
     "qrcode": "^1.5.4"
@@ -76,6 +80,7 @@
       "signAndEditExecutable": false
     },
     "nsis": {
+      "artifactName": "EasyCodex.Relay.Setup.${version}-${arch}.${ext}",
       "oneClick": false,
       "perMachine": true,
       "allowToChangeInstallationDirectory": true,
@@ -94,14 +99,27 @@
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico"
     },
+    "portable": {
+      "artifactName": "EasyCodex.Relay.Portable.${version}-${arch}.${ext}"
+    },
     "mac": {
       "icon": "build/icon.icns",
+      "artifactName": "EasyCodex.Relay.${version}.mac-${arch}.${ext}",
       "category": "public.app-category.developer-tools",
       "target": [
         "dmg",
         "zip"
       ],
       "identity": null
+    },
+    "linux": {
+      "icon": "src/assets/icon.png",
+      "artifactName": "EasyCodex.Relay.${version}.linux-${arch}.${ext}",
+      "category": "Development",
+      "target": [
+        "AppImage",
+        "deb"
+      ]
     }
   }
 }
