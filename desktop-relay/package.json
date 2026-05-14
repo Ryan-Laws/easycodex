@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Cross-platform desktop relay launcher for EasyCodex",
   "author": "EasyCodex Team",
+  "homepage": "https://github.com/Ryan-Laws/easycodex",
   "main": "src/main.cjs",
   "private": true,
   "scripts": {
@@ -116,6 +117,7 @@
       "icon": "src/assets/icon.png",
       "artifactName": "EasyCodex.Relay.${version}.linux-${arch}.${ext}",
       "category": "Development",
+      "maintainer": "Ryan-Laws <Ryan-Laws@users.noreply.github.com>",
       "target": [
         "AppImage",
         "deb"
