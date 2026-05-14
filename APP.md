@@ -35,7 +35,7 @@ The setup script asks for:
 
 It starts the agent relay and prints a QR code containing the WebSocket URL and API key. Scan it with the phone camera to open EasyCodex and save the connection automatically.
 
-The desktop relay app shows the same connection information and QR code in a native desktop window. It checks GitHub releases when opened and can quickly apply source-checkout updates or download the matching packaged installer. Packaged builds copy the relay runtime into `~/.easycodex/desktop-relay-runtime/` so the app can install dependencies and build outside read-only app bundle locations.
+The desktop relay app shows the same connection information and QR code in a native desktop window. It checks GitHub releases when opened and can quickly apply source-checkout updates or download the matching packaged installer. Packaged update installs require an explicit quit-and-update confirmation, stop the local relay before launching the installer, and the Windows installer refuses to continue while EasyCodex Relay is still running. Packaged builds copy the relay runtime into `~/.easycodex/desktop-relay-runtime/` so the app can install dependencies and build outside read-only app bundle locations.
 
 ## Manual Run
 

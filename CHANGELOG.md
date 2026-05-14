@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Standardized desktop relay updates so packaged installs require a quit-and-update confirmation, stop the local relay first, and block the Windows installer if the relay app is still running.
+- Changed Android APK update checks to require user confirmation before downloading and to warn that Android may close the app during system installation.
+
 ## 0.1.1 - 2026-05-14
 
 ### Fixed

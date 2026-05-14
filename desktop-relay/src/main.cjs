@@ -557,9 +557,11 @@ async function applyDesktopUpdate() {
   if (!updateState.info) await checkForUpdates('apply');
   const info = updateState.info;
   if (!info?.updateAvailable) throw new Error('No update is available.');
+  if (!(await confirmDesktopUpdate(info))) return appState();
   updateState = { ...updateState, applying: true, error: '' };
   await broadcastState();
   try {
+    if (relayProcess) await stopRelay();
     if (isDev) {
       appendLog('Applying update from git...');
       await updateFromGit();
@@ -571,8 +573,8 @@ async function applyDesktopUpdate() {
       const targetPath = path.join(updatesDir, asset.name);
       appendLog(`Downloading update: ${asset.name}`);
       await downloadFile(asset.url, targetPath);
-      appendLog(`Opening update installer: ${targetPath}`);
-      await shell.openPath(targetPath);
+      appendLog(`Opening update installer after EasyCodex Relay exits: ${targetPath}`);
+      launchInstallerAfterQuit(targetPath);
     }
     updateState = { ...updateState, applying: false, error: '' };
   } catch (error) {
@@ -583,6 +585,25 @@ async function applyDesktopUpdate() {
     await broadcastState();
   }
   return appState();
+}
+
+function launchInstallerAfterQuit(targetPath) {
+  const resolvedTarget = path.resolve(targetPath);
+  if (process.platform === 'win32') {
+    const cmd = cleanExecutablePath(process.env.ComSpec) || windowsSystemCommand('cmd.exe') || 'cmd.exe';
+    const escaped = resolvedTarget.replace(/"/g, '""');
+    const child = spawn(cmd, ['/d', '/s', '/c', `timeout /t 2 /nobreak >nul & start "" "${escaped}"`], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    });
+    child.unref();
+  } else {
+    shell.openPath(resolvedTarget).catch((error) => appendLog(`Failed to open installer: ${error.message || error}`));
+  }
+  allowQuit = true;
+  setTimeout(() => app.quit(), 100);
 }
 
 function localIPv4() {
@@ -721,6 +742,43 @@ function closeDialogText() {
     message: 'Keep EasyCodex Relay running in the background?',
     detail: 'Choose Minimize to background to keep the relay available for your phone.',
   };
+}
+
+function updateConfirmText(version) {
+  const language = effectiveLanguage(loadDesktopConfig(), lastHealth);
+  if (language === 'zh') {
+    return {
+      buttons: ['退出并更新', '取消'],
+      message: `安装 EasyCodex Relay ${version} 前需要退出当前程序。`,
+      detail: '继续后会先停止本机中继，退出桌面端，然后打开安装包。安装过程中手机将暂时无法连接这台电脑。',
+    };
+  }
+  if (language === 'zh-Hant') {
+    return {
+      buttons: ['退出並更新', '取消'],
+      message: `安裝 EasyCodex Relay ${version} 前需要退出目前程式。`,
+      detail: '繼續後會先停止本機中繼，退出桌面端，然後開啟安裝包。安裝期間手機將暫時無法連接這台電腦。',
+    };
+  }
+  return {
+    buttons: ['Quit and update', 'Cancel'],
+    message: `EasyCodex Relay must quit before installing ${version}.`,
+    detail: 'Continuing will stop the local relay, quit the desktop app, and then open the installer. Your phone will be disconnected during the update.',
+  };
+}
+
+async function confirmDesktopUpdate(info) {
+  const confirmText = updateConfirmText(info?.latestVersion || '');
+  const choice = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: confirmText.buttons,
+    defaultId: 0,
+    cancelId: 1,
+    title: 'EasyCodex Relay',
+    message: confirmText.message,
+    detail: confirmText.detail,
+  });
+  return choice.response === 0;
 }
 
 async function appState() {
@@ -936,6 +994,7 @@ function startHealthPolling() {
 
 async function installAndBuild() {
   if (installProcess) throw new Error('Install/build is already running.');
+  if (relayProcess) throw new Error('Stop the relay before installing or rebuilding it.');
   const cwd = relayDir();
   if (!isDev && relayReady()) {
     appendLog('Packaged relay is already bundled with dependencies and build output.');

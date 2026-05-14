@@ -171,5 +171,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ steps.release.outputs.tag }}"
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file CHANGELOG.md
-          gh release upload "$tag" "${{ steps.sign.outputs.apk }}" "${{ steps.sign.outputs.apk }}.sha256" --clobber
+          notes_file="$RUNNER_TEMP/easycodex-release-notes.md"
+          node scripts/extract-release-notes.mjs "${{ steps.release.outputs.version }}" > "$notes_file"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file" || gh release view "$tag" >/dev/null
+          gh release upload "$tag" "${{ steps.sign.outputs.apk }}" "${{ steps.sign.outputs.apk }}.sha256"

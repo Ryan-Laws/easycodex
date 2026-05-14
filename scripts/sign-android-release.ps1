@@ -112,9 +112,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if ($Upload) {
-  & gh release upload $Tag $SignedApk --clobber
+  & gh release upload $Tag $SignedApk
   if ($LASTEXITCODE -ne 0) {
-    throw "gh release upload failed with code $LASTEXITCODE"
+    throw "gh release upload failed with code $LASTEXITCODE. Existing release assets are never overwritten; publish a new version tag or delete the mistaken asset manually."
   }
 }
 

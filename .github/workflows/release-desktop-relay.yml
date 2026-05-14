@@ -110,6 +110,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           tag="${{ steps.release.outputs.tag }}"
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file CHANGELOG.md
-          find desktop-relay/release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.blockmap' \) -print0 | sort -z | xargs -0 gh release upload "$tag" --clobber
+          notes_file="$RUNNER_TEMP/easycodex-release-notes.md"
+          node scripts/extract-release-notes.mjs "${{ steps.release.outputs.version }}" > "$notes_file"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file" || gh release view "$tag" >/dev/null
+          find desktop-relay/release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.blockmap' \) -print0 | sort -z | xargs -0 gh release upload "$tag"

@@ -69,6 +69,7 @@ import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -192,6 +193,11 @@ data class NotificationHistoryItem(
     val deliveredCount: Int,
 )
 
+data class ApkUpdateCandidate(
+    val version: String,
+    val url: String,
+)
+
 fun parseEasyCodexConnectionUri(uri: Uri?): EasyCodexConnectionConfig? {
     return parseEasyCodexConnectionUri(uri?.toString())
 }
@@ -259,6 +265,7 @@ fun SettingsApp(onClose: () -> Unit) {
     var notificationStatus by remember { mutableStateOf("") }
     var notificationSyncing by remember { mutableStateOf(false) }
     var updateChecking by remember { mutableStateOf(false) }
+    var pendingApkUpdate by remember { mutableStateOf<ApkUpdateCandidate?>(null) }
     var relayClient by remember { mutableStateOf<SettingsRelayClient?>(null) }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         saveState = if (granted) sendLocalTestNotification(context, strings) else strings.notificationsDisabled
@@ -480,8 +487,8 @@ fun SettingsApp(onClose: () -> Unit) {
                         saveState = strings.noApkFound(latestVersion)
                         return@post
                     }
+                    pendingApkUpdate = ApkUpdateCandidate(latestVersion, apkUrl)
                     saveState = strings.updateAvailable(latestVersion)
-                    startApkDownload(latestVersion, apkUrl)
                 }
             }
         })
@@ -493,6 +500,28 @@ fun SettingsApp(onClose: () -> Unit) {
 
     EasyCodexTheme(context = context, themeMode = themeMode, themeColor = themeColor, oledMode = oledMode) {
         CompositionLocalProvider(LocalAppStrings provides strings) {
+            pendingApkUpdate?.let { candidate ->
+                AlertDialog(
+                    onDismissRequest = { pendingApkUpdate = null },
+                    title = { Text(strings.updateInstallPromptTitle(candidate.version)) },
+                    text = { Text(strings.updateInstallPromptBody(candidate.version)) },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                pendingApkUpdate = null
+                                startApkDownload(candidate.version, candidate.url)
+                            },
+                        ) {
+                            Text(strings.downloadUpdate)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingApkUpdate = null }) {
+                            Text(strings.cancel)
+                        }
+                    },
+                )
+            }
             Scaffold(
                 contentWindowInsets = WindowInsets(0),
                 topBar = {
