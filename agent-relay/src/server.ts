@@ -9,7 +9,7 @@ import { execFileSync } from 'child_process';
 import { promises as fsPromises } from 'fs';
 import simpleGit from 'simple-git';
 import qrcode from 'qrcode-terminal';
-import { SessionOrchestrator } from './session-orchestrator';
+import { SessionOrchestrator, codexDesktopVisibleWorkspaceRoots } from './session-orchestrator';
 import { applyUpdate, checkForUpdates, type UpdateInfo } from './updater';
 import {
   registerNotificationToken,
@@ -265,6 +265,7 @@ function getAllowedWorkspaceRoots(): string[] {
   return uniqueResolvedPaths([
     getPrimaryWorkspaceRoot(),
     getReposRoot(),
+    ...codexDesktopVisibleWorkspaceRoots(),
     ...discoverRelayGitWorktrees(),
   ]);
 }

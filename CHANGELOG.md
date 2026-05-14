@@ -9,12 +9,17 @@
 
 ### Fixed
 
+- Reused an already-running relay agent when resuming the same Codex thread, preventing duplicate `codex app-server` processes for one thread.
+- Forwarded token-usage updates as live relay events instead of adding noisy status messages to mobile conversations.
 - Hardened Android connection import and relay endpoint validation so QR/deep-link pairing rejects invalid relay URLs and public cleartext WebSocket hosts.
 - Removed a nullable active-agent crash risk from the Android top bar during fast agent state changes.
 - Added Android JVM tests for connection parsing and relay endpoint safety checks.
 
 ### Improved
 
+- Expanded desktop relay workspace discovery to include Codex Desktop visible workspace roots.
+- Improved mobile relay summaries for plans, command activity, file changes, and pending agent requests.
+- Refined the desktop relay window sizing and visual shell for the updated relay experience.
 - Refined the Android chat surface with a lighter status pill, more polished composer, cleaner message hierarchy, and a more compact first-run guide.
 - Polished Android home, project, attachment, and settings entry surfaces for a more cohesive mobile app feel.
 - Revalidated Android release signing, install, launch smoke, and fatal-log checks on an emulator.

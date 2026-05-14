@@ -219,15 +219,33 @@ function summarizeFileChangeForMobile(text: string): string {
   return `文件改动\n${lines.join('\n')}`;
 }
 
+function summarizeCommandForMobile(text: string, completed = false): string {
+  const command = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) =>
+      line &&
+      !line.toLowerCase().startsWith('cwd:') &&
+      !line.toLowerCase().startsWith('status:') &&
+      !line.toLowerCase().startsWith('exit:') &&
+      !line.toLowerCase().startsWith('duration:') &&
+      !['正在运行命令。', '命令执行完成。', '命令已完成，输出已省略。'].includes(line)
+    );
+  if (!command) return completed ? '命令已完成，输出已省略。' : '运行命令';
+  const compact = compactSingleLine(command);
+  const visible = compact.length > 160 ? `${compact.slice(0, 160).trimEnd()}...` : compact;
+  return `${completed ? '命令已完成' : '运行命令'}\n${visible}`;
+}
+
 function summarizeMessageForMobile<T extends { type: string; text: string }>(message: T): T {
   if ((message as T & { role?: string }).role === 'user' || message.type === 'user') {
     return { ...message, text: truncateForMobile(simplifyUserMessageForMobile(message.text), 'user') };
   }
   switch (message.type) {
     case 'command':
-      return { ...message, text: '正在运行命令。' };
+      return { ...message, text: summarizeCommandForMobile(message.text) };
     case 'command_output':
-      return { ...message, text: '命令已完成，输出已省略。' };
+      return { ...message, text: summarizeCommandForMobile(message.text, true) };
     case 'file_change':
       return { ...message, text: summarizeFileChangeForMobile(message.text) };
     case 'sub_agent':
@@ -255,9 +273,9 @@ function stripInjectedContextForMobile(text: string): string {
     const index = text.lastIndexOf(marker);
     if (index >= 0) cursor = Math.max(cursor, index + marker.length);
   }
-  if (cursor < 0) return CONTEXT_PLACEHOLDER;
+  if (cursor < 0) return '';
   const rest = text.slice(cursor).trim();
-  if (!rest || looksLikeInjectedContext(rest)) return CONTEXT_PLACEHOLDER;
+  if (!rest || looksLikeInjectedContext(rest)) return '';
   return rest;
 }
 
@@ -406,7 +424,7 @@ function uniqueResolvedPaths(values: string[]): string[] {
   return result;
 }
 
-function codexDesktopVisibleWorkspaceRoots(): string[] {
+export function codexDesktopVisibleWorkspaceRoots(): string[] {
   const state = readCodexDesktopState();
   const atomState = codexDesktopAtomState();
   if (!state && !atomState) return [];
@@ -1224,7 +1242,11 @@ function formatPlanSteps(plan: unknown): string {
       const record = step as Record<string, unknown>;
       const text = valueToText(record.step ?? record.text);
       const status = valueToText(record.status);
-      return [status ? `[${status}]` : '', text].filter(Boolean).join(' ');
+      if (!text) return '';
+      const normalizedStatus = status.trim().toLowerCase();
+      const checkbox = ['completed', 'complete', 'done', 'finished'].includes(normalizedStatus) ? '[x]' : '[ ]';
+      const statusLabel = status ? ` **${status}**` : '';
+      return `- ${checkbox} ${text}${statusLabel}`;
     })
     .filter(Boolean)
     .join('\n');
@@ -1270,7 +1292,10 @@ function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Re
   }
 
   if (type === 'plan') {
-    return { ...item, type: 'plan', text: valueToText(item.text) || 'Plan updated.' };
+    const planText = [valueToText(item.explanation), formatPlanSteps(item.plan ?? item.steps)]
+      .filter(Boolean)
+      .join('\n\n');
+    return { ...item, type: 'plan', text: planText || valueToText(item.text) || 'Plan updated.' };
   }
 
   if (type === 'reasoning') {
@@ -1425,6 +1450,16 @@ export class SessionOrchestrator {
     return message.toLowerCase().includes('effort');
   }
 
+  private findAgentByCodexThreadId(threadId: string, exceptAgentId?: string): AgentInfo | null {
+    const normalized = threadId.trim();
+    if (!normalized) return null;
+    for (const agent of this.agents.values()) {
+      if (agent.id === exceptAgentId) continue;
+      if (agent.codexThreadId === normalized || agent.threadId === normalized) return agent;
+    }
+    return null;
+  }
+
   async createAgent(
     name: string,
     model: string,
@@ -1439,6 +1474,12 @@ export class SessionOrchestrator {
     },
   ): Promise<Omit<AgentInfo, 'process' | 'buffer' | 'pendingResponses' | 'pendingAgentRequests' | 'messageItemIds' | 'fileSnapshots' | 'toolCalls' | 'turnQueue' | 'queueDraining'>> {
     const id = agentId || uuid();
+    const requestedCodexThreadId = options?.codexThreadId?.trim() || undefined;
+    const existingThreadAgent = requestedCodexThreadId ? this.findAgentByCodexThreadId(requestedCodexThreadId) : null;
+    if (existingThreadAgent) {
+      console.log(`[agents] Reusing running agent ${existingThreadAgent.id} for Codex thread ${requestedCodexThreadId}`);
+      return this.serialize(existingThreadAgent);
+    }
     if (this.agents.has(id)) {
       throw new Error(`Agent ${id} is already running`);
     }
@@ -1459,7 +1500,7 @@ export class SessionOrchestrator {
       status: 'initializing',
       threadId: null,
       currentTurnId: null,
-      codexThreadId: options?.codexThreadId || null,
+      codexThreadId: requestedCodexThreadId || null,
       codexPath: null,
       source: null,
       messages: [],
@@ -1585,6 +1626,12 @@ export class SessionOrchestrator {
       const thread = threadData.thread as Record<string, unknown> | undefined;
       agent.threadId = (thread?.id as string) || (threadData.threadId as string) || null;
       agent.codexThreadId = agent.threadId;
+      if (agent.threadId) {
+        const duplicate = this.findAgentByCodexThreadId(agent.threadId, agent.id);
+        if (duplicate) {
+          throw new Error(`Codex thread ${agent.threadId} is already attached to running agent ${duplicate.id}`);
+        }
+      }
       agent.codexPath = typeof thread?.path === 'string' ? thread.path : null;
       agent.source = typeof thread?.source === 'string' ? thread.source : null;
       agent.cwd = (typeof threadData.cwd === 'string' ? threadData.cwd : cwd) || cwd;
@@ -1811,6 +1858,7 @@ export class SessionOrchestrator {
     } while (params.all === true && nextCursor && page < 25);
 
     return {
+      projectRoots: visibleWorkspaceRoots,
       data: allData
         .filter((entry) => shouldShowCodexThread(entry))
         .filter((entry) => shouldShowCodexThreadInDesktopWorkspace(entry, visibleWorkspaceRoots, workspaceRootHints))
@@ -1988,6 +2036,13 @@ export class SessionOrchestrator {
       codexThreadId: agent.codexThreadId,
       codexPath: agent.codexPath,
       source: agent.source,
+      pendingRequests: Array.from(agent.pendingAgentRequests.values()).map((request) => ({
+        requestId: String(request.id),
+        method: request.method,
+        params: request.params,
+        text: valueToText(request.params.message ?? request.params.reason ?? request.params.command ?? request.params.tool ?? request.params.item) || request.method,
+        timestamp: request.timestamp,
+      })),
       messages: agent.messages.map(summarizeMessageForMobile),
     };
   }
@@ -2604,21 +2659,7 @@ export class SessionOrchestrator {
         }
 
         case 'thread/tokenUsage/updated': {
-          const turnId = (p.turnId as string) || agent.currentTurnId || '';
-          const usage = p.tokenUsage as Record<string, unknown> | undefined;
-          const total = usage?.total as Record<string, unknown> | undefined;
-          const last = usage?.last as Record<string, unknown> | undefined;
-          const text = [
-            'Token usage',
-            total ? `total: ${formatJsonDetail(total)}` : '',
-            last ? `last: ${formatJsonDetail(last)}` : '',
-            usage?.modelContextWindow ? `context window: ${usage.modelContextWindow}` : '',
-          ].filter(Boolean).join('\n');
-          const itemId = turnId ? `tokens_${turnId}` : `tokens_${Date.now()}`;
-          this.finalizeItemMessage(agent, itemId, text, 'status');
-          this.broadcast(agent.id, 'item/completed', {
-            item: { id: itemId, type: 'status', text },
-          });
+          this.broadcast(agent.id, 'thread/tokenUsage/updated', p);
           break;
         }
 

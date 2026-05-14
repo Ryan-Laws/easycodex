@@ -1126,15 +1126,15 @@ async function stopRelay() {
 async function createWindow() {
   Menu.setApplicationMenu(null);
   mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 760,
+    width: 1280,
+    height: 820,
     minWidth: 940,
     minHeight: 660,
     show: !isSmokeTest,
     frame: false,
     icon: windowIconPath,
     title: 'EasyCodex Relay',
-    backgroundColor: '#f7f4ec',
+    backgroundColor: '#10120f',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,

@@ -34,8 +34,84 @@
       </div>
     </section>
 
-    <section class="content-grid">
-      <section class="panel control-panel">
+    <section class="workbench-panel" aria-label="EasyCodex task workbench">
+      <aside class="task-rail">
+        <div class="rail-header">
+          <div>
+            <p class="eyebrow">Workbench</p>
+            <h2>任务台</h2>
+          </div>
+          <button id="refreshAgentsButton" class="icon-button" title="Refresh tasks" aria-label="Refresh tasks">↻</button>
+        </div>
+        <div class="rail-tabs" role="tablist" aria-label="Task filters">
+          <button class="rail-tab active" data-filter="active" type="button">运行中</button>
+          <button class="rail-tab" data-filter="history" type="button">历史</button>
+        </div>
+        <label class="task-search">
+          <span>搜索任务</span>
+          <input id="taskSearchInput" autocomplete="off" placeholder="任务、项目、状态">
+        </label>
+        <div id="desktopSocketStatus" class="socket-status">等待中继启动</div>
+        <div id="taskList" class="task-list" aria-live="polite"></div>
+      </aside>
+
+      <section class="conversation-pane">
+        <div class="conversation-top">
+          <div>
+            <p id="selectedTaskMeta" class="eyebrow">No task selected</p>
+            <h2 id="selectedTaskTitle">选择一个任务</h2>
+            <p id="selectedTaskSubtitle">手机发起的任务会出现在这里，电脑端可以继续对话和审批。</p>
+          </div>
+          <div class="conversation-actions">
+            <button id="resumeThreadButton" class="secondary" hidden>恢复</button>
+            <button id="stopAgentButton" class="secondary danger">停止</button>
+          </div>
+        </div>
+
+        <div id="approvalPanel" class="approval-panel" hidden></div>
+        <div id="messageStream" class="message-stream"></div>
+
+        <form id="agentComposer" class="agent-composer">
+          <textarea id="agentPromptInput" rows="3" placeholder="给当前任务继续发送消息..."></textarea>
+          <div class="composer-actions">
+            <span id="composerHint">选择运行中的任务后可以发送。</span>
+            <button id="sendPromptButton" class="primary" type="submit">发送</button>
+          </div>
+        </form>
+      </section>
+
+      <aside class="context-pane">
+        <div class="context-block">
+          <h2>任务信息</h2>
+          <dl id="taskDetails"></dl>
+        </div>
+        <div class="context-block git-context">
+          <div class="context-heading">
+            <h2>文件变更</h2>
+            <button id="refreshGitButton" class="text-button" type="button">刷新</button>
+          </div>
+          <p id="gitSummaryText">选择运行中的任务后显示 Git 状态。</p>
+          <div id="changedFiles" class="changed-files"></div>
+          <pre id="diffPreview" class="diff-preview"></pre>
+        </div>
+        <div class="context-block">
+          <h2>连接</h2>
+          <p id="workbenchConnectionText">未连接</p>
+        </div>
+        <div class="context-block compact-setup">
+          <h2>快速连接</h2>
+          <div class="mini-qr-box">
+            <img id="workbenchQrImage" alt="EasyCodex relay QR">
+          </div>
+          <button id="copyWorkbenchDeepLinkButton" class="secondary full">复制手机连接</button>
+        </div>
+      </aside>
+    </section>
+
+    <details class="setup-drawer">
+      <summary>中继设置和日志</summary>
+      <section class="content-grid">
+        <section class="panel control-panel">
         <div class="panel-title">
           <div>
             <h2 data-i18n="launch">Launch</h2>
@@ -110,29 +186,30 @@
           <button id="startButton" class="primary" data-i18n="startRelay">Start relay</button>
           <button id="stopButton" class="secondary danger" data-i18n="stop">Stop</button>
         </div>
+        </section>
+
+        <aside class="panel qr-panel">
+          <div class="panel-title">
+            <div>
+              <h2 data-i18n="quickConnect">Quick connect</h2>
+              <p data-i18n="qrHint">Scan with your phone camera to import URL and key.</p>
+            </div>
+          </div>
+          <div class="qr-box">
+            <img id="qrImage" alt="EasyCodex relay QR">
+          </div>
+          <button id="copyDeepLinkButton" class="secondary full" data-i18n="copyDeepLink">Copy deep link</button>
+        </aside>
       </section>
 
-      <aside class="panel qr-panel">
-        <div class="panel-title">
-          <div>
-            <h2 data-i18n="quickConnect">Quick connect</h2>
-            <p data-i18n="qrHint">Scan with your phone camera to import URL and key.</p>
-          </div>
+      <section class="panel log-panel">
+        <div class="log-header">
+          <h2 data-i18n="logs">Logs</h2>
+          <button id="clearLogsButton" class="text-button" data-i18n="clear">Clear</button>
         </div>
-        <div class="qr-box">
-          <img id="qrImage" alt="EasyCodex relay QR">
-        </div>
-        <button id="copyDeepLinkButton" class="secondary full" data-i18n="copyDeepLink">Copy deep link</button>
-      </aside>
-    </section>
-
-    <section class="panel log-panel">
-      <div class="log-header">
-        <h2 data-i18n="logs">Logs</h2>
-        <button id="clearLogsButton" class="text-button" data-i18n="clear">Clear</button>
-      </div>
-      <pre id="logOutput"></pre>
-    </section>
+        <pre id="logOutput"></pre>
+      </section>
+    </details>
   </main>
   <script src="./renderer.js"></script>
 </body>

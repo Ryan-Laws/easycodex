@@ -360,12 +360,49 @@ const elements = {
   clearLogsButton: document.getElementById('clearLogsButton'),
   windowMinimizeButton: document.getElementById('windowMinimizeButton'),
   windowCloseButton: document.getElementById('windowCloseButton'),
+  desktopSocketStatus: document.getElementById('desktopSocketStatus'),
+  refreshAgentsButton: document.getElementById('refreshAgentsButton'),
+  taskSearchInput: document.getElementById('taskSearchInput'),
+  taskList: document.getElementById('taskList'),
+  selectedTaskMeta: document.getElementById('selectedTaskMeta'),
+  selectedTaskTitle: document.getElementById('selectedTaskTitle'),
+  selectedTaskSubtitle: document.getElementById('selectedTaskSubtitle'),
+  messageStream: document.getElementById('messageStream'),
+  agentComposer: document.getElementById('agentComposer'),
+  agentPromptInput: document.getElementById('agentPromptInput'),
+  sendPromptButton: document.getElementById('sendPromptButton'),
+  composerHint: document.getElementById('composerHint'),
+  stopAgentButton: document.getElementById('stopAgentButton'),
+  resumeThreadButton: document.getElementById('resumeThreadButton'),
+  approvalPanel: document.getElementById('approvalPanel'),
+  taskDetails: document.getElementById('taskDetails'),
+  refreshGitButton: document.getElementById('refreshGitButton'),
+  gitSummaryText: document.getElementById('gitSummaryText'),
+  changedFiles: document.getElementById('changedFiles'),
+  diffPreview: document.getElementById('diffPreview'),
+  workbenchConnectionText: document.getElementById('workbenchConnectionText'),
+  workbenchQrImage: document.getElementById('workbenchQrImage'),
+  copyWorkbenchDeepLinkButton: document.getElementById('copyWorkbenchDeepLinkButton'),
 };
 
 let currentState = null;
 let currentLanguage = 'en';
 let portPreviewTimer = null;
 let pendingAction = null;
+let relaySocket = null;
+let relaySocketState = 'offline';
+let relayRequestId = 1;
+let selectedAgentId = null;
+let selectedThreadId = null;
+let taskFilter = 'active';
+let taskSearch = '';
+let agents = [];
+let historyThreads = [];
+let pendingRequestsByAgent = new Map();
+const gitContextByCwd = new Map();
+const loadingGitCwds = new Set();
+const pendingRelayRequests = new Map();
+const refreshTimers = new Map();
 
 function t(key, ...args) {
   const dict = dictionaries[currentLanguage] || dictionaries.en;
@@ -386,6 +423,494 @@ function appendLog(line) {
   if (!text) return;
   elements.logOutput.textContent += `${text}\n`;
   elements.logOutput.scrollTop = elements.logOutput.scrollHeight;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function shortPath(value) {
+  const raw = String(value || '');
+  if (!raw) return '';
+  const parts = raw.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 2) return raw;
+  return `${parts.at(-2)} / ${parts.at(-1)}`;
+}
+
+function formatTime(value) {
+  const timestamp = Number(value || 0);
+  if (!timestamp) return '';
+  return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function statusLabel(status) {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'working' || normalized === 'running') return '执行中';
+  if (normalized === 'ready') return '空闲';
+  if (normalized === 'error') return '错误';
+  if (normalized === 'stopped') return '已停止';
+  if (normalized === 'initializing') return '初始化';
+  return status || '未知';
+}
+
+function messageLabel(type, role) {
+  if (role === 'user' || type === 'user') return 'You';
+  switch (type) {
+    case 'thinking': return 'Reasoning';
+    case 'plan': return 'Plan';
+    case 'command': return 'Command';
+    case 'command_output': return 'Output';
+    case 'file_change': return 'Files';
+    case 'sub_agent': return 'Sub-agent';
+    case 'status': return 'Status';
+    default: return 'Codex';
+  }
+}
+
+function taskPreview(agent) {
+  const last = [...(agent.messages || [])].reverse().find((message) => String(message.text || '').trim());
+  return String(agent.activityLabel || agent.activity || last?.text || '等待新消息')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+}
+
+function taskSearchText(item, isHistory) {
+  return [
+    item.name,
+    item.preview,
+    item.status,
+    item.model,
+    item.cwd,
+    item.projectRoot,
+    isHistory ? '' : taskPreview(item),
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function filterTasks(items, isHistory) {
+  const query = taskSearch.trim().toLowerCase();
+  if (!query) return items;
+  return items.filter((item) => taskSearchText(item, isHistory).includes(query));
+}
+
+function taskNameFromPrompt(text) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return 'EasyCodex';
+  return clean.length > 42 ? `${clean.slice(0, 42).trimEnd()}...` : clean;
+}
+
+function activeAgent() {
+  return agents.find((agent) => agent.id === selectedAgentId) || null;
+}
+
+function isAgentBusy(agent) {
+  const status = String(agent?.status || '').toLowerCase();
+  return status === 'working' || status === 'running';
+}
+
+function selectedThread() {
+  return historyThreads.find((thread) => thread.id === selectedThreadId) || null;
+}
+
+function diffSummary(diff) {
+  const files = new Set();
+  let additions = 0;
+  let deletions = 0;
+  for (const line of String(diff || '').split(/\r?\n/)) {
+    if (line.startsWith('+') && !line.startsWith('+++')) additions += 1;
+    if (line.startsWith('-') && !line.startsWith('---')) deletions += 1;
+    const file = line.match(/^diff --git a\/(.+?) b\/(.+)$/)?.[2]
+      || line.match(/^\+\+\+ b\/(.+)$/)?.[1]
+      || line.match(/^--- a\/(.+)$/)?.[1];
+    if (file && file !== '/dev/null') files.add(file.replace(/\\/g, '/'));
+  }
+  return { files: Array.from(files), additions, deletions };
+}
+
+function gitStatusFiles(status) {
+  if (!status) return [];
+  return [
+    ...(status.modified || []),
+    ...(status.created || []),
+    ...(status.deleted || []),
+    ...(status.notAdded || []),
+    ...((status.renamed || []).map((entry) => entry.to || entry.from).filter(Boolean)),
+    ...(status.conflicted || []),
+  ].filter(Boolean);
+}
+
+async function refreshGitContext(agent, force = false) {
+  if (!agent?.cwd || relaySocketState !== 'online') return;
+  const cwd = agent.cwd;
+  if (!force && (gitContextByCwd.has(cwd) || loadingGitCwds.has(cwd))) return;
+  loadingGitCwds.add(cwd);
+  renderGitContext(agent);
+  try {
+    const [status, diff] = await Promise.all([
+      relaySend('git_status', { cwd }),
+      relaySend('git_diff', { cwd }),
+    ]);
+    gitContextByCwd.set(cwd, {
+      status,
+      diff: diff?.diff || '',
+      loadedAt: Date.now(),
+      error: '',
+    });
+  } catch (error) {
+    gitContextByCwd.set(cwd, {
+      status: null,
+      diff: '',
+      loadedAt: Date.now(),
+      error: error.message || String(error),
+    });
+  } finally {
+    loadingGitCwds.delete(cwd);
+    if (activeAgent()?.cwd === cwd) renderGitContext(activeAgent());
+  }
+}
+
+function renderGitContext(agent) {
+  if (!agent?.cwd) {
+    elements.gitSummaryText.textContent = '选择运行中的任务后显示 Git 状态。';
+    elements.changedFiles.innerHTML = '';
+    elements.diffPreview.textContent = '';
+    elements.refreshGitButton.disabled = true;
+    return;
+  }
+
+  elements.refreshGitButton.disabled = relaySocketState !== 'online';
+  const cwd = agent.cwd;
+  const context = gitContextByCwd.get(cwd);
+  if (loadingGitCwds.has(cwd) && !context) {
+    elements.gitSummaryText.textContent = '正在读取 Git 状态...';
+    elements.changedFiles.innerHTML = '';
+    elements.diffPreview.textContent = '';
+    return;
+  }
+
+  if (!context) {
+    elements.gitSummaryText.textContent = '等待读取 Git 状态...';
+    elements.changedFiles.innerHTML = '';
+    elements.diffPreview.textContent = '';
+    refreshGitContext(agent).catch((error) => appendLog(`Git refresh failed: ${error.message || error}`));
+    return;
+  }
+
+  if (context.error) {
+    elements.gitSummaryText.textContent = `Git 状态不可用：${context.error}`;
+    elements.changedFiles.innerHTML = '';
+    elements.diffPreview.textContent = '';
+    return;
+  }
+
+  const summary = diffSummary(context.diff);
+  const statusFiles = gitStatusFiles(context.status);
+  const files = Array.from(new Set([...summary.files, ...statusFiles]));
+  const branch = context.status?.branch || 'unknown';
+  elements.gitSummaryText.textContent = files.length
+    ? `${branch} / ${files.length} 个文件 / +${summary.additions} -${summary.deletions}`
+    : `${branch} / 工作区干净`;
+  elements.changedFiles.innerHTML = files.length
+    ? files.slice(0, 18).map((file) => `<span class="file-chip">${escapeHtml(file)}</span>`).join('')
+    : '<span class="muted-chip">没有文件变更</span>';
+  elements.diffPreview.textContent = context.diff
+    ? context.diff.slice(0, 5000)
+    : '';
+}
+
+function setSocketStatus(state, text) {
+  relaySocketState = state;
+  elements.desktopSocketStatus.dataset.state = state;
+  elements.desktopSocketStatus.textContent = text;
+  elements.workbenchConnectionText.textContent = text;
+}
+
+function relaySend(action, params = {}) {
+  if (!relaySocket || relaySocket.readyState !== WebSocket.OPEN || relaySocketState !== 'online') {
+    return Promise.reject(new Error('Relay WebSocket is not connected.'));
+  }
+  const requestId = `desktop_${relayRequestId++}`;
+  relaySocket.send(JSON.stringify({ action, params, requestId }));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRelayRequests.delete(requestId);
+      reject(new Error(`${action} timed out`));
+    }, 30000);
+    pendingRelayRequests.set(requestId, { resolve, reject, timer });
+  });
+}
+
+function handleRelayResponse(message) {
+  const pending = pendingRelayRequests.get(message.requestId);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingRelayRequests.delete(message.requestId);
+  if (message.type === 'error') pending.reject(new Error(message.error || 'Relay request failed'));
+  else pending.resolve(message.data);
+}
+
+function scheduleAgentRefresh(agentId) {
+  if (!agentId || agentId === 'system') return;
+  clearTimeout(refreshTimers.get(agentId));
+  refreshTimers.set(agentId, setTimeout(() => {
+    refreshTimers.delete(agentId);
+    refreshAgent(agentId).catch((error) => appendLog(`Task refresh failed: ${error.message || error}`));
+  }, 120));
+}
+
+function rememberPendingRequest(agentId, data) {
+  if (!agentId || !data?.requestId) return;
+  const requests = pendingRequestsByAgent.get(agentId) || [];
+  const next = requests.filter((request) => request.requestId !== data.requestId);
+  next.push(data);
+  pendingRequestsByAgent.set(agentId, next);
+}
+
+function resolvePendingRequest(agentId, requestId) {
+  const requests = pendingRequestsByAgent.get(agentId) || [];
+  pendingRequestsByAgent.set(agentId, requests.filter((request) => request.requestId !== requestId));
+}
+
+function handleRelayStream(entry) {
+  if (!entry || entry.type !== 'stream') return;
+  if (entry.event === 'agents/changed' || entry.event === 'codex/threads_changed') {
+    refreshTasks().catch((error) => appendLog(`Task list refresh failed: ${error.message || error}`));
+  }
+  if (entry.event === 'agent/requested') rememberPendingRequest(entry.agentId, entry.data);
+  if (entry.event === 'agent/request_resolved') resolvePendingRequest(entry.agentId, entry.data?.requestId);
+  scheduleAgentRefresh(entry.agentId);
+}
+
+function connectRelaySocket() {
+  if (!currentState?.relayRunning || !currentState?.relayUrl || !currentState?.apiKey) {
+    if (relaySocket) relaySocket.close();
+    relaySocket = null;
+    setSocketStatus('offline', '等待中继启动');
+    renderWorkbench();
+    return;
+  }
+  if (relaySocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(relaySocket.readyState)) return;
+
+  setSocketStatus('offline', '正在连接任务流...');
+  relaySocket = new WebSocket(currentState.relayUrl);
+  relaySocket.addEventListener('open', () => {
+    relaySocket.send(JSON.stringify({
+      action: 'auth',
+      params: { key: currentState.apiKey, clientId: 'easycodex-desktop-workbench' },
+      requestId: `desktop_auth_${Date.now()}`,
+    }));
+  });
+  relaySocket.addEventListener('message', (event) => {
+    let message = null;
+    try {
+      message = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (message.type === 'response' && message.action === 'auth') {
+      setSocketStatus('online', '任务流已连接');
+      refreshTasks().catch((error) => appendLog(`Task load failed: ${error.message || error}`));
+      return;
+    }
+    if (message.type === 'response' || message.type === 'error') {
+      handleRelayResponse(message);
+      return;
+    }
+    handleRelayStream(message);
+  });
+  relaySocket.addEventListener('close', () => {
+    if (relaySocketState !== 'offline') setSocketStatus('offline', '任务流已断开');
+    renderWorkbench();
+  });
+  relaySocket.addEventListener('error', () => {
+    setSocketStatus('error', '任务流连接失败');
+    renderWorkbench();
+  });
+}
+
+async function refreshAgent(agentId) {
+  const agent = await relaySend('get_agent', { agentId });
+  agents = agents.map((entry) => (entry.id === agent.id ? agent : entry));
+  if (!agents.some((entry) => entry.id === agent.id)) agents.unshift(agent);
+  if (Array.isArray(agent.pendingRequests)) pendingRequestsByAgent.set(agent.id, agent.pendingRequests);
+  renderWorkbench();
+}
+
+async function refreshTasks() {
+  if (relaySocketState !== 'online') {
+    renderWorkbench();
+    return;
+  }
+  agents = await relaySend('list_agents');
+  for (const agent of agents) {
+    if (Array.isArray(agent.pendingRequests)) pendingRequestsByAgent.set(agent.id, agent.pendingRequests);
+  }
+  if (taskFilter === 'history') await refreshHistory();
+  if (selectedAgentId && !agents.some((agent) => agent.id === selectedAgentId)) selectedAgentId = agents[0]?.id || null;
+  if (!selectedAgentId && !selectedThreadId && agents[0]) selectedAgentId = agents[0].id;
+  renderWorkbench();
+}
+
+async function refreshHistory() {
+  const result = await relaySend('list_codex_threads', { all: true, limit: 80 });
+  const runningThreadIds = new Set(agents.map((agent) => agent.codexThreadId).filter(Boolean));
+  historyThreads = (result?.data || []).filter((thread) => !runningThreadIds.has(thread.id));
+}
+
+function renderTaskList() {
+  const isHistory = taskFilter === 'history';
+  const items = filterTasks(isHistory ? historyThreads : agents, isHistory);
+  if (!items.length) {
+    elements.taskList.innerHTML = `<div class="empty-state">${taskSearch ? '没有匹配的任务' : `暂无${isHistory ? '历史任务' : '运行中任务'}`}</div>`;
+    return;
+  }
+  elements.taskList.innerHTML = items.map((item) => {
+    const id = isHistory ? item.id : item.id;
+    const active = isHistory ? selectedThreadId === id : selectedAgentId === id;
+    const title = item.name || item.preview || 'Codex task';
+    const status = item.queuedFollowUpCount > 0 ? 'pending' : String(item.status || '');
+    const preview = isHistory ? String(item.preview || item.activityLabel || '可恢复历史任务') : taskPreview(item);
+    const meta = isHistory ? shortPath(item.cwd || item.projectRoot) : shortPath(item.cwd);
+    return `
+      <button class="task-card ${active ? 'active' : ''}" data-id="${escapeHtml(id)}" data-kind="${isHistory ? 'history' : 'agent'}" type="button">
+        <span class="task-title-line">
+          <span class="task-title">${escapeHtml(title)}</span>
+          <span class="status-pill ${escapeHtml(status)}">${escapeHtml(isHistory ? statusLabel(item.status) : statusLabel(item.status))}</span>
+        </span>
+        <span class="task-preview">${escapeHtml(preview)}</span>
+        <span class="task-meta-line">
+          <span class="task-path">${escapeHtml(meta)}</span>
+          <span class="task-path">${escapeHtml(formatTime(item.updatedAt || item.createdAt || item.messages?.at(-1)?.timestamp))}</span>
+        </span>
+      </button>
+    `;
+  }).join('');
+}
+
+function renderMessages(messages) {
+  if (!messages?.length) {
+    elements.messageStream.innerHTML = '<div class="empty-state">这个任务还没有消息。手机或电脑发一句话后，执行流会出现在这里。</div>';
+    return;
+  }
+  elements.messageStream.innerHTML = messages.map((message) => {
+    const role = message.role === 'user' || message.type === 'user' ? 'user' : 'agent';
+    const type = String(message.type || role);
+    return `
+      <article class="message ${escapeHtml(role)} ${escapeHtml(type)}">
+        <div class="message-shell">
+          <div class="message-label">
+            <span>${escapeHtml(messageLabel(type, role))}</span>
+            <span>${escapeHtml(formatTime(message.timestamp))}</span>
+          </div>
+          <div class="message-text">${escapeHtml(message.text || '')}</div>
+        </div>
+      </article>
+    `;
+  }).join('');
+  elements.messageStream.scrollTop = elements.messageStream.scrollHeight;
+}
+
+function renderApproval(agent) {
+  const requests = pendingRequestsByAgent.get(agent?.id) || [];
+  if (!agent || requests.length === 0) {
+    elements.approvalPanel.hidden = true;
+    elements.approvalPanel.innerHTML = '';
+    return;
+  }
+  const request = requests[0];
+  const text = request.text || request.params?.command || request.method || 'Codex 请求批准操作';
+  elements.approvalPanel.hidden = false;
+  elements.approvalPanel.innerHTML = `
+    <h3>等待审批</h3>
+    <p>Codex 正在请求电脑或手机确认这个操作。</p>
+    <pre>${escapeHtml(text)}</pre>
+    <div class="approval-actions">
+      <button class="primary" data-approval="approve" data-request-id="${escapeHtml(request.requestId)}" type="button">批准</button>
+      <button class="secondary danger" data-approval="deny" data-request-id="${escapeHtml(request.requestId)}" type="button">拒绝</button>
+    </div>
+  `;
+}
+
+function renderDetails(agent, thread) {
+  const rows = agent ? [
+    ['状态', statusLabel(agent.status)],
+    ['模型', agent.model || '-'],
+    ['项目', agent.cwd || '-'],
+    ['Thread', agent.codexThreadId || agent.threadId || '-'],
+    ['审批策略', agent.approvalPolicy || '-'],
+    ['运行状态', agent.activityLabel || agent.activity || '-'],
+  ] : thread ? [
+    ['状态', statusLabel(thread.status)],
+    ['项目', thread.cwd || thread.projectRoot || '-'],
+    ['Thread', thread.id],
+    ['最近更新', thread.updatedAt ? new Date(thread.updatedAt).toLocaleString() : '-'],
+    ['队列', String(thread.queuedFollowUpCount || 0)],
+  ] : [
+    ['状态', relaySocketState === 'online' ? '已连接' : '未连接'],
+    ['提示', '从左侧选择任务'],
+  ];
+  elements.taskDetails.innerHTML = rows.map(([key, value]) => `
+    <div>
+      <dt>${escapeHtml(key)}</dt>
+      <dd>${escapeHtml(value)}</dd>
+    </div>
+  `).join('');
+}
+
+function renderSelectedTask() {
+  const agent = activeAgent();
+  const thread = selectedThread();
+  elements.resumeThreadButton.hidden = !thread || Boolean(agent);
+  elements.stopAgentButton.disabled = !agent || agent.status === 'stopped';
+  elements.sendPromptButton.disabled = !agent || relaySocketState !== 'online';
+  elements.agentPromptInput.disabled = !agent || relaySocketState !== 'online';
+  elements.composerHint.textContent = agent
+    ? isAgentBusy(agent)
+      ? `当前任务运行中，发送将新建并行任务 / ${shortPath(agent.cwd)}`
+      : `发送到 ${shortPath(agent.cwd)}`
+    : thread
+      ? '先恢复历史任务，再继续发送消息。'
+      : '选择运行中的任务后可以发送。';
+
+  if (agent) {
+    elements.selectedTaskMeta.textContent = `${statusLabel(agent.status)} / ${shortPath(agent.cwd)}`;
+    elements.selectedTaskTitle.textContent = agent.name || 'Codex task';
+    elements.selectedTaskSubtitle.textContent = agent.activityLabel || agent.activity || agent.codexThreadId || '电脑和手机正在共享这个 relay 任务。';
+    renderApproval(agent);
+    renderMessages(agent.messages || []);
+    renderDetails(agent, null);
+    renderGitContext(agent);
+    return;
+  }
+
+  if (thread) {
+    elements.selectedTaskMeta.textContent = `${statusLabel(thread.status)} / ${shortPath(thread.cwd)}`;
+    elements.selectedTaskTitle.textContent = thread.name || thread.preview || '历史任务';
+    elements.selectedTaskSubtitle.textContent = '这是 Codex 历史线程，恢复后可以继续对话。';
+    renderApproval(null);
+    renderMessages(thread.messages || []);
+    renderDetails(null, thread);
+    renderGitContext(null);
+    return;
+  }
+
+  elements.selectedTaskMeta.textContent = relaySocketState === 'online' ? 'Workbench ready' : 'No relay connection';
+  elements.selectedTaskTitle.textContent = relaySocketState === 'online' ? '选择一个任务' : '启动中继后显示任务';
+  elements.selectedTaskSubtitle.textContent = '手机发起的任务会出现在这里，电脑端可以继续对话和审批。';
+  renderApproval(null);
+  renderMessages([]);
+  renderDetails(null, null);
+  renderGitContext(null);
+}
+
+function renderWorkbench() {
+  renderTaskList();
+  renderSelectedTask();
 }
 
 function connectionText(state) {
@@ -478,6 +1003,10 @@ function renderState(state) {
   elements.relayUrlInput.value = state.relayUrl;
   elements.apiKeyInput.value = state.apiKey;
   elements.qrImage.src = state.qrDataUrl;
+  elements.workbenchQrImage.src = state.qrDataUrl;
+  elements.workbenchConnectionText.textContent = state.relayRunning
+    ? `Relay: ${state.relayUrl}`
+    : '启动中继后，电脑端任务台会连接本机任务流。';
   elements.firstUseGuide.hidden = !state.guideVisible;
   renderUpdate(state.update);
   elements.statusCard.dataset.busy = 'false';
@@ -489,6 +1018,7 @@ function renderState(state) {
   setCodexStatus(state);
   renderHealth(state.health);
   renderPendingStatus();
+  connectRelaySocket();
 }
 
 function renderHealth(health) {
@@ -618,6 +1148,10 @@ elements.copyDeepLinkButton.addEventListener('click', () => {
   if (currentState) window.easyCodexRelay.copyText(currentState.deepLink);
 });
 
+elements.copyWorkbenchDeepLinkButton.addEventListener('click', () => {
+  if (currentState) window.easyCodexRelay.copyText(currentState.deepLink);
+});
+
 elements.refreshKeyButton.addEventListener('click', () => {
   runAction(elements.refreshKeyButton, () => window.easyCodexRelay.refreshApiKey());
 });
@@ -638,6 +1172,157 @@ elements.windowMinimizeButton.addEventListener('click', () => {
 
 elements.windowCloseButton.addEventListener('click', () => {
   window.easyCodexRelay.closeWindow();
+});
+
+elements.refreshAgentsButton.addEventListener('click', () => {
+  refreshTasks().catch((error) => appendLog(`Task refresh failed: ${error.message || error}`));
+});
+
+elements.taskSearchInput.addEventListener('input', () => {
+  taskSearch = elements.taskSearchInput.value;
+  renderWorkbench();
+});
+
+elements.refreshGitButton.addEventListener('click', () => {
+  const agent = activeAgent();
+  if (!agent) return;
+  refreshGitContext(agent, true).catch((error) => appendLog(`Git refresh failed: ${error.message || error}`));
+});
+
+document.querySelectorAll('.rail-tab').forEach((button) => {
+  button.addEventListener('click', async () => {
+    taskFilter = button.dataset.filter || 'active';
+    document.querySelectorAll('.rail-tab').forEach((tab) => tab.classList.toggle('active', tab === button));
+    selectedAgentId = taskFilter === 'active' ? (selectedAgentId || agents[0]?.id || null) : null;
+    selectedThreadId = null;
+    try {
+      if (taskFilter === 'history') await refreshHistory();
+    } catch (error) {
+      appendLog(`History load failed: ${error.message || error}`);
+    }
+    renderWorkbench();
+  });
+});
+
+elements.taskList.addEventListener('click', async (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const card = target?.closest('.task-card');
+  if (!card) return;
+  const id = card.dataset.id;
+  if (card.dataset.kind === 'history') {
+    selectedAgentId = null;
+    selectedThreadId = id;
+    const thread = historyThreads.find((entry) => entry.id === id);
+    if (thread && !thread.messages) {
+      try {
+        const detail = await relaySend('read_codex_thread', { threadId: id });
+        historyThreads = historyThreads.map((entry) => (entry.id === id ? { ...entry, ...detail } : entry));
+      } catch (error) {
+        appendLog(`Thread read failed: ${error.message || error}`);
+      }
+    }
+  } else {
+    selectedThreadId = null;
+    selectedAgentId = id;
+    refreshAgent(id).catch((error) => appendLog(`Task read failed: ${error.message || error}`));
+  }
+  renderWorkbench();
+});
+
+elements.agentComposer.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const text = elements.agentPromptInput.value.trim();
+  const agent = activeAgent();
+  if (!text || !agent) return;
+  elements.sendPromptButton.disabled = true;
+  try {
+    let targetAgent = agent;
+    if (isAgentBusy(agent)) {
+      targetAgent = await relaySend('create_agent', {
+        name: taskNameFromPrompt(text),
+        model: agent.model || 'gpt-5.5',
+        cwd: agent.cwd || currentState?.workspace,
+        approvalPolicy: agent.approvalPolicy || 'never',
+        serviceTier: agent.serviceTier,
+        reasoningEffort: agent.reasoningEffort,
+      });
+      agents.unshift(targetAgent);
+      selectedAgentId = targetAgent.id;
+      selectedThreadId = null;
+      taskFilter = 'active';
+    }
+    await relaySend('send_message', { agentId: targetAgent.id, text });
+    elements.agentPromptInput.value = '';
+    await refreshAgent(targetAgent.id);
+  } catch (error) {
+    appendLog(`Send failed: ${error.message || error}`);
+  } finally {
+    renderWorkbench();
+  }
+});
+
+elements.agentPromptInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    elements.agentComposer.requestSubmit();
+  }
+});
+
+elements.stopAgentButton.addEventListener('click', async () => {
+  const agent = activeAgent();
+  if (!agent) return;
+  try {
+    await relaySend('stop_agent', { agentId: agent.id });
+    selectedAgentId = null;
+    await refreshTasks();
+  } catch (error) {
+    appendLog(`Stop failed: ${error.message || error}`);
+  }
+});
+
+elements.resumeThreadButton.addEventListener('click', async () => {
+  const thread = selectedThread();
+  if (!thread) return;
+  try {
+    const agent = await relaySend('create_agent', {
+      name: thread.name || thread.preview || 'Resumed Codex task',
+      model: thread.model || 'gpt-5.5',
+      cwd: thread.cwd || thread.projectRoot || currentState?.workspace,
+      approvalPolicy: thread.approvalPolicy || 'never',
+      serviceTier: thread.serviceTier,
+      reasoningEffort: thread.reasoningEffort,
+      codexThreadId: thread.id,
+    });
+    selectedThreadId = null;
+    selectedAgentId = agent.id;
+    taskFilter = 'active';
+    document.querySelectorAll('.rail-tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.filter === 'active'));
+    await refreshTasks();
+  } catch (error) {
+    appendLog(`Resume failed: ${error.message || error}`);
+  }
+});
+
+elements.approvalPanel.addEventListener('click', async (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest('[data-approval]');
+  const agent = activeAgent();
+  if (!button || !agent) return;
+  button.disabled = true;
+  const approved = button.dataset.approval === 'approve';
+  const requestId = button.dataset.requestId;
+  try {
+    await relaySend('respond_agent_request', {
+      agentId: agent.id,
+      requestId,
+      approved,
+      reason: approved ? 'Approved from EasyCodex desktop' : 'Denied from EasyCodex desktop',
+    });
+    resolvePendingRequest(agent.id, requestId);
+    await refreshAgent(agent.id);
+  } catch (error) {
+    appendLog(`Approval failed: ${error.message || error}`);
+  }
 });
 
 window.easyCodexRelay.onState(renderState);

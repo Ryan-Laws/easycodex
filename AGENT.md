@@ -56,6 +56,8 @@ Main files:
 9. The relay broadcasts events back to authenticated app clients.
 10. Codex thread state changes also emit `codex/threads_changed`, so clients can refresh task lists and active resumable thread details immediately.
 
+The relay keeps a single running agent attached to each Codex thread id. If a client asks to resume a thread that is already running, the relay returns the existing agent instead of spawning a second `codex app-server` process for the same thread.
+
 ## Core WebSocket Actions
 
 Agent actions:
