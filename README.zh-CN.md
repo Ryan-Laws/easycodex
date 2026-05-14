@@ -9,7 +9,7 @@
     <a href="README.zh-TW.md">繁體中文</a>
   </p>
   <p>
-    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.0"><img alt="Release v0.1.0" src="https://img.shields.io/badge/release-v0.1.0-2f80ed?style=flat-square"></a>
+    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.1"><img alt="Release v0.1.1" src="https://img.shields.io/badge/release-v0.1.1-2f80ed?style=flat-square"></a>
     <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green?style=flat-square"></a>
     <img alt="Windows" src="https://img.shields.io/badge/Windows-relay%20app-0078D4?logo=windows&logoColor=white&style=flat-square">
     <img alt="Android" src="https://img.shields.io/badge/Android-mobile%20APK-3DDC84?logo=android&logoColor=white&style=flat-square">
@@ -19,7 +19,7 @@
     <a href="https://visitor-badge.laobi.icu/"><img alt="Visitors" src="https://visitor-badge.laobi.icu/badge?page_id=Ryan-Laws.easycodex"></a>
   </p>
   <p>
-    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.0"><strong>下载 EasyCodex 0.1.0</strong></a>
+    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.1"><strong>下载 EasyCodex 0.1.1</strong></a>
     ·
     <a href="https://github.com/Ryan-Laws/easycodex/releases">全部 Release</a>
   </p>
@@ -31,24 +31,24 @@ EasyCodex 是一个本地优先的 Codex 编程智能体远程控制应用。你
 
 ## 安装 EasyCodex
 
-从 [EasyCodex 0.1.0](https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.0) 下载当前版本。在 GitHub 页面上，也可以从仓库右侧的 **Releases** 入口进入发布页，再选择最新的 EasyCodex 版本。
+从 [EasyCodex 0.1.1](https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.1) 下载当前版本。在 GitHub 页面上，也可以从仓库右侧的 **Releases** 入口进入发布页，再选择最新的 EasyCodex 版本。
 
 | 平台 | 下载 | 用途 |
 | --- | --- | --- |
-| Windows | [`EasyCodex.Relay.Setup.0.1.0-x64.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.Setup.0.1.0-x64.exe) | 推荐的 Windows 桌面端中继安装包 |
-| Windows | [`EasyCodex.Relay.Portable.0.1.0-x64.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.Portable.0.1.0-x64.exe) | 免安装便携版 Windows 中继 |
-| Android | [`EasyCodex.Mobile.0.1.0.apk`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Mobile.0.1.0.apk) | Android 手机应用 |
-| macOS Apple Silicon | [`EasyCodex.Relay.0.1.0.mac-arm64.dmg`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.0.1.0.mac-arm64.dmg) | Apple Silicon 桌面端中继 |
-| macOS Intel | [`EasyCodex.Relay.0.1.0.mac-x64.dmg`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.0.1.0.mac-x64.dmg) | Intel 桌面端中继 |
-| Linux | [`EasyCodex.Relay.0.1.0.linux-x64.AppImage`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.0.1.0.linux-x64.AppImage) | 免安装 Linux 中继 |
-| Linux | [`EasyCodex.Relay.0.1.0.linux-x64.deb`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.0.1.0.linux-x64.deb) | Debian/Ubuntu 安装包 |
+| Windows | [`EasyCodex.Relay.Setup.0.1.1-x64.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.Setup.0.1.1-x64.exe) | 推荐的 Windows 桌面端中继安装包 |
+| Windows | [`EasyCodex.Relay.Portable.0.1.1-x64.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.Portable.0.1.1-x64.exe) | 免安装便携版 Windows 中继 |
+| Android | [`EasyCodex.Mobile.0.1.1.apk`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Mobile.0.1.1.apk) | Android 手机应用 |
+| macOS Apple Silicon | [`EasyCodex.Relay.0.1.1.mac-arm64.dmg`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.mac-arm64.dmg) | Apple Silicon 桌面端中继 |
+| macOS Intel | [`EasyCodex.Relay.0.1.1.mac-x64.dmg`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.mac-x64.dmg) | Intel 桌面端中继 |
+| Linux | [`EasyCodex.Relay.0.1.1.linux-x64.AppImage`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.linux-x64.AppImage) | 免安装 Linux 中继 |
+| Linux | [`EasyCodex.Relay.0.1.1.linux-x64.deb`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.linux-x64.deb) | Debian/Ubuntu 安装包 |
 
 ## 快速开始
 
 1. 在电脑上安装并登录 OpenAI Codex CLI。
 2. 在 Windows 或 macOS 上安装并打开 **EasyCodex Relay**。
 3. 在桌面端应用里点击启动中继。它会显示中继状态、连接地址、API Key 和二维码。
-4. 在 Android 手机上安装 `EasyCodex.Mobile.0.1.0.apk`。
+4. 在 Android 手机上安装 `EasyCodex.Mobile.0.1.1.apk`。
 5. 用手机扫描二维码，或在应用内打开连接链接。
 6. 选择工作区，创建或恢复 Codex 会话，然后用手机控制智能体。
 

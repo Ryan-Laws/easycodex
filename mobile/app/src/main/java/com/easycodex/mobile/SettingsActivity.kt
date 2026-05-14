@@ -99,6 +99,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -148,7 +149,7 @@ const val DEFAULT_APP_LAYOUT = "standard"
 private const val TEST_NOTIFICATION_CHANNEL_ID = "easycodex-test"
 private const val TEST_NOTIFICATION_ID = 71801
 private const val SETTINGS_RELAY_REQUEST_TIMEOUT_MS = 30_000L
-private const val EASY_CODEX_APP_VERSION = "0.1.0"
+private const val EASY_CODEX_APP_VERSION = "0.1.1"
 private const val EASY_CODEX_RELEASE_API_URL = "https://api.github.com/repos/Ryan-Laws/easycodex/releases/latest"
 
 private fun normalizeDefaultServiceTier(value: String): String {
@@ -178,11 +179,6 @@ fun applyDaylightThemeDefault(prefs: android.content.SharedPreferences) {
         .apply()
 }
 
-data class EasyCodexConnectionConfig(
-    val relayUrl: String,
-    val apiKey: String,
-)
-
 data class NotificationAgentPreference(
     val id: String,
     val name: String,
@@ -197,36 +193,7 @@ data class NotificationHistoryItem(
 )
 
 fun parseEasyCodexConnectionUri(uri: Uri?): EasyCodexConnectionConfig? {
-    if (uri == null) return null
-
-    val isDeepLink = uri.scheme?.equals("easycodex", ignoreCase = true) == true &&
-        uri.host?.equals("connect", ignoreCase = true) == true
-    val isHttpConnect = (uri.scheme?.equals("http", ignoreCase = true) == true ||
-        uri.scheme?.equals("https", ignoreCase = true) == true) &&
-        (uri.path.equals("/c", ignoreCase = true) || uri.path.equals("/connect", ignoreCase = true))
-
-    if (!isDeepLink && !isHttpConnect) return null
-
-    val relayUrl = firstQueryParameter(uri, "relayUrl", "webSocketUrl", "wsUrl", "url")
-        ?: inferRelayUrlFromHttpConnectUri(uri)
-        ?: return null
-    val apiKey = firstQueryParameter(uri, "apiKey", "key", "k") ?: return null
-    if (!relayUrl.startsWith("ws://", ignoreCase = true) && !relayUrl.startsWith("wss://", ignoreCase = true)) {
-        return null
-    }
-
-    return EasyCodexConnectionConfig(relayUrl = relayUrl, apiKey = apiKey)
-}
-
-private fun inferRelayUrlFromHttpConnectUri(uri: Uri): String? {
-    val host = uri.host?.takeIf { it.isNotBlank() } ?: return null
-    val scheme = when {
-        uri.scheme.equals("https", ignoreCase = true) -> "wss"
-        uri.scheme.equals("http", ignoreCase = true) -> "ws"
-        else -> return null
-    }
-    val port = if (uri.port > 0) ":${uri.port}" else ""
-    return "$scheme://$host$port"
+    return parseEasyCodexConnectionUri(uri?.toString())
 }
 
 fun applyEasyCodexConnectionUri(context: Context, uri: Uri?): Boolean {
@@ -237,14 +204,6 @@ fun applyEasyCodexConnectionUri(context: Context, uri: Uri?): Boolean {
         .putString(PREF_API_KEY, config.apiKey)
         .apply()
     return true
-}
-
-private fun firstQueryParameter(uri: Uri, vararg names: String): String? {
-    for (name in names) {
-        val value = uri.getQueryParameter(name)?.trim()
-        if (!value.isNullOrBlank()) return value
-    }
-    return null
 }
 
 class SettingsActivity : ComponentActivity() {
@@ -410,6 +369,11 @@ fun SettingsApp(onClose: () -> Unit) {
 
     fun syncRelayNotifications() {
         if (notificationSyncing) return
+        val relayError = validateRelayEndpoint(relayUrl.trim().ifBlank { DEFAULT_RELAY_URL }, strings)
+        if (relayError != null) {
+            notificationStatus = relayError
+            return
+        }
         notificationSyncing = true
         notificationStatus = strings.syncRelayNotifications
         relayClient?.close()
@@ -579,8 +543,8 @@ fun SettingsApp(onClose: () -> Unit) {
                             .padding(padding)
                             .imePadding()
                             .navigationBarsPadding(),
-                        contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                     when (activeDestination) {
                         null -> {
@@ -1242,22 +1206,24 @@ private fun SettingsMenuItem(
     icon: ImageVector,
     onClick: () -> Unit,
 ) {
-    Card(
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
             .clickable(onClick = onClick),
-        shape = EasyCodexDesign.PanelShape,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.68f)),
+        tonalElevation = 0.dp,
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(horizontal = 14.dp, vertical = 13.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            EasyCodexIconBubble(icon = icon)
+            EasyCodexIconBubble(icon = icon, modifier = Modifier.size(38.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(

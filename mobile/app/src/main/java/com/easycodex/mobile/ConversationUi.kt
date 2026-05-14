@@ -64,6 +64,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.SpanStyle
@@ -636,26 +637,27 @@ private fun MessageBubble(
     onOpenDiffReview: () -> Unit = {},
 ) {
     val isUser = message.role == "user"
+    val isPlainAssistant = !isUser && message.type != "plan" && !message.isDetailMessage()
     val container = when {
-        isUser -> MaterialTheme.colorScheme.surfaceContainerHighest
+        isUser -> MaterialTheme.colorScheme.surfaceContainerHigh
         message.type == "thinking" -> MaterialTheme.colorScheme.surfaceContainer
         message.type == "plan" -> MaterialTheme.colorScheme.surfaceContainer
         message.isDetailMessage() -> MaterialTheme.colorScheme.surface
-        else -> MaterialTheme.colorScheme.surface
+        else -> Color.Transparent
     }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
     ) {
-        Card(
+        Surface(
             modifier = Modifier.fillMaxWidth(if (isUser) metrics.userBubbleWidth else metrics.assistantBubbleWidth),
-            colors = CardDefaults.cardColors(containerColor = container),
+            color = container,
             border = if (isUser || message.isDetailMessage() || message.type == "plan") {
-                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
             } else {
                 null
             },
-            shape = RoundedCornerShape(metrics.bubbleShape),
+            shape = RoundedCornerShape(if (isPlainAssistant) 12.dp else metrics.bubbleShape),
         ) {
             Column(Modifier.padding(metrics.bubblePadding)) {
                 when {

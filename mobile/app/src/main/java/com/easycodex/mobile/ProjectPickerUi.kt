@@ -528,18 +528,18 @@ fun HomeTaskScreen(
     var showProjectPicker by remember { mutableStateOf(false) }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 26.dp, bottom = 10.dp),
+                    .padding(top = 18.dp, bottom = 6.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
-                EasyCodexAppIcon(modifier = Modifier.size(54.dp), contentDescription = "EasyCodex")
+                EasyCodexAppIcon(modifier = Modifier.size(50.dp), contentDescription = "EasyCodex")
                 Text(
                     strings.homeQuestion,
                     style = MaterialTheme.typography.headlineSmall,
@@ -556,41 +556,57 @@ fun HomeTaskScreen(
         }
         if (canChangeProject) item {
             Surface(
-                shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                shape = RoundedCornerShape(22.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
+                tonalElevation = 1.dp,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(18.dp))
+                    .clip(RoundedCornerShape(22.dp))
                     .clickable { showProjectPicker = true },
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                Column(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    EasyCodexIconBubble(icon = Icons.Default.Folder)
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            strings.project,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            projectNameFromCwd(draftAgent.cwd),
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            draftAgent.cwd,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        EasyCodexIconBubble(icon = Icons.Default.Folder, modifier = Modifier.size(42.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                strings.project,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                projectNameFromCwd(draftAgent.cwd),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                        ) {
+                            Text(
+                                strings.chooseProjectDirectory,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
                     }
+                    Text(
+                        draftAgent.cwd,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }

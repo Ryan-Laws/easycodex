@@ -29,7 +29,6 @@ import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
-import java.net.URI
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -245,7 +244,7 @@ class EasyCodexController(private val context: android.content.Context) {
 
         connectionStatus = "connecting"
         statusText = strings.connectingRelay
-        val relaySecurityError = validateRelayEndpoint(relayUrl)
+        val relaySecurityError = validateRelayEndpoint(relayUrl, strings)
         if (relaySecurityError != null) {
             connectionStatus = "disconnected"
             statusText = relaySecurityError
@@ -2832,25 +2831,9 @@ class EasyCodexController(private val context: android.content.Context) {
 
     private fun relayEndpointLabel(): String {
         return runCatching {
-            val uri = URI(relayUrl)
+            val uri = java.net.URI(relayUrl)
             listOfNotNull(uri.host, uri.port.takeIf { it > 0 }?.toString()).joinToString(":")
         }.getOrNull()?.takeIf { it.isNotBlank() } ?: relayUrl.ifBlank { strings.endpointNotFilled }
-    }
-
-    private fun validateRelayEndpoint(value: String): String? {
-        val uri = runCatching { URI(value.trim()) }.getOrNull() ?: return strings.invalidRelayUrl
-        val scheme = uri.scheme?.lowercase(Locale.ROOT).orEmpty()
-        if (scheme == "wss") return null
-        if (scheme != "ws") return "Relay 地址必须使用 ws:// 或 wss://"
-        val host = uri.host?.lowercase(Locale.ROOT).orEmpty()
-        val privateOrLocal = host == "localhost" ||
-            host == "127.0.0.1" ||
-            host == "::1" ||
-            host == "10.0.2.2" ||
-            host.startsWith("10.") ||
-            Regex("^192\\.168\\.\\d{1,3}\\.\\d{1,3}$").matches(host) ||
-            Regex("^172\\.(1[6-9]|2\\d|3[0-1])\\.\\d{1,3}\\.\\d{1,3}$").matches(host)
-        return if (privateOrLocal) null else "出于安全考虑，ws:// 只允许连接 localhost、模拟器或局域网地址；公网地址请使用 wss://。"
     }
 }
 
