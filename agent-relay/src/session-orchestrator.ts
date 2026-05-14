@@ -74,6 +74,7 @@ const MOBILE_TRUNCATED_NOTICE = '\n\n[EasyCodex mobile truncated this long outpu
 const PLAN_MODE_PREFIX = '请先进入计划模式处理下面的需求。';
 const PLAN_MODE_DEMAND_MARKER = '需求：';
 const CONTEXT_PLACEHOLDER = '已加载项目上下文。';
+const DEFAULT_SERVICE_TIER = 'default';
 
 function cleanExecutablePath(value: unknown): string {
   return String(value || '').trim().replace(/^"+|"+$/g, '');
@@ -129,6 +130,16 @@ export interface CodexThreadSummary {
   createdAt: number;
   updatedAt: number;
   status: string;
+  queuedFollowUpCount: number;
+  queuedFollowUps: QueuedFollowUpSummary[];
+}
+
+export interface QueuedFollowUpSummary {
+  id: string;
+  text: string;
+  cwd: string;
+  createdAt: number;
+  pausedReason: string | null;
 }
 
 export interface CodexModelInfo {
@@ -326,6 +337,17 @@ function usableString(value: unknown): string {
   return trimmed && trimmed.toLowerCase() !== 'null' ? trimmed : '';
 }
 
+function normalizeServiceTier(value: unknown): string {
+  const normalized = usableString(value).toLowerCase();
+  if (!normalized || normalized === 'default' || normalized === 'standard' || normalized === 'auto') return DEFAULT_SERVICE_TIER;
+  return normalized;
+}
+
+function codexServiceTierParam(value: string): string | undefined {
+  const normalized = normalizeServiceTier(value);
+  return normalized === DEFAULT_SERVICE_TIER ? undefined : normalized;
+}
+
 function readCodexDesktopState(): Record<string, unknown> | null {
   try {
     if (!fs.existsSync(CODEX_GLOBAL_STATE_PATH)) return null;
@@ -345,6 +367,30 @@ function codexDesktopAtomState(): Record<string, unknown> | null {
   return atomState && typeof atomState === 'object' && !Array.isArray(atomState)
     ? atomState as Record<string, unknown>
     : null;
+}
+
+function codexQueuedFollowUpsForThread(threadId: string): QueuedFollowUpSummary[] {
+  if (!threadId.trim()) return [];
+  const state = readCodexDesktopState();
+  const queued = state?.['queued-follow-ups'];
+  if (!queued || typeof queued !== 'object' || Array.isArray(queued)) return [];
+  const rawItems = (queued as Record<string, unknown>)[threadId];
+  if (!Array.isArray(rawItems)) return [];
+  return rawItems
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => {
+      const context = item.context && typeof item.context === 'object' && !Array.isArray(item.context)
+        ? item.context as Record<string, unknown>
+        : {};
+      return {
+        id: usableString(item.id),
+        text: usableString(item.text) || usableString(context.prompt),
+        cwd: usablePathString(item.cwd),
+        createdAt: toTimestampMs(item.createdAt),
+        pausedReason: usableString(item.pausedReason) || null,
+      };
+    })
+    .filter((item) => item.text.trim());
 }
 
 function uniqueResolvedPaths(values: string[]): string[] {
@@ -1294,10 +1340,12 @@ function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Re
 }
 
 function normalizeThreadSummary(thread: Record<string, unknown>, projectRoot: string | null = null): CodexThreadSummary {
+  const id = typeof thread.id === 'string' ? thread.id : '';
   const cwd = usablePathString(thread.cwd);
   const createdAt = toTimestampMs(thread.createdAt);
+  const queuedFollowUps = codexQueuedFollowUpsForThread(id);
   return {
-    id: typeof thread.id === 'string' ? thread.id : '',
+    id,
     name: typeof thread.name === 'string' ? thread.name : null,
     preview: typeof thread.preview === 'string' ? thread.preview : '',
     cwd,
@@ -1307,6 +1355,8 @@ function normalizeThreadSummary(thread: Record<string, unknown>, projectRoot: st
     createdAt,
     updatedAt: toTimestampMs(thread.updatedAt, createdAt),
     status: extractThreadStatus(thread.status),
+    queuedFollowUpCount: queuedFollowUps.length,
+    queuedFollowUps,
   };
 }
 
@@ -1403,7 +1453,7 @@ export class SessionOrchestrator {
       model,
       cwd,
       approvalPolicy,
-      serviceTier: options?.serviceTier || 'default',
+      serviceTier: normalizeServiceTier(options?.serviceTier),
       reasoningEffort: options?.reasoningEffort || 'medium',
       systemPrompt,
       status: 'initializing',
@@ -1497,13 +1547,19 @@ export class SessionOrchestrator {
             model,
             cwd,
             approvalPolicy,
-              serviceTier: agent.serviceTier,
+              serviceTier: codexServiceTierParam(agent.serviceTier),
               includeServiceTier: this.capabilities.supportsServiceTier,
             }),
           )
         : await this.sendRequest(
           agent,
-          codexThreadStartCall(model, cwd, approvalPolicy, agent.serviceTier, this.capabilities.supportsServiceTier),
+          codexThreadStartCall(
+            model,
+            cwd,
+            approvalPolicy,
+            codexServiceTierParam(agent.serviceTier),
+            this.capabilities.supportsServiceTier,
+          ),
         );
 
       if (threadRes.error) {
@@ -1534,7 +1590,9 @@ export class SessionOrchestrator {
       agent.cwd = (typeof threadData.cwd === 'string' ? threadData.cwd : cwd) || cwd;
       agent.model = (typeof threadData.model === 'string' ? threadData.model : model) || model;
       agent.approvalPolicy = (typeof threadData.approvalPolicy === 'string' ? threadData.approvalPolicy : approvalPolicy) || approvalPolicy;
-      agent.serviceTier = (typeof threadData.serviceTier === 'string' ? threadData.serviceTier : agent.serviceTier) || 'default';
+      agent.serviceTier = normalizeServiceTier(
+        typeof threadData.serviceTier === 'string' ? threadData.serviceTier : agent.serviceTier,
+      );
       agent.reasoningEffort = options?.reasoningEffort
         || (typeof threadData.reasoningEffort === 'string' ? threadData.reasoningEffort : agent.reasoningEffort)
         || 'medium';
@@ -1586,7 +1644,7 @@ export class SessionOrchestrator {
     const turnReq = codexTurnStartCall(threadId, promptText, {
       model: agent.model,
       effort: agent.reasoningEffort,
-      serviceTier: agent.serviceTier,
+      serviceTier: codexServiceTierParam(agent.serviceTier),
       includeEffort: this.capabilities.supportsReasoningEffort,
       includeServiceTier: this.capabilities.supportsServiceTier,
       approvalPolicy: agent.approvalPolicy,
@@ -1718,7 +1776,7 @@ export class SessionOrchestrator {
       agent.approvalPolicy = config.approvalPolicy.trim();
     }
     if (typeof config.serviceTier === 'string' && config.serviceTier.trim()) {
-      agent.serviceTier = config.serviceTier.trim();
+      agent.serviceTier = normalizeServiceTier(config.serviceTier);
     }
     if (typeof config.reasoningEffort === 'string' && config.reasoningEffort.trim()) {
       agent.reasoningEffort = config.reasoningEffort.trim();
@@ -1816,10 +1874,11 @@ export class SessionOrchestrator {
     const summary = normalizeThreadSummary(thread);
     const model = usableString(result?.model) || usableString(thread.model);
     const approvalPolicy = usableString(result?.approvalPolicy) || usableString(thread.approvalPolicy) || 'never';
-    const serviceTier = usableString(result?.serviceTier) || usableString(thread.serviceTier) || 'default';
+    const serviceTier = normalizeServiceTier(usableString(result?.serviceTier) || usableString(thread.serviceTier));
     const reasoningEffort = usableString(result?.reasoningEffort) || usableString(thread.reasoningEffort) || 'medium';
     const status = inferThreadStatus(summary.status, messages);
-    const activityLabel = status === 'working' ? inferThreadActivity(messages) : null;
+    const queueLabel = summary.queuedFollowUpCount > 0 ? `已排队 ${summary.queuedFollowUpCount} 个后续任务` : null;
+    const activityLabel = queueLabel || (status === 'working' ? inferThreadActivity(messages) : null);
     return {
       ...summary,
       status,
@@ -1858,7 +1917,7 @@ export class SessionOrchestrator {
               }))
             : [],
           additionalSpeedTiers: Array.isArray(entry.additionalSpeedTiers)
-            ? entry.additionalSpeedTiers.map(usableString).filter(Boolean)
+            ? Array.from(new Set(entry.additionalSpeedTiers.map(normalizeServiceTier).filter((tier) => tier !== DEFAULT_SERVICE_TIER)))
             : [],
           isDefault: Boolean(entry.isDefault),
           supportsPersonality: Boolean(entry.supportsPersonality),

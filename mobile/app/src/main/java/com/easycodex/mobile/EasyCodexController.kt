@@ -487,9 +487,10 @@ class EasyCodexController(private val context: android.content.Context) {
         if (!runtimeCapabilities.supportsServiceTier) return emptyList()
         val selectedModel = agent?.model?.takeIf { it.isNotBlank() } ?: defaultModel
         val additional = codexModels.firstOrNull { it.model == selectedModel }?.additionalSpeedTiers
+            ?.map(::normalizeServiceTier)
             ?.filter { it.isNotBlank() }
             .orEmpty()
-        return (listOf("default") + additional).distinct()
+        return (listOf(DEFAULT_SERVICE_TIER) + additional).distinct()
     }
 
     fun updateActiveModel(model: String) {
@@ -2137,6 +2138,7 @@ class EasyCodexController(private val context: android.content.Context) {
             codexThreadId = json.optString("codexThreadId").takeIf { it.isNotBlank() },
             updatedAt = parsedMessages.maxOfOrNull { it.timestamp }
                 ?: jsonTimestamp(json, "updatedAt", System.currentTimeMillis()),
+            queuedFollowUps = parseQueuedFollowUps(json),
         )
     }
 
@@ -2148,11 +2150,12 @@ class EasyCodexController(private val context: android.content.Context) {
             ?: "EasyCodex 任务"
         val preview = json.optString("preview").takeIf { it.isNotBlank() }
         val updatedAt = jsonTimestamp(json, "updatedAt", jsonTimestamp(json, "createdAt", 0L))
-        val messages = if (preview.isNullOrBlank()) {
-            emptyList()
-        } else {
-            listOf(AgentMessage("agent", "status", preview, updatedAt))
+        val queuedFollowUps = parseQueuedFollowUps(json)
+        val messages = buildList {
+            if (!preview.isNullOrBlank()) add(AgentMessage("agent", "status", preview, updatedAt))
+            queuedFollowUpMessage(queuedFollowUps, updatedAt)?.let { add(it) }
         }
+        val queuedActivity = queuedFollowUps.takeIf { it.isNotEmpty() }?.let { "已排队 ${it.size} 个后续任务" }
         return Agent(
             id = "codex_$threadId",
             name = name,
@@ -2167,7 +2170,7 @@ class EasyCodexController(private val context: android.content.Context) {
             ),
             reasoningEffort = json.optString("reasoningEffort", defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT })
                 .ifBlank { defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT } },
-            activity = json.optString("activityLabel")
+            activity = queuedActivity ?: json.optString("activityLabel")
                 .ifBlank { json.optString("activity") }
                 .takeIf { it.isNotBlank() },
             messages = messages,
@@ -2175,6 +2178,7 @@ class EasyCodexController(private val context: android.content.Context) {
             preview = preview,
             resumable = true,
             updatedAt = updatedAt,
+            queuedFollowUps = queuedFollowUps,
         )
     }
 
@@ -2186,16 +2190,54 @@ class EasyCodexController(private val context: android.content.Context) {
             }
         }
         val summary = parseCodexThread(json)
+        val detailMessages = buildList {
+            addAll(parsedMessages)
+            if (parsedMessages.none { it.itemId?.startsWith("queued_followups_") == true }) {
+                queuedFollowUpMessage(summary.queuedFollowUps, summary.updatedAt)?.let { add(it) }
+            }
+        }
         val authoritativeUpdatedAt = listOf(
             summary.updatedAt,
-            parsedMessages.maxOfOrNull { it.timestamp } ?: 0L,
+            detailMessages.maxOfOrNull { it.timestamp } ?: 0L,
         ).filter { it > 0L }.maxOrNull()
         return summary.copy(
             id = fallback.id,
             status = if (summary.isBusy()) summary.status else fallback.status,
-            messages = parsedMessages.ifEmpty { summary.messages.ifEmpty { fallback.messages } },
+            messages = detailMessages.ifEmpty { summary.messages.ifEmpty { fallback.messages } },
             resumable = true,
             updatedAt = authoritativeUpdatedAt ?: fallback.updatedAt,
+        )
+    }
+
+    private fun parseQueuedFollowUps(json: JSONObject): List<QueuedFollowUp> {
+        val items = json.optJSONArray("queuedFollowUps") ?: return emptyList()
+        return buildList {
+            for (index in 0 until items.length()) {
+                val item = items.optJSONObject(index) ?: continue
+                val text = item.optString("text").takeIf { it.isNotBlank() } ?: continue
+                add(
+                    QueuedFollowUp(
+                        id = item.optString("id"),
+                        text = text,
+                        cwd = item.optString("cwd"),
+                        createdAt = jsonTimestamp(item, "createdAt", 0L),
+                        pausedReason = item.optString("pausedReason").takeIf { it.isNotBlank() },
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun queuedFollowUpMessage(items: List<QueuedFollowUp>, fallbackTimestamp: Long): AgentMessage? {
+        if (items.isEmpty()) return null
+        val lines = items.mapIndexed { index, item -> "${index + 1}. ${item.text}" }
+        val timestamp = items.maxOfOrNull { it.createdAt }?.takeIf { it > 0 } ?: fallbackTimestamp
+        return AgentMessage(
+            role = "agent",
+            type = "status",
+            text = "已排队 ${items.size} 个后续任务：\n${lines.joinToString("\n")}",
+            timestamp = timestamp,
+            itemId = "queued_followups_${items.size}_$timestamp",
         )
     }
 

@@ -94,6 +94,17 @@
           <p data-i18n="firstUseBody">Run Install/build once before starting the relay.</p>
         </div>
 
+        <div class="update-box" id="updateBox" hidden>
+          <div>
+            <strong id="updateTitle">Update available</strong>
+            <p id="updateText"></p>
+          </div>
+          <div class="update-actions">
+            <button id="checkUpdateButton" class="secondary" data-i18n="checkUpdate">Check</button>
+            <button id="applyUpdateButton" class="primary" data-i18n="quickUpdate">Update</button>
+          </div>
+        </div>
+
         <div class="actions">
           <button id="installButton" class="secondary" data-i18n="installBuild">Install/build</button>
           <button id="startButton" class="primary" data-i18n="startRelay">Start relay</button>

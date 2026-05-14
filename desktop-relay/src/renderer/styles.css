@@ -388,6 +388,38 @@ select:focus {
   display: none;
 }
 
+.update-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 18px;
+  border: 1px solid rgba(211, 154, 47, 0.38);
+  border-radius: 8px;
+  background: rgba(255, 248, 235, 0.9);
+  padding: 12px 14px;
+}
+
+.update-box[hidden] {
+  display: none;
+}
+
+.update-box strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.update-box p {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.update-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .qr-panel {
   display: flex;
   flex-direction: column;

@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Menu, Tray, clipboard, dialog, ipcMain, nativeImage, shell } = require('electron');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const https = require('node:https');
 const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
@@ -40,6 +41,7 @@ let relayEventData = null;
 let relayOutputBuffer = '';
 let relayLogClientIds = new Set();
 let codexDetectionCache = null;
+let updateState = { checking: false, applying: false, info: null, error: '' };
 
 function commandForShell(command) {
   if (process.platform !== 'win32') return command;
@@ -380,6 +382,209 @@ function saveDesktopConfig(partial) {
   writeJson(desktopConfigPath, { ...loadDesktopConfig(), ...partial });
 }
 
+function updateRepository() {
+  return String(process.env.EASYCODEX_UPDATE_REPO || 'Ryan-Laws/easycodex').trim();
+}
+
+function normalizeVersion(value) {
+  return String(value || '').trim().replace(/^v/i, '');
+}
+
+function versionParts(value) {
+  return normalizeVersion(value)
+    .split(/[.+-]/)
+    .map((part) => Number.parseInt(part, 10))
+    .map((part) => (Number.isFinite(part) ? part : 0));
+}
+
+function compareVersions(a, b) {
+  const left = versionParts(a);
+  const right = versionParts(b);
+  const length = Math.max(left.length, right.length, 3);
+  for (let i = 0; i < length; i += 1) {
+    const diff = (left[i] || 0) - (right[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function requestJson(url, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: {
+        accept: 'application/vnd.github+json',
+        'user-agent': `EasyCodex-Desktop-Relay/${app.getVersion()}`,
+      },
+      timeout: 10000,
+    }, (res) => {
+      const location = res.headers.location;
+      if (res.statusCode >= 300 && res.statusCode < 400 && location && redirects < 5) {
+        res.resume();
+        requestJson(location, redirects + 1).then(resolve, reject);
+        return;
+      }
+      let raw = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { raw += chunk; });
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          reject(new Error(`GitHub release check failed with HTTP ${res.statusCode}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(raw));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error('GitHub release check timed out.'));
+    });
+    req.on('error', reject);
+  });
+}
+
+function serializeRelease(release) {
+  const currentVersion = app.getVersion();
+  const latestVersion = normalizeVersion(release?.tag_name || '');
+  const assets = Array.isArray(release?.assets)
+    ? release.assets
+      .filter((asset) => typeof asset?.name === 'string' && typeof asset?.browser_download_url === 'string')
+      .map((asset) => ({
+        name: asset.name,
+        url: asset.browser_download_url,
+        size: typeof asset.size === 'number' ? asset.size : null,
+      }))
+    : [];
+  return {
+    currentVersion,
+    latestVersion: latestVersion || null,
+    updateAvailable: Boolean(latestVersion && compareVersions(latestVersion, currentVersion) > 0),
+    checkedAt: new Date().toISOString(),
+    releaseUrl: typeof release?.html_url === 'string' ? release.html_url : null,
+    releaseName: typeof release?.name === 'string' ? release.name : null,
+    publishedAt: typeof release?.published_at === 'string' ? release.published_at : null,
+    assets,
+  };
+}
+
+async function checkForUpdates(reason = 'manual') {
+  updateState = { ...updateState, checking: true, error: '' };
+  await broadcastState();
+  try {
+    const release = await requestJson(`https://api.github.com/repos/${updateRepository()}/releases/latest`);
+    updateState = { checking: false, applying: false, info: serializeRelease(release), error: '' };
+    appendLog(updateState.info.updateAvailable
+      ? `Update available: ${updateState.info.currentVersion} -> ${updateState.info.latestVersion}`
+      : `EasyCodex Relay is up to date (${updateState.info.currentVersion}).`);
+  } catch (error) {
+    updateState = { checking: false, applying: false, info: updateState.info, error: error.message || String(error) };
+    appendLog(`Update check failed: ${updateState.error}`);
+  }
+  await broadcastState();
+  return updateState;
+}
+
+function assetScore(asset) {
+  const name = String(asset?.name || '').toLowerCase();
+  if (process.platform === 'win32') {
+    if (name.includes('relay.setup') && name.endsWith('.exe')) return 100;
+    if (name.includes('relay.portable') && name.endsWith('.exe')) return 80;
+  }
+  if (process.platform === 'darwin') {
+    const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+    if (name.includes(`mac-${arch}`) && name.endsWith('.dmg')) return 100;
+    if (name.includes(`mac-${arch}`) && name.endsWith('.zip')) return 80;
+  }
+  if (process.platform === 'linux') {
+    if (name.endsWith('.appimage')) return 100;
+    if (name.endsWith('.deb')) return 80;
+  }
+  return 0;
+}
+
+function selectUpdateAsset(info) {
+  const assets = Array.isArray(info?.assets) ? info.assets : [];
+  return assets
+    .map((asset) => ({ asset, score: assetScore(asset) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score)[0]?.asset || null;
+}
+
+function downloadFile(url, targetPath, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    const req = https.get(url, { headers: { 'user-agent': `EasyCodex-Desktop-Relay/${app.getVersion()}` } }, (res) => {
+      const location = res.headers.location;
+      if (res.statusCode >= 300 && res.statusCode < 400 && location && redirects < 5) {
+        res.resume();
+        downloadFile(location, targetPath, redirects + 1).then(resolve, reject);
+        return;
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`Download failed with HTTP ${res.statusCode}`));
+        return;
+      }
+      const stream = fs.createWriteStream(targetPath);
+      res.pipe(stream);
+      stream.on('finish', () => stream.close(() => resolve(targetPath)));
+      stream.on('error', reject);
+    });
+    req.on('error', reject);
+  });
+}
+
+function runSimpleCommand(args, cwd, onDone) {
+  return runCommand(args[0], args.slice(1), cwd, null, onDone);
+}
+
+async function updateFromGit() {
+  const root = path.resolve(sourceRoot);
+  await new Promise((resolve, reject) => {
+    installProcess = runSimpleCommand(['git', 'pull', '--ff-only'], root, (error) => {
+      installProcess = null;
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+  await installAndBuild();
+}
+
+async function applyDesktopUpdate() {
+  if (updateState.applying) throw new Error('Update is already running.');
+  if (!updateState.info) await checkForUpdates('apply');
+  const info = updateState.info;
+  if (!info?.updateAvailable) throw new Error('No update is available.');
+  updateState = { ...updateState, applying: true, error: '' };
+  await broadcastState();
+  try {
+    if (isDev) {
+      appendLog('Applying update from git...');
+      await updateFromGit();
+      appendLog('Update applied. Restart EasyCodex Relay to use the new version.');
+    } else {
+      const asset = selectUpdateAsset(info);
+      if (!asset) throw new Error('No compatible installer asset was found in the latest release.');
+      const updatesDir = path.join(configDir, 'updates');
+      const targetPath = path.join(updatesDir, asset.name);
+      appendLog(`Downloading update: ${asset.name}`);
+      await downloadFile(asset.url, targetPath);
+      appendLog(`Opening update installer: ${targetPath}`);
+      await shell.openPath(targetPath);
+    }
+    updateState = { ...updateState, applying: false, error: '' };
+  } catch (error) {
+    updateState = { ...updateState, applying: false, error: error.message || String(error) };
+    appendLog(`Update failed: ${updateState.error}`);
+    throw error;
+  } finally {
+    await broadcastState();
+  }
+  return appState();
+}
+
 function localIPv4() {
   for (const entries of Object.values(os.networkInterfaces())) {
     for (const iface of entries || []) {
@@ -539,6 +744,7 @@ async function appState() {
     relayRunning,
     relayReady: isRelayReady,
     installRunning: Boolean(installProcess),
+    update: updateState,
     portAvailable,
     guideVisible: !config.guideSeen,
     health: mergeRelayEventHealth(lastHealth),
@@ -900,6 +1106,9 @@ async function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null; });
   await mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   startHealthPolling();
+  setTimeout(() => {
+    void checkForUpdates('startup').catch(() => {});
+  }, 800);
   if (isSmokeTest) setTimeout(() => app.quit(), 1200);
 }
 
@@ -959,6 +1168,11 @@ ipcMain.handle('install-build', async () => {
   await installAndBuild();
   return appState();
 });
+ipcMain.handle('check-update', async () => {
+  await checkForUpdates('manual');
+  return appState();
+});
+ipcMain.handle('apply-update', async () => applyDesktopUpdate());
 ipcMain.handle('start-relay', async (_event, input) => {
   await startRelay(input || {});
   return appState();

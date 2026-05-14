@@ -78,6 +78,8 @@ Codex metadata actions:
 | --- | --- |
 | `list_codex_models` | Read model catalog from the Codex runtime. |
 | `runtime_capabilities` | Report official vs compatible runtime behavior. |
+| `check_update` | Check the latest EasyCodex GitHub release and report whether the relay is outdated. |
+| `apply_update` | Apply a fast git-based relay update when the relay is running from an EasyCodex repository checkout. |
 | `list_codex_threads` | List available Codex threads globally by default; pass `cwd` or `includeGlobal=false` to scope results to one workspace, and `all=true` to follow cursors across pages. |
 | `read_codex_thread` | Read a Codex thread and convert it to app messages. |
 
@@ -86,6 +88,8 @@ Live sync events:
 | Event | Purpose |
 | --- | --- |
 | `agents/changed` | Running agent collection changed and clients should refresh the task list. |
+| `relay/update_available` | The startup or requested update check found a newer EasyCodex release. |
+| `relay/update_applied` | A relay update command completed and clients should prompt for restart if needed. |
 | `codex/threads_changed` | Codex thread state changed on disk or through relay actions; clients should refresh task lists and the selected resumable thread. |
 | `agent/requested` | Codex asked the client for a decision, such as approving a command or tool action. |
 | `agent/request_resolved` | A pending mobile approval request was answered. |

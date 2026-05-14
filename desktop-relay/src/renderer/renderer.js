@@ -50,6 +50,14 @@ const dictionaries = {
     healthPending: 'Health check pending',
     ready: 'Ready for phone connection',
     phoneConnected: (count) => `Phone connected (${count})`,
+    checkUpdate: 'Check',
+    quickUpdate: 'Update',
+    updateChecking: 'Checking for updates',
+    updateAvailable: 'Update available',
+    updateReady: (current, latest) => `Version ${latest} is available. Current version: ${current}.`,
+    updateCurrent: (current) => `EasyCodex Relay is up to date (${current}).`,
+    updateFailed: (message) => `Update check failed: ${message}`,
+    updating: 'Updating',
   },
   zh: {
     eyebrow: '电脑端中继',
@@ -90,6 +98,14 @@ const dictionaries = {
     healthPending: '等待健康检查',
     ready: '等待手机连接',
     phoneConnected: (count) => `手机已连接（${count}）`,
+    checkUpdate: '检查',
+    quickUpdate: '更新',
+    updateChecking: '正在检测更新',
+    updateAvailable: '发现新版本',
+    updateReady: (current, latest) => `可更新到 ${latest}，当前版本 ${current}。`,
+    updateCurrent: (current) => `EasyCodex 中继已是最新版本（${current}）。`,
+    updateFailed: (message) => `检测更新失败：${message}`,
+    updating: '正在更新',
   },
   'zh-Hant': {
     eyebrow: '電腦端中繼',
@@ -130,6 +146,14 @@ const dictionaries = {
     healthPending: '等待健康檢查',
     ready: '等待手機連線',
     phoneConnected: (count) => `手機已連線（${count}）`,
+    checkUpdate: '檢查',
+    quickUpdate: '更新',
+    updateChecking: '正在檢測更新',
+    updateAvailable: '發現新版本',
+    updateReady: (current, latest) => `可更新到 ${latest}，目前版本 ${current}。`,
+    updateCurrent: (current) => `EasyCodex 中繼已是最新版本（${current}）。`,
+    updateFailed: (message) => `檢測更新失敗：${message}`,
+    updating: '正在更新',
   },
   ja: {
     eyebrow: 'デスクトップリレー',
@@ -308,6 +332,9 @@ const elements = {
   statusText: document.getElementById('statusText'),
   healthText: document.getElementById('healthText'),
   firstUseGuide: document.getElementById('firstUseGuide'),
+  updateBox: document.getElementById('updateBox'),
+  updateTitle: document.getElementById('updateTitle'),
+  updateText: document.getElementById('updateText'),
   relayPath: document.getElementById('relayPath'),
   languageSelect: document.getElementById('languageSelect'),
   portInput: document.getElementById('portInput'),
@@ -325,6 +352,8 @@ const elements = {
   copyKeyButton: document.getElementById('copyKeyButton'),
   refreshKeyButton: document.getElementById('refreshKeyButton'),
   installButton: document.getElementById('installButton'),
+  checkUpdateButton: document.getElementById('checkUpdateButton'),
+  applyUpdateButton: document.getElementById('applyUpdateButton'),
   startButton: document.getElementById('startButton'),
   stopButton: document.getElementById('stopButton'),
   copyDeepLinkButton: document.getElementById('copyDeepLinkButton'),
@@ -381,6 +410,8 @@ function setCodexStatus(state) {
 
 function setControlsBusy(isBusy) {
   elements.installButton.disabled = isBusy || currentState?.installRunning || currentState?.relayRunning;
+  elements.checkUpdateButton.disabled = isBusy || currentState?.update?.checking || currentState?.update?.applying;
+  elements.applyUpdateButton.disabled = isBusy || currentState?.update?.checking || currentState?.update?.applying || !currentState?.update?.info?.updateAvailable;
   elements.startButton.disabled = isBusy || currentState?.installRunning || currentState?.relayRunning || !currentState?.relayReady || !currentState?.portAvailable || !currentState?.codex?.installed;
   elements.stopButton.disabled = isBusy || !currentState?.relayRunning;
   elements.refreshKeyButton.disabled = isBusy || currentState?.relayRunning;
@@ -388,6 +419,31 @@ function setControlsBusy(isBusy) {
   elements.browseButton.disabled = isBusy;
   elements.codexPathInput.disabled = isBusy || currentState?.relayRunning;
   elements.browseCodexButton.disabled = isBusy || currentState?.relayRunning;
+}
+
+function renderUpdate(update) {
+  const info = update?.info;
+  const isActive = update?.checking || update?.applying;
+  const shouldShow = Boolean(isActive || update?.error || info);
+  elements.updateBox.hidden = !shouldShow;
+  if (!shouldShow) return;
+
+  if (update?.applying) {
+    elements.updateTitle.textContent = t('updating');
+    elements.updateText.textContent = info?.latestVersion ? t('updateReady', info.currentVersion, info.latestVersion) : '';
+  } else if (update?.checking) {
+    elements.updateTitle.textContent = t('updateChecking');
+    elements.updateText.textContent = '';
+  } else if (update?.error) {
+    elements.updateTitle.textContent = t('updateChecking');
+    elements.updateText.textContent = t('updateFailed', update.error);
+  } else if (info?.updateAvailable) {
+    elements.updateTitle.textContent = t('updateAvailable');
+    elements.updateText.textContent = t('updateReady', info.currentVersion, info.latestVersion);
+  } else {
+    elements.updateTitle.textContent = t('checkUpdate');
+    elements.updateText.textContent = t('updateCurrent', info?.currentVersion || '');
+  }
 }
 
 function renderPendingStatus() {
@@ -423,6 +479,7 @@ function renderState(state) {
   elements.apiKeyInput.value = state.apiKey;
   elements.qrImage.src = state.qrDataUrl;
   elements.firstUseGuide.hidden = !state.guideVisible;
+  renderUpdate(state.update);
   elements.statusCard.dataset.busy = 'false';
   elements.statusCard.dataset.state = state.relayRunning ? 'starting' : 'offline';
   elements.statusText.textContent = state.relayRunning ? t('starting') : t('offline');
@@ -481,6 +538,14 @@ async function runAction(button, action, pendingKey) {
 
 elements.installButton.addEventListener('click', () => {
   runAction(elements.installButton, () => window.easyCodexRelay.installAndBuild(), 'installing');
+});
+
+elements.checkUpdateButton.addEventListener('click', () => {
+  runAction(elements.checkUpdateButton, () => window.easyCodexRelay.checkUpdate(), 'updateChecking');
+});
+
+elements.applyUpdateButton.addEventListener('click', () => {
+  runAction(elements.applyUpdateButton, () => window.easyCodexRelay.applyUpdate(), 'updating');
 });
 
 elements.startButton.addEventListener('click', () => {

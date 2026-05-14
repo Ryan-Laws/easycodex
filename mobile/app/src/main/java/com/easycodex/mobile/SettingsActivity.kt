@@ -2,6 +2,7 @@ package com.easycodex.mobile
 
 import android.Manifest
 import android.app.Activity
+import android.app.DownloadManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -12,6 +13,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -146,12 +148,25 @@ const val DEFAULT_APP_LAYOUT = "standard"
 private const val TEST_NOTIFICATION_CHANNEL_ID = "easycodex-test"
 private const val TEST_NOTIFICATION_ID = 71801
 private const val SETTINGS_RELAY_REQUEST_TIMEOUT_MS = 30_000L
+private const val EASY_CODEX_APP_VERSION = "0.1.0"
+private const val EASY_CODEX_RELEASE_API_URL = "https://api.github.com/repos/Ryan-Laws/easycodex/releases/latest"
 
 private fun normalizeDefaultServiceTier(value: String): String {
     return when (value.trim().lowercase()) {
-        "", "auto", "standard", "flex" -> DEFAULT_SERVICE_TIER
+        "", "auto", "standard", "default" -> DEFAULT_SERVICE_TIER
         else -> value.trim().lowercase()
     }
+}
+
+private fun compareVersions(left: String, right: String): Int {
+    val leftParts = left.split('.', '-').map { it.toIntOrNull() ?: 0 }
+    val rightParts = right.split('.', '-').map { it.toIntOrNull() ?: 0 }
+    val count = maxOf(leftParts.size, rightParts.size)
+    for (index in 0 until count) {
+        val diff = (leftParts.getOrNull(index) ?: 0) - (rightParts.getOrNull(index) ?: 0)
+        if (diff != 0) return diff
+    }
+    return 0
 }
 
 fun applyDaylightThemeDefault(prefs: android.content.SharedPreferences) {
@@ -277,11 +292,14 @@ fun SettingsApp(onClose: () -> Unit) {
     var saveState by remember { mutableStateOf("") }
     var apiKeyVisible by remember { mutableStateOf(false) }
     val strings = appStringsFor(appLanguage)
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    val updateClient = remember { OkHttpClient() }
     var destination by remember { mutableStateOf<SettingsDestination?>(null) }
     var notificationAgents by remember { mutableStateOf<List<NotificationAgentPreference>>(emptyList()) }
     var notificationHistory by remember { mutableStateOf<List<NotificationHistoryItem>>(emptyList()) }
     var notificationStatus by remember { mutableStateOf("") }
     var notificationSyncing by remember { mutableStateOf(false) }
+    var updateChecking by remember { mutableStateOf(false) }
     var relayClient by remember { mutableStateOf<SettingsRelayClient?>(null) }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         saveState = if (granted) sendLocalTestNotification(context, strings) else strings.notificationsDisabled
@@ -426,6 +444,79 @@ fun SettingsApp(onClose: () -> Unit) {
         activeClient.updateNotificationLevel(agent.id, level) { error ->
             notificationStatus = error ?: strings.saved
         }
+    }
+
+    fun startApkDownload(version: String, url: String) {
+        val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+        if (manager == null) {
+            saveState = strings.downloadManagerUnavailable
+            return
+        }
+        val fileName = "EasyCodex.Mobile.$version.apk"
+        val request = DownloadManager.Request(Uri.parse(url))
+            .setTitle(fileName)
+            .setDescription(strings.downloadStarted(version))
+            .setMimeType("application/vnd.android.package-archive")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+            .setAllowedOverMetered(true)
+            .setAllowedOverRoaming(false)
+        manager.enqueue(request)
+        saveState = strings.downloadStarted(version)
+    }
+
+    fun checkForUpdates() {
+        if (updateChecking) return
+        updateChecking = true
+        saveState = strings.checkingForUpdates
+        val request = Request.Builder()
+            .url(EASY_CODEX_RELEASE_API_URL)
+            .header("Accept", "application/vnd.github+json")
+            .build()
+        updateClient.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                mainHandler.post {
+                    updateChecking = false
+                    saveState = strings.updateCheckFailed(e.message ?: "")
+                }
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: Response) {
+                val body = response.body.string()
+                mainHandler.post {
+                    updateChecking = false
+                    if (!response.isSuccessful) {
+                        saveState = strings.updateCheckFailed("HTTP ${response.code}")
+                        return@post
+                    }
+                    val release = runCatching { JSONObject(body) }.getOrNull()
+                    val tag = release?.optString("tag_name").orEmpty().ifBlank {
+                        release?.optString("name").orEmpty()
+                    }
+                    val latestVersion = tag.trim().removePrefix("v").ifBlank { EASY_CODEX_APP_VERSION }
+                    if (compareVersions(latestVersion, EASY_CODEX_APP_VERSION) <= 0) {
+                        saveState = strings.appUpToDate(EASY_CODEX_APP_VERSION)
+                        return@post
+                    }
+                    val assets = release?.optJSONArray("assets") ?: JSONArray()
+                    var apkUrl = ""
+                    for (index in 0 until assets.length()) {
+                        val asset = assets.optJSONObject(index) ?: continue
+                        val name = asset.optString("name")
+                        if (name.contains("Mobile", ignoreCase = true) && name.endsWith(".apk", ignoreCase = true)) {
+                            apkUrl = asset.optString("browser_download_url")
+                            break
+                        }
+                    }
+                    if (apkUrl.isBlank()) {
+                        saveState = strings.noApkFound(latestVersion)
+                        return@post
+                    }
+                    saveState = strings.updateAvailable(latestVersion)
+                    startApkDownload(latestVersion, apkUrl)
+                }
+            }
+        })
     }
 
     BackHandler(enabled = destination != null) {
@@ -805,7 +896,17 @@ fun SettingsApp(onClose: () -> Unit) {
                                 subtitle = strings.appSubtitle,
                                 icon = { Icon(Icons.Default.Settings, contentDescription = null) },
                             ) {
-                                InfoRow(title = strings.version, detail = "1.0.0")
+                                InfoRow(title = strings.version, detail = EASY_CODEX_APP_VERSION)
+                                Button(onClick = ::checkForUpdates, enabled = !updateChecking) {
+                                    Text(if (updateChecking) strings.checkingForUpdates else strings.checkForUpdates)
+                                }
+                                if (saveState.isNotBlank()) {
+                                    Text(
+                                        saveState,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
                                 InfoRow(title = strings.connectionInstructions, detail = strings.connectionInstructionsDetail)
                                 HorizontalDivider()
                                 InfoRow(

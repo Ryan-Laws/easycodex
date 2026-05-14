@@ -10,6 +10,7 @@ import { promises as fsPromises } from 'fs';
 import simpleGit from 'simple-git';
 import qrcode from 'qrcode-terminal';
 import { SessionOrchestrator } from './session-orchestrator';
+import { applyUpdate, checkForUpdates, type UpdateInfo } from './updater';
 import {
   registerNotificationToken,
   updateClientLanguage,
@@ -425,6 +426,7 @@ let nextStreamSeq = 1;
 const streamHistory: StreamHistoryEntry[] = [];
 let codexWatchTimer: ReturnType<typeof setTimeout> | null = null;
 const codexWatchers: fs.FSWatcher[] = [];
+let lastUpdateCheck: UpdateInfo | null = null;
 
 function getConnectedAuthenticatedCount(): number {
   let count = 0;
@@ -446,6 +448,22 @@ function emitClientState(reason: string) {
     notificationTokens: getRegisteredTokenCount(),
     lastClientLanguage,
   });
+}
+
+async function runUpdateCheck(reason: string): Promise<UpdateInfo> {
+  lastUpdateCheck = await checkForUpdates();
+  emitDesktopRelayEvent('update', {
+    reason,
+    update: lastUpdateCheck,
+  });
+  if (lastUpdateCheck.updateAvailable) {
+    broadcast('system', 'relay/update_available', {
+      reason,
+      update: lastUpdateCheck,
+      timestamp: Date.now(),
+    });
+  }
+  return lastUpdateCheck;
 }
 
 function compactStreamText(value: string, fallback = '详细内容已省略。'): string {
@@ -621,6 +639,7 @@ app.get('/health', (req, res) => {
     notificationClients: getRegisteredClientCount(),
     notificationTokens: getRegisteredTokenCount(),
     lastClientLanguage,
+    update: lastUpdateCheck,
     runtime: manager.getRuntimeCapabilities(),
     system: {
       hostname: os.hostname(),
@@ -958,6 +977,21 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'check_update': {
+          reply(await runUpdateCheck('client_request'));
+          break;
+        }
+
+        case 'apply_update': {
+          const result = await applyUpdate();
+          reply(result);
+          broadcast('system', 'relay/update_applied', {
+            result,
+            timestamp: Date.now(),
+          });
+          break;
+        }
+
         case 'register_notification_token': {
           const { token, language } = params as { token: string; language?: string };
           if (!session.clientId) {
@@ -1259,4 +1293,7 @@ server.listen(PORT, '0.0.0.0', () => {
     lastClientLanguage,
   });
   startCodexStateWatcher();
+  void runUpdateCheck('startup').catch((err) => {
+    console.warn('[update] Startup update check failed:', err);
+  });
 });

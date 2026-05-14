@@ -1519,8 +1519,8 @@ fun normalizeServiceTier(value: String): String {
     return when {
         normalized.isBlank() -> DEFAULT_SERVICE_TIER
         normalized == "auto" -> DEFAULT_SERVICE_TIER
-        normalized == "standard" -> "default"
-        normalized == "flex" -> "default"
+        normalized == "standard" -> DEFAULT_SERVICE_TIER
+        normalized == "default" -> DEFAULT_SERVICE_TIER
         else -> normalized
     }
 }

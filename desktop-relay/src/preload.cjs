@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('easyCodexRelay', {
   getState: () => ipcRenderer.invoke('get-state'),
   installAndBuild: () => ipcRenderer.invoke('install-build'),
+  checkUpdate: () => ipcRenderer.invoke('check-update'),
+  applyUpdate: () => ipcRenderer.invoke('apply-update'),
   startRelay: (input) => ipcRenderer.invoke('start-relay', input),
   stopRelay: () => ipcRenderer.invoke('stop-relay'),
   refreshApiKey: () => ipcRenderer.invoke('refresh-api-key'),

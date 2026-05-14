@@ -24,6 +24,15 @@ data class Agent(
     val preview: String? = null,
     val resumable: Boolean = false,
     val updatedAt: Long = 0,
+    val queuedFollowUps: List<QueuedFollowUp> = emptyList(),
+)
+
+data class QueuedFollowUp(
+    val id: String,
+    val text: String,
+    val cwd: String,
+    val createdAt: Long,
+    val pausedReason: String? = null,
 )
 
 enum class AgentAlertKind {
