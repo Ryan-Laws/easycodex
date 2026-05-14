@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('easyCodexRelay', {
   saveConfig: (input) => ipcRenderer.invoke('save-config', input),
   previewPort: (input) => ipcRenderer.invoke('preview-port', input),
   browseWorkspace: () => ipcRenderer.invoke('browse-workspace'),
+  browseCodex: () => ipcRenderer.invoke('browse-codex'),
   copyText: (text) => ipcRenderer.invoke('copy-text', text),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   minimizeWindow: () => ipcRenderer.invoke('window-minimize'),

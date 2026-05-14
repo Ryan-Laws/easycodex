@@ -1,4 +1,4 @@
-import { spawn, ChildProcess, execFileSync } from 'child_process';
+import { spawn, ChildProcess, execFileSync, type SpawnOptions } from 'child_process';
 import { v4 as uuid } from 'uuid';
 import fs from 'fs';
 import os from 'os';
@@ -74,6 +74,37 @@ const MOBILE_TRUNCATED_NOTICE = '\n\n[EasyCodex mobile truncated this long outpu
 const PLAN_MODE_PREFIX = '请先进入计划模式处理下面的需求。';
 const PLAN_MODE_DEMAND_MARKER = '需求：';
 const CONTEXT_PLACEHOLDER = '已加载项目上下文。';
+
+function cleanExecutablePath(value: unknown): string {
+  return String(value || '').trim().replace(/^"+|"+$/g, '');
+}
+
+function commandForCmd(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function codexAppServerInvocation(): { command: string; args: string[]; options: SpawnOptions } {
+  const configured = cleanExecutablePath(process.env.CODEX_EXECUTABLE || process.env.EASY_CODEX_CODEX_PATH);
+  const command = configured || 'codex';
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
+    return {
+      command: process.env.ComSpec || 'cmd.exe',
+      args: ['/d', '/s', '/c', `call ${commandForCmd(command)} app-server`],
+      options: { windowsVerbatimArguments: true },
+    };
+  }
+  return { command, args: ['app-server'], options: {} };
+}
+
+function spawnCodexAppServer(cwd: string): ChildProcess {
+  const invocation = codexAppServerInvocation();
+  return spawn(invocation.command, invocation.args, {
+    cwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env },
+    ...invocation.options,
+  });
+}
 
 interface PersistedAgent {
   id: string;
@@ -1364,11 +1395,7 @@ export class SessionOrchestrator {
     console.log(`\n${BG_BLUE}${WHITE}${BOLD} NEW AGENT ${RESET} ${CYAN}${name}${RESET} (${DIM}${id.slice(0, 8)}${RESET})`);
     console.log(`  ${DIM}Model: ${model} | CWD: ${cwd}${RESET}`);
 
-    const proc = spawn('codex', ['app-server'], {
-      cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
-    });
+    const proc = spawnCodexAppServer(cwd);
 
     const agent: AgentInfo = {
       id,
@@ -2078,11 +2105,7 @@ export class SessionOrchestrator {
 
   private sendOneOffRequest(request: string, cwd?: string): Promise<RpcReply> {
     return new Promise((resolve, reject) => {
-      const proc = spawn('codex', ['app-server'], {
-        cwd: cwd || process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env },
-      });
+      const proc = spawnCodexAppServer(cwd || process.cwd());
 
       let buffer = '';
       const pending = new Map<number | string, (res: RpcReply) => void>();

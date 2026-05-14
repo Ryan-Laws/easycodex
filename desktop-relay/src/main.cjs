@@ -5,7 +5,7 @@ const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const QRCode = require('qrcode');
 
 const isDev = !app.isPackaged;
@@ -39,6 +39,7 @@ let allowQuit = false;
 let relayEventData = null;
 let relayOutputBuffer = '';
 let relayLogClientIds = new Set();
+let codexDetectionCache = null;
 
 function commandForShell(command) {
   if (process.platform !== 'win32') return command;
@@ -57,12 +58,233 @@ function pathEntries() {
     .filter(Boolean);
 }
 
+function envPathValue(env) {
+  return env.PATH || env.Path || process.env.PATH || process.env.Path || '';
+}
+
+function withExtraPath(env, entries) {
+  const existing = String(envPathValue(env));
+  const seen = new Set(existing.split(path.delimiter).filter(Boolean));
+  const extras = entries.filter((entry) => entry && !seen.has(entry));
+  return {
+    ...env,
+    PATH: [...extras, existing].filter(Boolean).join(path.delimiter),
+  };
+}
+
 function firstExistingFile(candidates) {
   for (const candidate of candidates) {
     const filePath = cleanExecutablePath(candidate);
     if (filePath && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) return filePath;
   }
   return null;
+}
+
+function codexCommandCandidates(configuredPath, env) {
+  const configured = cleanExecutablePath(configuredPath);
+  if (configured) return [configured];
+  const envCandidate = cleanExecutablePath(env.CODEX_EXECUTABLE || env.EASY_CODEX_CODEX_PATH);
+  const names = process.platform === 'win32'
+    ? ['codex.exe', 'codex.cmd', 'codex.bat', 'codex']
+    : ['codex'];
+  const home = os.homedir();
+  const commonDirs = process.platform === 'win32'
+    ? [
+      path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'npm'),
+      path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Programs'),
+    ]
+    : [
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      '/usr/bin',
+      path.join(home, '.npm-global', 'bin'),
+      path.join(home, '.local', 'bin'),
+    ];
+  const pathCandidates = String(envPathValue(env))
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .flatMap((entry) => names.map((name) => path.join(entry, name)));
+  const commonCandidates = commonDirs.flatMap((entry) => names.map((name) => path.join(entry, name)));
+  return [...(envCandidate ? [envCandidate] : []), ...pathCandidates, ...commonCandidates, 'codex'];
+}
+
+function codexInvocation(command, args) {
+  const cleaned = cleanExecutablePath(command);
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(cleaned)) {
+    const cmd = cleanExecutablePath(process.env.ComSpec) || windowsSystemCommand('cmd.exe') || 'cmd.exe';
+    return {
+      command: cmd,
+      args: ['/d', '/s', '/c', ['call', cleaned, ...args].map(commandForShell).join(' ')],
+      options: { windowsVerbatimArguments: true },
+    };
+  }
+  return { command: cleaned, args, options: {} };
+}
+
+function runCodexCheck(command, args, env) {
+  const invocation = codexInvocation(command, args);
+  return spawnSync(invocation.command, invocation.args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: false,
+    encoding: 'utf8',
+    timeout: 10000,
+    windowsHide: true,
+    ...invocation.options,
+    env,
+  });
+}
+
+function verifyCodexExecutable(command, env) {
+  const result = runCodexCheck(command, ['--version'], env);
+  if (result.error) {
+    return { ok: false, error: result.error.message };
+  }
+  if (result.status !== 0) {
+    const output = `${result.stderr || ''}${result.stdout || ''}`.trim();
+    return { ok: false, error: output || `codex --version exited with code ${result.status}` };
+  }
+  const appServerResult = runCodexCheck(command, ['app-server', '--help'], env);
+  if (appServerResult.error) {
+    return { ok: false, error: appServerResult.error.message };
+  }
+  if (appServerResult.status !== 0) {
+    const output = `${appServerResult.stderr || ''}${appServerResult.stdout || ''}`.trim();
+    return { ok: false, error: output || `codex app-server --help exited with code ${appServerResult.status}` };
+  }
+  return { ok: true, version: String(result.stdout || result.stderr || '').trim() };
+}
+
+function shellPathProbes() {
+  if (process.platform === 'win32') return [];
+  const probes = [];
+  const shell = cleanExecutablePath(process.env.SHELL);
+  if (shell) probes.push({ shell, args: ['-lc'] });
+  for (const candidate of ['/bin/zsh', '/bin/bash', '/bin/sh']) {
+    if (fs.existsSync(candidate) && !probes.some((probe) => probe.shell === candidate)) {
+      probes.push({ shell: candidate, args: ['-lc'] });
+    }
+  }
+  return probes;
+}
+
+function discoverShellCodexEnvironments(baseEnv) {
+  const script = 'printf "__EASYC0DEX_PATH__%s\\n" "$PATH"; command -v codex 2>/dev/null | head -n 1';
+  const discovered = [];
+  for (const probe of shellPathProbes()) {
+    const result = spawnSync(probe.shell, [...probe.args, script], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8',
+      timeout: 10000,
+      env: baseEnv,
+    });
+    if (result.error || result.status !== 0) continue;
+    const lines = String(result.stdout || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const pathLine = lines.find((line) => line.startsWith('__EASYC0DEX_PATH__'));
+    const command = lines.find((line) => !line.startsWith('__EASYC0DEX_PATH__'));
+    const shellPath = pathLine ? pathLine.slice('__EASYC0DEX_PATH__'.length) : '';
+    if (!command && !shellPath) continue;
+    discovered.push({
+      command,
+      env: shellPath ? { ...baseEnv, PATH: shellPath } : baseEnv,
+      source: `${path.basename(probe.shell)} login shell`,
+    });
+  }
+  return discovered;
+}
+
+function discoverWindowsCodexCommands(env) {
+  if (process.platform !== 'win32') return [];
+  const where = windowsSystemCommand('where.exe');
+  if (!where) return [];
+  const result = spawnSync(where, ['codex'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    timeout: 10000,
+    windowsHide: true,
+    env,
+  });
+  if (result.error || result.status !== 0) return [];
+  return String(result.stdout || '')
+    .split(/\r?\n/)
+    .map(cleanExecutablePath)
+    .filter(Boolean)
+    .map((command) => ({ command, env, source: 'where.exe' }));
+}
+
+function detectCodex(configuredPath, options = {}) {
+  const key = cleanExecutablePath(configuredPath);
+  const now = Date.now();
+  if (
+    !options.force &&
+    codexDetectionCache &&
+    codexDetectionCache.key === key &&
+    now - codexDetectionCache.checkedAt < 15000
+  ) {
+    return codexDetectionCache.result;
+  }
+
+  let lastError = '';
+  const commonPathDirs = process.platform === 'win32'
+    ? [
+      path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'npm'),
+      path.join(process.env.ProgramFiles || 'C:\\Program Files', 'nodejs'),
+    ]
+    : ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', path.join(os.homedir(), '.local', 'bin')];
+  const baseEnv = withExtraPath(process.env, commonPathDirs);
+  const shellDiscoveries = discoverShellCodexEnvironments(baseEnv);
+  const commandChecks = key
+    ? [
+      { command: key, env: baseEnv, source: 'configured' },
+      ...shellDiscoveries.map((discovery) => ({ command: key, env: discovery.env, source: `configured with ${discovery.source}` })),
+    ]
+    : [
+      ...shellDiscoveries,
+      ...discoverWindowsCodexCommands(baseEnv),
+      ...codexCommandCandidates('', baseEnv).map((command) => ({ command, env: baseEnv, source: 'candidate' })),
+    ];
+  const seen = new Set();
+
+  for (const candidate of commandChecks) {
+    const command = cleanExecutablePath(candidate.command);
+    if (!command) continue;
+    const dedupeKey = `${command}\0${envPathValue(candidate.env)}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    const hasPathSeparator = command.includes('/') || command.includes('\\');
+    if (hasPathSeparator && !fs.existsSync(command)) {
+      lastError = `Codex executable not found: ${command}`;
+      continue;
+    }
+    if (hasPathSeparator && !fs.statSync(command).isFile()) {
+      lastError = `Codex path is not a file: ${command}`;
+      continue;
+    }
+    const check = verifyCodexExecutable(command, candidate.env);
+    if (check.ok) {
+      const result = {
+        installed: true,
+        path: command,
+        version: check.version,
+        source: candidate.source || (key ? 'configured' : (hasPathSeparator ? 'path' : 'command')),
+        env: { PATH: envPathValue(candidate.env) },
+        error: null,
+      };
+      codexDetectionCache = { key, checkedAt: now, result };
+      return result;
+    }
+    lastError = check.error;
+  }
+
+  const result = {
+    installed: false,
+    path: key,
+    version: '',
+    source: key ? 'configured' : 'path',
+    error: lastError || 'Codex CLI was not found. Choose the Codex executable path.',
+  };
+  codexDetectionCache = { key, checkedAt: now, result };
+  return result;
 }
 
 function windowsSystemCommand(name) {
@@ -147,6 +369,7 @@ function loadDesktopConfig() {
   return {
     port: Number.isInteger(config.port) ? config.port : 3001,
     workspace: typeof config.workspace === 'string' && config.workspace.trim() ? config.workspace : os.homedir(),
+    codexPath: typeof config.codexPath === 'string' && config.codexPath.trim() ? config.codexPath.trim() : '',
     languageMode: config.languageMode === 'manual' ? 'manual' : 'follow-phone',
     language: supportedLanguages.includes(config.language) ? config.language : 'system',
     guideSeen: config.guideSeen === true,
@@ -301,6 +524,7 @@ async function appState() {
   const details = connectionDetails(config.port, apiKey);
   const portAvailable = await checkPortAvailable(config.port).catch(() => false);
   const isRelayReady = relayReady();
+  const codex = detectCodex(config.codexPath);
   return {
     platform: process.platform,
     relayDir: relayDir(),
@@ -309,6 +533,8 @@ async function appState() {
     runtimeRelayDir,
     port: config.port,
     workspace: config.workspace,
+    codexPath: config.codexPath,
+    codex,
     apiKey,
     relayRunning,
     relayReady: isRelayReady,
@@ -541,9 +767,15 @@ async function startRelay(input) {
   if (relayProcess) return;
   const port = validatePort(input?.port);
   const workspace = validateWorkspace(input?.workspace);
+  const codexPath = cleanExecutablePath(input?.codexPath ?? loadDesktopConfig().codexPath);
+  const codex = detectCodex(codexPath, { force: true });
+  if (!codex.installed) {
+    appendLog(`Codex detection failed: ${codex.error}`);
+    throw new Error(codex.error || 'Codex CLI was not found. Choose the Codex executable path.');
+  }
   const portAvailable = await checkPortAvailable(port);
   if (!portAvailable) throw new Error('Port is in use. Choose another port.');
-  saveDesktopConfig({ port, workspace });
+  saveDesktopConfig({ port, workspace, codexPath });
   const cwd = relayDir();
   const builtServer = path.join(cwd, 'dist', 'server.js');
   if (!fs.existsSync(builtServer)) throw new Error('Please run Install/build before starting the relay.');
@@ -558,10 +790,12 @@ async function startRelay(input) {
 
   const relayEnv = {
     ...process.env,
+    ...(codex.env || {}),
     ...nodeScript.env,
     PORT: String(port),
     API_KEY: loadApiKey(),
     CODEX_CWD: workspace,
+    CODEX_EXECUTABLE: codex.path,
     EASYCODEX_NO_TERMINAL_QR: '1',
   };
   try {
@@ -746,6 +980,12 @@ ipcMain.handle('save-config', async (_event, input) => {
     next.port = port;
   }
   if (Object.prototype.hasOwnProperty.call(input || {}, 'workspace')) next.workspace = validateWorkspace(input.workspace);
+  if (Object.prototype.hasOwnProperty.call(input || {}, 'codexPath')) {
+    const codexPath = cleanExecutablePath(input.codexPath);
+    const codex = detectCodex(codexPath, { force: true });
+    if (!codex.installed) throw new Error(codex.error || 'Codex CLI was not found.');
+    next.codexPath = codexPath;
+  }
   if (input?.languageMode === 'manual' || input?.languageMode === 'follow-phone') next.languageMode = input.languageMode;
   if (supportedLanguages.includes(input?.language)) next.language = input.language;
   saveDesktopConfig(next);
@@ -782,6 +1022,18 @@ ipcMain.handle('browse-workspace', async () => {
   });
   if (result.canceled || !result.filePaths[0]) return null;
   return result.filePaths[0];
+});
+ipcMain.handle('browse-codex', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose the Codex executable',
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const codexPath = result.filePaths[0];
+  const codex = detectCodex(codexPath, { force: true });
+  if (!codex.installed) throw new Error(codex.error || 'Selected file is not a working Codex executable.');
+  saveDesktopConfig({ codexPath });
+  return appState();
 });
 ipcMain.handle('copy-text', (_event, text) => {
   clipboard.writeText(String(text || ''));

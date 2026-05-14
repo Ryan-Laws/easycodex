@@ -19,6 +19,9 @@ const dictionaries = {
     language: 'Language',
     port: 'Port',
     workspace: 'Default workspace',
+    codexPath: 'Codex executable',
+    codexFound: (value) => `Codex detected${value ? `: ${value}` : ''}`,
+    codexMissing: 'Codex not found. Choose the Codex executable.',
     relayUrl: 'Relay URL',
     apiKey: 'API Key',
     copy: 'Copy',
@@ -56,6 +59,9 @@ const dictionaries = {
     language: '语言',
     port: '端口',
     workspace: '默认工作区',
+    codexPath: 'Codex 可执行文件',
+    codexFound: (value) => `已检测到 Codex${value ? `：${value}` : ''}`,
+    codexMissing: '未检测到 Codex，请选择 Codex 可执行文件。',
     relayUrl: '中继地址',
     apiKey: 'API Key',
     copy: '复制',
@@ -93,6 +99,9 @@ const dictionaries = {
     language: '語言',
     port: '連接埠',
     workspace: '預設工作區',
+    codexPath: 'Codex 可執行檔',
+    codexFound: (value) => `已偵測到 Codex${value ? `：${value}` : ''}`,
+    codexMissing: '未偵測到 Codex，請選擇 Codex 可執行檔。',
     relayUrl: '中繼位址',
     apiKey: 'API Key',
     copy: '複製',
@@ -304,11 +313,14 @@ const elements = {
   portInput: document.getElementById('portInput'),
   portStatus: document.getElementById('portStatus'),
   workspaceInput: document.getElementById('workspaceInput'),
+  codexPathInput: document.getElementById('codexPathInput'),
+  codexStatus: document.getElementById('codexStatus'),
   relayUrlInput: document.getElementById('relayUrlInput'),
   apiKeyInput: document.getElementById('apiKeyInput'),
   qrImage: document.getElementById('qrImage'),
   logOutput: document.getElementById('logOutput'),
   browseButton: document.getElementById('browseButton'),
+  browseCodexButton: document.getElementById('browseCodexButton'),
   copyConnectionButton: document.getElementById('copyConnectionButton'),
   copyKeyButton: document.getElementById('copyKeyButton'),
   refreshKeyButton: document.getElementById('refreshKeyButton'),
@@ -356,13 +368,26 @@ function setPortStatus(kind, message) {
   elements.portStatus.textContent = message;
 }
 
+function setCodexStatus(state) {
+  const codex = state?.codex;
+  if (codex?.installed) {
+    elements.codexStatus.dataset.state = 'ok';
+    elements.codexStatus.textContent = t('codexFound', codex.version || codex.path);
+    return;
+  }
+  elements.codexStatus.dataset.state = 'error';
+  elements.codexStatus.textContent = codex?.error || t('codexMissing');
+}
+
 function setControlsBusy(isBusy) {
   elements.installButton.disabled = isBusy || currentState?.installRunning || currentState?.relayRunning;
-  elements.startButton.disabled = isBusy || currentState?.installRunning || currentState?.relayRunning || !currentState?.relayReady || !currentState?.portAvailable;
+  elements.startButton.disabled = isBusy || currentState?.installRunning || currentState?.relayRunning || !currentState?.relayReady || !currentState?.portAvailable || !currentState?.codex?.installed;
   elements.stopButton.disabled = isBusy || !currentState?.relayRunning;
   elements.refreshKeyButton.disabled = isBusy || currentState?.relayRunning;
   elements.portInput.disabled = isBusy || currentState?.relayRunning;
   elements.browseButton.disabled = isBusy;
+  elements.codexPathInput.disabled = isBusy || currentState?.relayRunning;
+  elements.browseCodexButton.disabled = isBusy || currentState?.relayRunning;
 }
 
 function renderPendingStatus() {
@@ -393,6 +418,7 @@ function renderState(state) {
   elements.relayPath.textContent = state.relayDir;
   elements.portInput.value = state.port;
   elements.workspaceInput.value = state.workspace;
+  elements.codexPathInput.value = state.codexPath || state.codex?.path || '';
   elements.relayUrlInput.value = state.relayUrl;
   elements.apiKeyInput.value = state.apiKey;
   elements.qrImage.src = state.qrDataUrl;
@@ -403,6 +429,7 @@ function renderState(state) {
   setControlsBusy(false);
   if (state.portAvailable) setPortStatus('ok', t('portAvailable'));
   else setPortStatus('error', t('portBusy'));
+  setCodexStatus(state);
   renderHealth(state.health);
   renderPendingStatus();
 }
@@ -460,6 +487,7 @@ elements.startButton.addEventListener('click', () => {
   runAction(elements.startButton, () => window.easyCodexRelay.startRelay({
     port: elements.portInput.value,
     workspace: elements.workspaceInput.value,
+    codexPath: elements.codexPathInput.value,
   }), 'launching');
 });
 
@@ -470,6 +498,16 @@ elements.stopButton.addEventListener('click', () => {
 elements.browseButton.addEventListener('click', async () => {
   const workspace = await window.easyCodexRelay.browseWorkspace();
   if (workspace) elements.workspaceInput.value = workspace;
+});
+
+elements.browseCodexButton.addEventListener('click', () => {
+  runAction(elements.browseCodexButton, () => window.easyCodexRelay.browseCodex());
+});
+
+elements.codexPathInput.addEventListener('change', () => {
+  runAction(elements.browseCodexButton, () => window.easyCodexRelay.saveConfig({
+    codexPath: elements.codexPathInput.value,
+  }));
 });
 
 elements.portInput.addEventListener('input', () => {
