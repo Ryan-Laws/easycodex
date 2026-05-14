@@ -129,6 +129,10 @@ EasyCodex/
 - [AGENT.md](AGENT.md) describes relay-managed Codex agents, WebSocket actions, and runtime behavior.
 - [desktop-relay/README.md](desktop-relay/README.md) covers packaging and release builds for the desktop relay.
 
+## Community
+
+- [LinuxDo](https://linux.do/) - a friendly community for developers and open source users.
+
 ## License
 
 EasyCodex is released under the [MIT License](LICENSE).
