@@ -24,6 +24,7 @@ data class Agent(
     val codexThreadId: String? = null,
     val preview: String? = null,
     val resumable: Boolean = false,
+    val pinned: Boolean = false,
     val updatedAt: Long = 0,
     val queuedFollowUps: List<QueuedFollowUp> = emptyList(),
 )
@@ -59,6 +60,29 @@ data class AgentApprovalRequest(
     val method: String,
     val title: String,
     val detail: String,
+    val timestamp: Long,
+)
+
+data class AgentUserInputOption(
+    val label: String,
+    val description: String,
+)
+
+data class AgentUserInputQuestion(
+    val id: String,
+    val header: String,
+    val question: String,
+    val isOther: Boolean,
+    val isSecret: Boolean,
+    val options: List<AgentUserInputOption>,
+)
+
+data class AgentUserInputRequest(
+    val id: String,
+    val agentId: String,
+    val title: String,
+    val detail: String,
+    val questions: List<AgentUserInputQuestion>,
     val timestamp: Long,
 )
 
@@ -103,6 +127,36 @@ data class DirectoryListing(
     val worktrees: List<WorktreeOption> = emptyList(),
     val entries: List<DirectoryOption>,
 )
+
+data class CliConsoleLine(
+    val id: String,
+    val role: String,
+    val text: String,
+    val timestamp: Long,
+    val streaming: Boolean = false,
+)
+
+data class CliConsoleWindow(
+    val id: String,
+    val title: String = "CLI",
+    val cwd: String = DEFAULT_AGENT_CWD,
+    val model: String = DEFAULT_AGENT_MODEL,
+    val reasoningEffort: String = DEFAULT_REASONING_EFFORT,
+    val version: String = "",
+    val running: Boolean = false,
+    val busy: Boolean = false,
+    val runId: String? = null,
+    val input: String = "",
+    val lines: List<CliConsoleLine> = emptyList(),
+)
+
+data class CliConsoleState(
+    val activeWindowId: String = "cli_1",
+    val windows: List<CliConsoleWindow> = listOf(CliConsoleWindow(id = "cli_1", title = "CLI 1")),
+) {
+    val activeWindow: CliConsoleWindow
+        get() = windows.firstOrNull { it.id == activeWindowId } ?: windows.first()
+}
 
 data class AttachmentDraft(
     val name: String,

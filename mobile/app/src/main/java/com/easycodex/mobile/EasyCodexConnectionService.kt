@@ -15,14 +15,15 @@ import android.os.Looper
 
 private const val BACKGROUND_CONNECTION_CHANNEL_ID = "easycodex-background-connection"
 private const val BACKGROUND_CONNECTION_NOTIFICATION_ID = 72002
-private const val BACKGROUND_CONNECTION_UPDATE_MS = 5_000L
+private const val BACKGROUND_CONNECTION_UPDATE_MS = 60_000L
 
 class EasyCodexConnectionService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private lateinit var controller: EasyCodexController
+    private var lastNotificationText = ""
     private val notificationUpdater = object : Runnable {
         override fun run() {
-            updateForegroundNotification()
+            updateForegroundNotificationIfChanged(force = false)
             main.postDelayed(this, BACKGROUND_CONNECTION_UPDATE_MS)
         }
     }
@@ -30,8 +31,9 @@ class EasyCodexConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         controller = EasyCodexControllerProvider.get(applicationContext)
-        startForegroundCompat(buildNotification())
-        main.post(notificationUpdater)
+        lastNotificationText = foregroundNotificationText()
+        startForegroundCompat(buildNotification(lastNotificationText))
+        main.postDelayed(notificationUpdater, BACKGROUND_CONNECTION_UPDATE_MS)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -39,7 +41,7 @@ class EasyCodexConnectionService : Service() {
         if (controller.connectionStatus != "connected" && controller.connectionStatus != "connecting") {
             controller.connect()
         }
-        updateForegroundNotification()
+        updateForegroundNotificationIfChanged(force = true)
         return START_STICKY
     }
 
@@ -62,12 +64,20 @@ class EasyCodexConnectionService : Service() {
         }
     }
 
-    private fun updateForegroundNotification() {
+    private fun updateForegroundNotificationIfChanged(force: Boolean) {
+        val nextText = foregroundNotificationText()
+        if (!force && nextText == lastNotificationText) return
+        lastNotificationText = nextText
         val manager = getSystemService(NotificationManager::class.java) ?: return
-        manager.notify(BACKGROUND_CONNECTION_NOTIFICATION_ID, buildNotification())
+        manager.notify(BACKGROUND_CONNECTION_NOTIFICATION_ID, buildNotification(nextText))
     }
 
-    private fun buildNotification(): Notification {
+    private fun foregroundNotificationText(): String {
+        val strings = appStringsFor(controller.appLanguage)
+        return controller.statusText.ifBlank { strings.connectingRelay }
+    }
+
+    private fun buildNotification(contentText: String): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         if (manager != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(
@@ -89,12 +99,11 @@ class EasyCodexConnectionService : Service() {
             openAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val strings = appStringsFor(controller.appLanguage)
         val smallIcon = if (applicationInfo.icon != 0) applicationInfo.icon else R.mipmap.ic_launcher
         return Notification.Builder(this, BACKGROUND_CONNECTION_CHANNEL_ID)
             .setSmallIcon(smallIcon)
             .setContentTitle("EasyCodex")
-            .setContentText(controller.statusText.ifBlank { strings.connectingRelay })
+            .setContentText(contentText)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setShowWhen(false)

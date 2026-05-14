@@ -10,6 +10,7 @@ import {
   codexThreadResumeCall,
   codexThreadListCall,
   codexThreadReadCall,
+  codexThreadArchiveCall,
   codexThreadTurnsListCall,
   codexModelListCall,
   codexTurnStartCall,
@@ -31,6 +32,8 @@ interface AgentInfo {
   reasoningEffort: string;
   systemPrompt: string;
   status: 'initializing' | 'ready' | 'working' | 'error' | 'stopped';
+  createdAt: number;
+  updatedAt: number;
   threadId: string | null;
   currentTurnId: string | null;
   codexThreadId: string | null;
@@ -71,11 +74,14 @@ const MOBILE_MESSAGE_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_MESSAGE_T
 const MOBILE_DETAIL_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_DETAIL_TEXT_LIMIT || 12000);
 const MOBILE_THREAD_TURN_PAGE_LIMIT = Number(process.env.EASY_CODEX_MOBILE_THREAD_TURN_PAGE_LIMIT || 50);
 const MOBILE_THREAD_TURN_MAX_PAGES = Number(process.env.EASY_CODEX_MOBILE_THREAD_TURN_MAX_PAGES || 5);
+const STOPPED_THREAD_OVERRIDE_TTL_MS = 6 * 60 * 60 * 1000;
+const CODEX_SESSION_ACTIVE_GRACE_MS = Number(process.env.EASY_CODEX_SESSION_ACTIVE_GRACE_MS || 20000);
 const MOBILE_TRUNCATED_NOTICE = '\n\n[EasyCodex mobile truncated this long output. Use the desktop relay/Codex session for the full text.]';
 const PLAN_MODE_PREFIX = '请先进入计划模式处理下面的需求。';
 const PLAN_MODE_DEMAND_MARKER = '需求：';
 const CONTEXT_PLACEHOLDER = '已加载项目上下文。';
 const DEFAULT_SERVICE_TIER = 'default';
+const USER_INPUT_REQUEST_METHOD = 'item/tool/requestUserInput';
 
 interface CodexSessionRuntimeState {
   running: boolean;
@@ -134,11 +140,13 @@ export interface CodexThreadSummary {
   preview: string;
   cwd: string;
   projectRoot: string | null;
+  projectless: boolean;
   path: string;
   source: string | null;
   createdAt: number;
   updatedAt: number;
   status: string;
+  pinned: boolean;
   activityLabel?: string | null;
   queuedFollowUpCount: number;
   queuedFollowUps: QueuedFollowUpSummary[];
@@ -180,6 +188,17 @@ export interface CodexThreadDetail extends CodexThreadSummary {
   reasoningEffort: string;
   activityLabel?: string | null;
   messages: { role: string; type: string; text: string; timestamp: number; _itemId?: string }[];
+}
+
+export interface CodexSidebarSnapshot {
+  projectRoots: string[];
+  pinnedThreadIds: string[];
+  projectThreadIds: string[];
+  visibleThreadIds: string[];
+  pinnedThreads: CodexThreadSummary[];
+  projectThreads: CodexThreadSummary[];
+  data: CodexThreadSummary[];
+  nextCursor: string | null;
 }
 
 function mobileTextLimit(type: string): number {
@@ -483,6 +502,15 @@ function codexQueuedFollowUpsForThread(threadId: string): QueuedFollowUpSummary[
     .filter((item) => item.text.trim());
 }
 
+function codexPinnedThreadIds(): Set<string> {
+  const state = readCodexDesktopState();
+  const atomState = codexDesktopAtomState();
+  return new Set(
+    stringArray(state?.['pinned-thread-ids'])
+      .concat(stringArray(atomState?.['pinned-thread-ids'])),
+  );
+}
+
 function uniqueResolvedPaths(values: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -519,8 +547,25 @@ function codexThreadWorkspaceRootHints(): Map<string, string> {
   return hints;
 }
 
+function codexProjectlessThreadIds(): Set<string> {
+  const state = readCodexDesktopState();
+  const atomState = codexDesktopAtomState();
+  return new Set(
+    stringArray(state?.['projectless-thread-ids'])
+      .concat(stringArray(atomState?.['projectless-thread-ids'])),
+  );
+}
+
 function isWithinAnyBase(bases: string[], targetPath: string): boolean {
   return bases.some((base) => isWithinBase(base, targetPath));
+}
+
+function isNestedCodexWorktree(cwd: string, projectRoot: string | null): boolean {
+  if (!projectRoot) return false;
+  const relative = path.relative(projectRoot, cwd);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false;
+  const parts = relative.split(/[\\/]+/).map((part) => part.toLowerCase());
+  return parts[0] === '.claude' && parts[1] === 'worktrees';
 }
 
 function shouldShowCodexThreadInDesktopWorkspace(
@@ -541,8 +586,10 @@ function codexThreadProjectRoot(
   thread: Record<string, unknown>,
   visibleWorkspaceRoots: string[],
   workspaceRootHints: Map<string, string>,
+  projectlessThreadIds: Set<string> = new Set(),
 ): string | null {
   const id = typeof thread.id === 'string' ? thread.id : '';
+  if (id && projectlessThreadIds.has(id)) return null;
   const hintedRoot = id ? workspaceRootHints.get(id) : undefined;
   if (hintedRoot && (visibleWorkspaceRoots.length === 0 || isWithinAnyBase(visibleWorkspaceRoots, hintedRoot))) {
     return hintedRoot;
@@ -551,6 +598,17 @@ function codexThreadProjectRoot(
   const cwd = cleanCwd ? path.resolve(cleanCwd) : '';
   if (!cwd) return null;
   return visibleWorkspaceRoots.find((root) => isWithinBase(root, cwd)) || cwd;
+}
+
+function isCodexConversationThread(
+  thread: Record<string, unknown>,
+  workspaceRootHints: Map<string, string>,
+  projectlessThreadIds: Set<string> = new Set(),
+): boolean {
+  const id = typeof thread.id === 'string' ? thread.id : '';
+  if (id && projectlessThreadIds.has(id)) return true;
+  if (id && workspaceRootHints.has(id)) return false;
+  return !usablePathString(thread.cwd);
 }
 
 function codexDesktopProjectRootForCwd(cwd: string): string | null {
@@ -597,6 +655,21 @@ function valueToText(value: unknown): string {
     return valueToText(record.text ?? record.message ?? record.content);
   }
   return '';
+}
+
+function userInputRequestText(params: Record<string, unknown>): string {
+  const questions = Array.isArray(params.questions) ? params.questions : [];
+  const text = questions
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return '';
+      const question = entry as Record<string, unknown>;
+      const header = typeof question.header === 'string' ? question.header.trim() : '';
+      const prompt = typeof question.question === 'string' ? question.question.trim() : '';
+      return [header, prompt].filter(Boolean).join('：');
+    })
+    .filter(Boolean)
+    .join('\n');
+  return text || valueToText(params.message) || 'Codex 需要你回答一个问题';
 }
 
 function turnsToMessages(thread: Record<string, unknown> | undefined) {
@@ -941,6 +1014,20 @@ function sessionEventPayload(record: Record<string, unknown>): Record<string, un
 
 function sessionActivityLabel(topType: string, payload: Record<string, unknown>): string | null {
   const payloadType = usableString(payload.type);
+  if (topType === 'response_item') {
+    switch (payloadType) {
+      case 'reasoning':
+        return '正在思考中，推理内容持续返回';
+      case 'function_call':
+        return '正在运行命令，等待执行结果';
+      case 'function_call_output':
+        return '正在读取命令输出';
+      case 'message':
+        return '正在生成回复';
+      default:
+        return null;
+    }
+  }
   if (topType === 'event_msg') {
     switch (payloadType) {
       case 'agent_message':
@@ -955,20 +1042,6 @@ function sessionActivityLabel(topType: string, payload: Record<string, unknown>)
         return '正在修改文件，改动内容持续更新';
       case 'patch_apply_end':
         return '正在整理文件改动';
-      default:
-        return null;
-    }
-  }
-  if (topType === 'response_item') {
-    switch (payloadType) {
-      case 'reasoning':
-        return '正在思考中，整理执行步骤';
-      case 'function_call':
-        return '正在运行命令，等待执行结果';
-      case 'function_call_output':
-        return '正在读取命令输出';
-      case 'message':
-        return '正在生成回复';
       default:
         return null;
     }
@@ -989,6 +1062,7 @@ function readCodexSessionRuntimeState(sessionPath: unknown): CodexSessionRuntime
     let lifecycle: 'started' | 'terminal' | null = null;
     let updatedAt = 0;
     let activityLabel: string | null = null;
+    let sawActiveEvent = false;
     for (const line of lines) {
       if (!line.trim()) continue;
       let parsed: unknown;
@@ -1005,6 +1079,11 @@ function readCodexSessionRuntimeState(sessionPath: unknown): CodexSessionRuntime
       const timestamp = toTimestampMs(record.timestamp, updatedAt);
       if (timestamp > 0) updatedAt = Math.max(updatedAt, timestamp);
 
+      const activeLabel = sessionActivityLabel(topType, payload);
+      if (activeLabel) {
+        sawActiveEvent = true;
+        if (lifecycle !== 'terminal') activityLabel = activeLabel;
+      }
       if (topType === 'event_msg' && payloadType === 'task_started') {
         lifecycle = 'started';
         activityLabel = '正在运行中，AI 正在接手任务';
@@ -1019,17 +1098,24 @@ function readCodexSessionRuntimeState(sessionPath: unknown): CodexSessionRuntime
         continue;
       }
       if (lifecycle === 'started') {
-        activityLabel = sessionActivityLabel(topType, payload) || activityLabel;
+        activityLabel = activeLabel || activityLabel;
       }
     }
 
+    const recentlyActive = sawActiveEvent && lifecycle !== 'terminal' && Date.now() - stat.mtimeMs <= CODEX_SESSION_ACTIVE_GRACE_MS;
     const state = lifecycle
       ? {
           running: lifecycle === 'started',
           updatedAt,
           activityLabel: lifecycle === 'started' ? activityLabel : null,
         }
-      : null;
+      : sawActiveEvent
+        ? {
+            running: recentlyActive,
+            updatedAt,
+            activityLabel: recentlyActive ? activityLabel : null,
+          }
+        : null;
     sessionRuntimeCache.set(cleanPath, { size: stat.size, mtimeMs: stat.mtimeMs, state });
     return state;
   } catch {
@@ -1537,38 +1623,69 @@ function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Re
   return null;
 }
 
-function normalizeThreadSummary(thread: Record<string, unknown>, projectRoot: string | null = null): CodexThreadSummary {
+function normalizeThreadSummary(
+  thread: Record<string, unknown>,
+  projectRoot: string | null = null,
+  pinnedThreadIds: Set<string> = codexPinnedThreadIds(),
+  stoppedThreadIds: Set<string> = new Set(),
+  projectlessThreadIds: Set<string> = new Set(),
+): CodexThreadSummary {
   const id = typeof thread.id === 'string' ? thread.id : '';
   const cwd = usablePathString(thread.cwd);
+  const projectless = Boolean(id && projectlessThreadIds.has(id));
   const createdAt = toTimestampMs(thread.createdAt);
   const runtime = readCodexSessionRuntimeState(thread.path);
+  const stoppedOverride = Boolean(id && stoppedThreadIds.has(id));
   const updatedAt = toTimestampMs(thread.updatedAt, createdAt);
   const queuedFollowUps = codexQueuedFollowUpsForThread(id);
+  const pinned = Boolean(id && pinnedThreadIds.has(id));
   return {
     id,
     name: typeof thread.name === 'string' ? thread.name : null,
     preview: typeof thread.preview === 'string' ? thread.preview : '',
     cwd,
-    projectRoot: projectRoot || codexDesktopProjectRootForCwd(cwd),
+    projectRoot: projectless ? null : (projectRoot || codexDesktopProjectRootForCwd(cwd)),
+    projectless,
     path: typeof thread.path === 'string' ? thread.path : '',
     source: typeof thread.source === 'string' ? thread.source : null,
     createdAt,
     updatedAt: Math.max(updatedAt, runtime?.updatedAt || 0),
-    status: runtime?.running ? 'working' : extractThreadStatus(thread.status),
-    activityLabel: runtime?.running ? runtime.activityLabel : null,
+    status: stoppedOverride
+      ? '可恢复'
+      : runtime
+        ? (runtime.running ? 'working' : '可恢复')
+        : extractThreadStatus(thread.status),
+    pinned,
+    activityLabel: stoppedOverride ? null : (runtime?.running ? runtime.activityLabel : null),
     queuedFollowUpCount: queuedFollowUps.length,
     queuedFollowUps,
   };
 }
 
 function shouldShowActiveCodexThread(summary: CodexThreadSummary): boolean {
-  return isActiveThreadStatus(summary.status) || summary.queuedFollowUpCount > 0;
+  return summary.pinned || isActiveThreadStatus(summary.status) || summary.queuedFollowUpCount > 0;
+}
+
+function byUpdatedDesc(left: CodexThreadSummary, right: CodexThreadSummary): number {
+  return right.updatedAt - left.updatedAt;
+}
+
+function uniqueSummariesById(items: CodexThreadSummary[]): CodexThreadSummary[] {
+  const seen = new Set<string>();
+  const result: CodexThreadSummary[] = [];
+  for (const item of items) {
+    if (!item.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push(item);
+  }
+  return result;
 }
 
 export class SessionOrchestrator {
   private agents = new Map<string, AgentInfo>();
   private broadcast: BroadcastFn;
   private capabilities: RuntimeCapabilities;
+  private stoppedCodexThreads = new Map<string, number>();
 
   constructor(broadcast: BroadcastFn) {
     this.broadcast = broadcast;
@@ -1678,6 +1795,8 @@ export class SessionOrchestrator {
       reasoningEffort: options?.reasoningEffort || 'medium',
       systemPrompt,
       status: 'initializing',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
       threadId: null,
       currentTurnId: null,
       codexThreadId: requestedCodexThreadId || null,
@@ -1730,10 +1849,11 @@ export class SessionOrchestrator {
     proc.on('exit', (code) => {
       console.log(`  ${YELLOW}[${name}] Process exited with code ${code}${RESET}`);
       agent.status = 'stopped';
+      this.markCodexThreadStopped(agent);
       this.rejectPending(agent, `codex app-server exited with code ${code}`);
       this.agents.delete(id);
       this.persistAgentsToDisk();
-      this.broadcast(id, 'agent/stopped', { code });
+      this.broadcast(id, 'agent/stopped', { code, codexThreadId: agent.codexThreadId || agent.threadId });
       if (code !== 0 && code !== null) {
         notifyMobileClients({
           title: `${name} — Error`,
@@ -1806,6 +1926,7 @@ export class SessionOrchestrator {
       const thread = threadData.thread as Record<string, unknown> | undefined;
       agent.threadId = (thread?.id as string) || (threadData.threadId as string) || null;
       agent.codexThreadId = agent.threadId;
+      this.clearCodexThreadStopped(agent.threadId);
       if (agent.threadId) {
         const duplicate = this.findAgentByCodexThreadId(agent.threadId, agent.id);
         if (duplicate) {
@@ -1961,15 +2082,64 @@ export class SessionOrchestrator {
     });
   }
 
+  respondAgentUserInput(agentId: string, requestId: string, answers: Record<string, unknown>): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) throw new Error('Agent not found');
+    const request = agent.pendingAgentRequests.get(requestId);
+    if (!request) throw new Error('Agent request not found or already handled');
+    agent.pendingAgentRequests.delete(requestId);
+
+    const formattedAnswers: Record<string, { answers: string[] }> = {};
+    for (const [questionId, value] of Object.entries(answers || {})) {
+      const values = Array.isArray(value) ? value : [value];
+      const cleanAnswers = values
+        .map((entry) => String(entry || '').trim())
+        .filter(Boolean);
+      if (cleanAnswers.length > 0) formattedAnswers[questionId] = { answers: cleanAnswers };
+    }
+
+    this.write(agent, JSON.stringify({
+      id: request.id,
+      result: {
+        answers: formattedAnswers,
+      },
+    }));
+    this.broadcast(agent.id, 'agent/request_resolved', {
+      requestId,
+      approved: true,
+      reason: 'Answered from EasyCodex mobile',
+      timestamp: Date.now(),
+    });
+  }
+
   stopAgent(agentId: string): void {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error('Agent not found');
 
     console.log(`  ${RED}[${agent.name}] Stopping...${RESET}`);
+    this.markCodexThreadStopped(agent);
     agent.process.kill();
     agent.status = 'stopped';
     this.agents.delete(agentId);
     this.persistAgentsToDisk();
+  }
+
+  async archiveCodexThread(threadId: string, agentId?: string): Promise<void> {
+    const normalizedThreadId = threadId.trim();
+    if (!normalizedThreadId) throw new Error('threadId is required');
+
+    const agent = (agentId && this.agents.get(agentId))
+      || Array.from(this.agents.values()).find((entry) => entry.codexThreadId === normalizedThreadId || entry.threadId === normalizedThreadId);
+    if (agent) {
+      try { agent.process.kill(); } catch {}
+      agent.status = 'stopped';
+      this.agents.delete(agent.id);
+      this.clearCodexThreadStopped(normalizedThreadId);
+      this.persistAgentsToDisk();
+    }
+
+    const response = await this.sendOneOffRequest(codexThreadArchiveCall(normalizedThreadId));
+    if (response.error) throw new Error(response.error.message);
   }
 
   updateModel(agentId: string, model: string): void {
@@ -2014,11 +2184,42 @@ export class SessionOrchestrator {
     this.persistAgentsToDisk();
   }
 
+  private async readPinnedCodexThreadSummary(threadId: string): Promise<Record<string, unknown> | null> {
+    const response = await this.sendOneOffRequest(codexThreadReadCall(threadId, false));
+    if (response.error) return null;
+    const result = response.result as Record<string, unknown>;
+    const thread = result?.thread as Record<string, unknown> | undefined;
+    return thread && typeof thread === 'object' && !Array.isArray(thread) ? thread : null;
+  }
+
+  private markCodexThreadStopped(agent: AgentInfo): void {
+    const threadId = (agent.codexThreadId || agent.threadId || '').trim();
+    if (threadId) this.stoppedCodexThreads.set(threadId, Date.now());
+  }
+
+  private clearCodexThreadStopped(threadId: string | null | undefined): void {
+    const normalized = (threadId || '').trim();
+    if (normalized) this.stoppedCodexThreads.delete(normalized);
+  }
+
+  private stoppedCodexThreadIds(): Set<string> {
+    const now = Date.now();
+    for (const [threadId, stoppedAt] of this.stoppedCodexThreads) {
+      if (now - stoppedAt > STOPPED_THREAD_OVERRIDE_TTL_MS) {
+        this.stoppedCodexThreads.delete(threadId);
+      }
+    }
+    return new Set(this.stoppedCodexThreads.keys());
+  }
+
   async listCodexThreads(params: { limit?: number; cursor?: string; cwd?: string; all?: boolean; activeOnly?: boolean } = {}) {
     const cwdFilter = params.cwd ? path.resolve(params.cwd) : null;
     const visibleWorkspaceRoots = cwdFilter ? [] : codexDesktopVisibleWorkspaceRoots();
     const workspaceRootHints = cwdFilter ? new Map<string, string>() : codexThreadWorkspaceRootHints();
+    const projectlessThreadIds = cwdFilter ? new Set<string>() : codexProjectlessThreadIds();
     const archivedThreadIds = codexArchivedThreadIds();
+    const pinnedThreadIds = codexPinnedThreadIds();
+    const stoppedThreadIds = this.stoppedCodexThreadIds();
     const allData: Record<string, unknown>[] = [];
     let nextCursor: string | null = typeof params.cursor === 'string' && params.cursor.trim() ? params.cursor : null;
     let page = 0;
@@ -2038,16 +2239,56 @@ export class SessionOrchestrator {
       page += 1;
     } while (params.all === true && nextCursor && page < 25);
 
+    const threadById = new Map<string, Record<string, unknown>>();
+    for (const entry of allData) {
+      const id = usableString(entry.id);
+      if (id && !threadById.has(id)) threadById.set(id, entry);
+    }
+
+    const pinnedThreads: CodexThreadSummary[] = [];
+    for (const pinnedThreadId of pinnedThreadIds) {
+      const thread = threadById.get(pinnedThreadId) || await this.readPinnedCodexThreadSummary(pinnedThreadId);
+      if (!thread) continue;
+      pinnedThreads.push(normalizeThreadSummary(
+        thread,
+        codexThreadProjectRoot(thread, visibleWorkspaceRoots, workspaceRootHints, projectlessThreadIds),
+        pinnedThreadIds,
+        stoppedThreadIds,
+        projectlessThreadIds,
+      ));
+    }
+
+    const projectThreads = allData
+      .filter((entry) => shouldShowCodexThread(entry, archivedThreadIds))
+      .filter((entry) => {
+        const id = usableString(entry.id);
+        if (id && pinnedThreadIds.has(id)) return false;
+        return shouldShowCodexThreadInDesktopWorkspace(entry, visibleWorkspaceRoots, workspaceRootHints)
+          || isCodexConversationThread(entry, workspaceRootHints, projectlessThreadIds);
+      })
+      .map((entry) => normalizeThreadSummary(
+        entry,
+        codexThreadProjectRoot(entry, visibleWorkspaceRoots, workspaceRootHints, projectlessThreadIds),
+        pinnedThreadIds,
+        stoppedThreadIds,
+        projectlessThreadIds,
+      ))
+      .filter((entry) => !entry.projectRoot || !isNestedCodexWorktree(entry.cwd, entry.projectRoot))
+      .filter((entry) => params.activeOnly !== true || shouldShowActiveCodexThread(entry))
+      .filter((entry) => !cwdFilter || (entry.cwd.trim() && isWithinBase(cwdFilter, entry.cwd)))
+      .sort(byUpdatedDesc);
+
+    const data = uniqueSummariesById([...pinnedThreads, ...projectThreads]);
     return {
       projectRoots: visibleWorkspaceRoots,
-      data: allData
-        .filter((entry) => shouldShowCodexThread(entry, archivedThreadIds))
-        .filter((entry) => shouldShowCodexThreadInDesktopWorkspace(entry, visibleWorkspaceRoots, workspaceRootHints))
-        .map((entry) => normalizeThreadSummary(entry, codexThreadProjectRoot(entry, visibleWorkspaceRoots, workspaceRootHints)))
-        .filter((entry) => params.activeOnly !== true || shouldShowActiveCodexThread(entry))
-        .filter((entry) => !cwdFilter || (entry.cwd.trim() && isWithinBase(cwdFilter, entry.cwd))),
+      pinnedThreadIds: pinnedThreads.map((entry) => entry.id),
+      projectThreadIds: projectThreads.map((entry) => entry.id),
+      visibleThreadIds: data.map((entry) => entry.id),
+      pinnedThreads,
+      projectThreads,
+      data,
       nextCursor,
-    };
+    } satisfies CodexSidebarSnapshot;
   }
 
   private async readCodexThreadTurns(threadId: string): Promise<Record<string, unknown>[] | null> {
@@ -2075,7 +2316,8 @@ export class SessionOrchestrator {
   }
 
   async readCodexThread(threadId: string): Promise<CodexThreadDetail> {
-    if (codexArchivedThreadIds().has(threadId.trim())) {
+    const pinnedThreadIds = codexPinnedThreadIds();
+    if (codexArchivedThreadIds().has(threadId.trim()) && !pinnedThreadIds.has(threadId.trim())) {
       throw new Error('Thread is archived');
     }
     let response = await this.sendOneOffRequest(codexThreadReadCall(threadId, false));
@@ -2104,7 +2346,14 @@ export class SessionOrchestrator {
     const messages = mergeMessageHistory(turnsToMessages(messageSource), readSessionMessages(thread.path))
       .sort((a, b) => a.timestamp - b.timestamp)
       .map(summarizeMessageForMobile);
-    const summary = normalizeThreadSummary(thread);
+    const projectlessThreadIds = codexProjectlessThreadIds();
+    const summary = normalizeThreadSummary(
+      thread,
+      codexThreadProjectRoot(thread, codexDesktopVisibleWorkspaceRoots(), codexThreadWorkspaceRootHints(), projectlessThreadIds),
+      pinnedThreadIds,
+      this.stoppedCodexThreadIds(),
+      projectlessThreadIds,
+    );
     const model = usableString(result?.model) || usableString(thread.model);
     const approvalPolicy = usableString(result?.approvalPolicy) || usableString(thread.approvalPolicy) || 'never';
     const serviceTier = normalizeServiceTier(usableString(result?.serviceTier) || usableString(thread.serviceTier));
@@ -2203,6 +2452,9 @@ export class SessionOrchestrator {
   }
 
   private serialize(agent: AgentInfo) {
+    const messageUpdatedAt = Math.max(0, ...agent.messages.map((message) => message.timestamp || 0));
+    const pendingUpdatedAt = Math.max(0, ...Array.from(agent.pendingAgentRequests.values()).map((request) => request.timestamp || 0));
+    const updatedAt = Math.max(agent.updatedAt, messageUpdatedAt, pendingUpdatedAt);
     return {
       id: agent.id,
       name: agent.name,
@@ -2214,6 +2466,8 @@ export class SessionOrchestrator {
       reasoningEffort: agent.reasoningEffort,
       systemPrompt: agent.systemPrompt,
       status: agent.status,
+      createdAt: agent.createdAt,
+      updatedAt,
       threadId: agent.threadId,
       currentTurnId: agent.currentTurnId,
       activity: this.activityLabel(agent),
@@ -2546,7 +2800,9 @@ export class SessionOrchestrator {
       params,
       timestamp: Date.now(),
     });
-    const text = valueToText(params.message ?? params.reason ?? params.command ?? params.tool ?? params.item) || method;
+    const text = method === USER_INPUT_REQUEST_METHOD
+      ? userInputRequestText(params)
+      : valueToText(params.message ?? params.reason ?? params.command ?? params.tool ?? params.item) || method;
     this.finalizeItemMessage(agent, `request_${requestId}`, text, 'status');
     this.broadcast(agent.id, 'agent/requested', {
       requestId,
@@ -2555,6 +2811,17 @@ export class SessionOrchestrator {
       text,
       timestamp: Date.now(),
     });
+    notifyMobileClients({
+      title: method === USER_INPUT_REQUEST_METHOD ? `${agent.name} has a question` : `${agent.name} needs confirmation`,
+      body: text,
+      subtitle: 'Tap to open',
+      kind: method === USER_INPUT_REQUEST_METHOD ? 'agent_question' : 'agent_request',
+      agentName: agent.name,
+      agentId: agent.id,
+      categoryId: 'agent-alert',
+      priority: 'high',
+      severity: 'info',
+    }).catch(() => {});
   }
 
   private handleNotification(agent: AgentInfo, method: string, params: Record<string, unknown>) {

@@ -758,11 +758,13 @@ function relayReady() {
 }
 
 function checkPortAvailable(input) {
-  const port = validatePort(input);
-  const currentPort = loadDesktopConfig().port;
-  if (relayRunning && port === currentPort) return Promise.resolve(true);
-
   return new Promise((resolve) => {
+    const port = validatePort(input);
+    const currentPort = loadDesktopConfig().port;
+    if (relayRunning && port === currentPort) {
+      resolve(true);
+      return;
+    }
     const server = net.createServer();
     server.once('error', () => resolve(false));
     server.once('listening', () => {
@@ -770,6 +772,105 @@ function checkPortAvailable(input) {
     });
     server.listen(port, '0.0.0.0');
   });
+}
+
+function looksLikeEasyCodexRelayHealth(health) {
+  const data = health?.data;
+  return Boolean(
+    health?.online &&
+    data?.status === 'ok' &&
+    typeof data.sessionId === 'string' &&
+    Array.isArray(data.allowedWorkspaceRoots) &&
+    data.system?.hostname &&
+    data.runtime,
+  );
+}
+
+async function checkPortStatus(input) {
+  const port = validatePort(input);
+  const available = await checkPortAvailable(port);
+  if (available) {
+    return { available: true, reclaimable: false, occupiedByRelay: false };
+  }
+
+  const health = await healthRequestHost('127.0.0.1', port, loadApiKey());
+  const occupiedByRelay = looksLikeEasyCodexRelayHealth(health);
+  return {
+    available: false,
+    reclaimable: occupiedByRelay,
+    occupiedByRelay,
+    pid: null,
+  };
+}
+
+function powershellCommand() {
+  if (process.platform !== 'win32') return null;
+  return firstExistingFile([
+    windowsSystemCommand('powershell.exe'),
+    windowsSystemCommand('pwsh.exe'),
+    'powershell.exe',
+  ]);
+}
+
+function listeningPidsForPort(port) {
+  if (process.platform === 'win32') {
+    const powershell = powershellCommand();
+    if (!powershell) return [];
+    const script = `Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique`;
+    const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+    });
+    if (result.error || result.status !== 0) return [];
+    return String(result.stdout || '')
+      .split(/\r?\n/)
+      .map((line) => Number.parseInt(line.trim(), 10))
+      .filter((pid) => Number.isInteger(pid) && pid > 0);
+  }
+
+  const result = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  if (result.error || result.status !== 0) return [];
+  return String(result.stdout || '')
+    .split(/\r?\n/)
+    .map((line) => Number.parseInt(line.trim(), 10))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+}
+
+async function waitForPortAvailable(port, timeoutMs = 5000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await checkPortAvailable(port)) return true;
+    await delay(150);
+  }
+  return false;
+}
+
+async function stopExternalRelayOnPort(port) {
+  const status = await checkPortStatus(port);
+  if (!status.reclaimable) return false;
+
+  const pids = listeningPidsForPort(port).filter((pid) => pid !== process.pid);
+  if (pids.length === 0) {
+    appendLog(`Port ${port} is used by EasyCodex Relay, but its process id could not be found.`);
+    return false;
+  }
+
+  appendLog(`Stopping existing EasyCodex Relay on port ${port} (PID ${pids.join(', ')}).`);
+  for (const pid of pids) {
+    try {
+      process.kill(pid);
+    } catch (error) {
+      appendLog(`Failed to stop PID ${pid}: ${error.message || error}`);
+    }
+  }
+
+  return waitForPortAvailable(port);
 }
 
 function normalizeLanguage(value) {
@@ -859,7 +960,11 @@ async function appState() {
   const config = loadDesktopConfig();
   const apiKey = loadApiKey();
   const details = connectionDetails(config.port, apiKey);
-  const portAvailable = await checkPortAvailable(config.port).catch(() => false);
+  const portStatus = await checkPortStatus(config.port).catch(() => ({
+    available: false,
+    reclaimable: false,
+    occupiedByRelay: false,
+  }));
   const isRelayReady = relayReady();
   const codex = detectCodex(config.codexPath);
   return {
@@ -877,7 +982,9 @@ async function appState() {
     relayReady: isRelayReady,
     installRunning: Boolean(installProcess),
     update: updateState,
-    portAvailable,
+    portAvailable: portStatus.available,
+    portReclaimable: portStatus.reclaimable,
+    portOccupiedByRelay: portStatus.occupiedByRelay,
     guideVisible: !config.guideSeen,
     health: mergeRelayEventHealth(lastHealth),
     languageMode: config.languageMode,
@@ -1114,8 +1221,13 @@ async function startRelay(input) {
     appendLog(`Codex detection failed: ${codex.error}`);
     throw new Error(codex.error || 'Codex CLI was not found. Choose the Codex executable path.');
   }
-  const portAvailable = await checkPortAvailable(port);
-  if (!portAvailable) throw new Error('Port is in use. Choose another port.');
+  const portStatus = await checkPortStatus(port);
+  if (!portStatus.available) {
+    if (!portStatus.reclaimable || !(await stopExternalRelayOnPort(port))) {
+      throw new Error('Port is in use. Choose another port.');
+    }
+    appendLog(`Port ${port} is free after stopping the existing relay.`);
+  }
   saveDesktopConfig({ port, workspace, codexPath });
   const cwd = relayDir();
   const builtServer = path.join(cwd, 'dist', 'server.js');
@@ -1326,7 +1438,8 @@ ipcMain.handle('save-config', async (_event, input) => {
   const next = {};
   if (Object.prototype.hasOwnProperty.call(input || {}, 'port')) {
     const port = validatePort(input.port);
-    if (!(await checkPortAvailable(port))) throw new Error('Port is in use. Choose another port.');
+    const portStatus = await checkPortStatus(port);
+    if (!portStatus.available && !portStatus.reclaimable) throw new Error('Port is in use. Choose another port.');
     next.port = port;
   }
   if (Object.prototype.hasOwnProperty.call(input || {}, 'workspace')) next.workspace = validateWorkspace(input.workspace);
@@ -1349,9 +1462,12 @@ ipcMain.handle('preview-port', async (_event, input) => {
   const port = validatePort(input?.port);
   const apiKey = loadApiKey();
   const details = connectionDetails(port, apiKey);
+  const portStatus = await checkPortStatus(port);
   return {
     port,
-    portAvailable: await checkPortAvailable(port),
+    portAvailable: portStatus.available,
+    portReclaimable: portStatus.reclaimable,
+    portOccupiedByRelay: portStatus.occupiedByRelay,
     qrDataUrl: await QRCode.toDataURL(details.connectUrl, {
       margin: 1,
       width: 360,

@@ -69,7 +69,6 @@ import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -140,6 +139,7 @@ const val PREF_UPDATE_CHANNEL = "update_channel"
 const val PREF_USAGE_GUIDE_SEEN = "usage_guide_seen"
 const val PREF_DAYLIGHT_THEME_DEFAULT_APPLIED = "daylight_theme_default_applied"
 const val PREF_HIDDEN_TASK_IDS = "hidden_task_ids"
+const val PREF_READ_TASK_KEYS = "read_task_keys"
 
 const val DEFAULT_RELAY_URL = "ws://10.0.2.2:3001"
 const val DEFAULT_AGENT_MODEL = "gpt-5.5"
@@ -312,6 +312,7 @@ fun SettingsApp(onClose: () -> Unit) {
     var oledMode by remember { mutableStateOf(prefs.getBoolean(PREF_OLED_MODE, false)) }
     var saveState by remember { mutableStateOf("") }
     var apiKeyVisible by remember { mutableStateOf(false) }
+    var connectionTesting by remember { mutableStateOf(false) }
     val strings = appStringsFor(appLanguage)
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val updateClient = remember {
@@ -330,6 +331,7 @@ fun SettingsApp(onClose: () -> Unit) {
     var updateChecking by remember { mutableStateOf(false) }
     var pendingApkUpdate by remember { mutableStateOf<ApkUpdateCandidate?>(null) }
     var relayClient by remember { mutableStateOf<SettingsRelayClient?>(null) }
+    var connectionTestClient by remember { mutableStateOf<SettingsRelayClient?>(null) }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         saveState = if (granted) sendLocalTestNotification(context, strings) else strings.notificationsDisabled
     }
@@ -337,13 +339,14 @@ fun SettingsApp(onClose: () -> Unit) {
     DisposableEffect(Unit) {
         onDispose {
             relayClient?.close()
+            connectionTestClient?.close()
         }
     }
 
-    fun save() {
+    fun persistSettings(nextRelayUrl: String = relayUrl, nextApiKey: String = apiKey) {
         prefs.edit()
-            .putString(PREF_RELAY_URL, relayUrl.trim())
-            .putString(PREF_API_KEY, apiKey.trim())
+            .putString(PREF_RELAY_URL, nextRelayUrl.trim())
+            .putString(PREF_API_KEY, nextApiKey.trim())
             .putString(PREF_DEFAULT_MODEL, defaultModel.ifBlank { DEFAULT_AGENT_MODEL })
             .putString(PREF_DEFAULT_CWD, defaultCwd.trim().ifBlank { DEFAULT_AGENT_CWD })
             .putString(PREF_DEFAULT_REASONING_EFFORT, reasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT })
@@ -356,7 +359,40 @@ fun SettingsApp(onClose: () -> Unit) {
             .putBoolean(PREF_OLED_MODE, oledMode)
             .apply()
         (context as? Activity)?.setResult(Activity.RESULT_OK)
-        saveState = strings.saved
+    }
+
+    fun testSavedConnection(nextRelayUrl: String = relayUrl, nextApiKey: String = apiKey) {
+        connectionTestClient?.close()
+        connectionTestClient = null
+        val endpoint = nextRelayUrl.trim().ifBlank { DEFAULT_RELAY_URL }
+        val relayError = validateRelayEndpoint(endpoint, strings)
+        if (relayError != null) {
+            connectionTesting = false
+            saveState = strings.connectionTestFailed(relayError)
+            return
+        }
+        connectionTesting = true
+        saveState = strings.testingConnection
+        val nextClient = SettingsRelayClient(endpoint, nextApiKey.trim())
+        connectionTestClient = nextClient
+        var finished = false
+        nextClient.connect { connectError ->
+            if (finished) return@connect
+            finished = true
+            if (connectionTestClient == nextClient) connectionTestClient = null
+            nextClient.close()
+            connectionTesting = false
+            saveState = if (connectError == null) {
+                strings.connectionTestSucceeded
+            } else {
+                strings.connectionTestFailed(connectError)
+            }
+        }
+    }
+
+    fun save() {
+        persistSettings()
+        testSavedConnection()
     }
 
     fun clearConnectionConfig() {
@@ -364,6 +400,9 @@ fun SettingsApp(onClose: () -> Unit) {
         apiKey = ""
         relayClient?.close()
         relayClient = null
+        connectionTestClient?.close()
+        connectionTestClient = null
+        connectionTesting = false
         notificationAgents = emptyList()
         notificationHistory = emptyList()
         prefs.edit()
@@ -377,22 +416,8 @@ fun SettingsApp(onClose: () -> Unit) {
     fun importConnectionConfig(config: EasyCodexConnectionConfig) {
         relayUrl = config.relayUrl
         apiKey = config.apiKey
-        prefs.edit()
-            .putString(PREF_RELAY_URL, config.relayUrl)
-            .putString(PREF_API_KEY, config.apiKey)
-            .putString(PREF_DEFAULT_MODEL, defaultModel.ifBlank { DEFAULT_AGENT_MODEL })
-            .putString(PREF_DEFAULT_CWD, defaultCwd.trim().ifBlank { DEFAULT_AGENT_CWD })
-            .putString(PREF_DEFAULT_REASONING_EFFORT, reasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT })
-            .putString(PREF_DEFAULT_SERVICE_TIER, normalizeDefaultServiceTier(serviceTier.ifBlank { DEFAULT_SERVICE_TIER }))
-            .putString(PREF_THEME_MODE, themeMode.ifBlank { DEFAULT_THEME_MODE })
-            .putString(PREF_THEME_COLOR, themeColor.ifBlank { DEFAULT_THEME_COLOR })
-            .putString(PREF_APP_LAYOUT, appLayout.ifBlank { DEFAULT_APP_LAYOUT })
-            .putString(PREF_UPDATE_CHANNEL, normalizeUpdateChannel(updateChannel))
-            .putString(PREF_APP_LANGUAGE, appLanguage.ifBlank { DEFAULT_APP_LANGUAGE })
-            .putBoolean(PREF_OLED_MODE, oledMode)
-            .apply()
-        (context as? Activity)?.setResult(Activity.RESULT_OK)
-        saveState = strings.importedFromQr
+        persistSettings(config.relayUrl, config.apiKey)
+        testSavedConnection(config.relayUrl, config.apiKey)
     }
 
     fun scanRelayQr() {
@@ -570,28 +595,6 @@ fun SettingsApp(onClose: () -> Unit) {
 
     EasyCodexTheme(context = context, themeMode = themeMode, themeColor = themeColor, oledMode = oledMode) {
         CompositionLocalProvider(LocalAppStrings provides strings) {
-            pendingApkUpdate?.let { candidate ->
-                AlertDialog(
-                    onDismissRequest = { pendingApkUpdate = null },
-                    title = { Text(strings.updateInstallPromptTitle(candidate.version)) },
-                    text = { Text(strings.updateInstallPromptBody(candidate.version)) },
-                    confirmButton = {
-                        Button(
-                            onClick = {
-                                pendingApkUpdate = null
-                                startApkDownload(candidate.version, candidate.url)
-                            },
-                        ) {
-                            Text(strings.downloadUpdate)
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { pendingApkUpdate = null }) {
-                            Text(strings.cancel)
-                        }
-                    },
-                )
-            }
             Scaffold(
                 contentWindowInsets = WindowInsets(0),
                 topBar = {
@@ -751,8 +754,8 @@ fun SettingsApp(onClose: () -> Unit) {
                                         Icon(Icons.Default.QrCodeScanner, contentDescription = null)
                                         Text(strings.scanQrCode)
                                     }
-                                    Button(onClick = ::save) {
-                                        Text(strings.saveSettings)
+                                    Button(onClick = ::save, enabled = !connectionTesting) {
+                                        Text(if (connectionTesting) strings.testingConnection else strings.saveSettings)
                                     }
                                     TextButton(onClick = ::clearConnectionConfig) {
                                         Icon(Icons.Default.Security, contentDescription = null)
@@ -990,6 +993,26 @@ fun SettingsApp(onClose: () -> Unit) {
                                         style = MaterialTheme.typography.labelLarge,
                                         color = MaterialTheme.colorScheme.primary,
                                     )
+                                }
+                                pendingApkUpdate?.let { candidate ->
+                                    Text(
+                                        strings.updateInstallPromptBody(candidate.version),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Button(
+                                            onClick = {
+                                                pendingApkUpdate = null
+                                                startApkDownload(candidate.version, candidate.url)
+                                            },
+                                        ) {
+                                            Text(strings.downloadUpdate)
+                                        }
+                                        TextButton(onClick = { pendingApkUpdate = null }) {
+                                            Text(strings.cancel)
+                                        }
+                                    }
                                 }
                                 InfoRow(title = strings.connectionInstructions, detail = strings.connectionInstructionsDetail)
                                 HorizontalDivider()

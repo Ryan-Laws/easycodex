@@ -10,7 +10,7 @@ const MAX_HISTORY = 200;
 export type NotificationLevel = 'all' | 'errors' | 'muted';
 type NotificationSeverity = 'info' | 'error';
 type NotificationLanguage = 'zh' | 'zh-Hant' | 'en' | 'ja' | 'ko' | 'es' | 'fr' | 'de';
-type NotificationKind = 'agent_crashed' | 'turn_started' | 'turn_completed' | 'turn_failed' | 'file_changed';
+type NotificationKind = 'agent_crashed' | 'turn_started' | 'turn_completed' | 'turn_failed' | 'file_changed' | 'agent_question' | 'agent_request';
 
 interface ClientPushRegistration {
   token: string;

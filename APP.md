@@ -73,6 +73,7 @@ Important paths:
 The native Android app currently supports:
 
 - creating and managing multiple Codex agents
+- opening top-bar Codex CLI consoles that run separate `codex exec` processes through the local relay
 - streaming agent responses
 - live task-list sync and active resumable-thread refresh from relay WebSocket events
 - mobile approval prompts for Codex server-initiated requests

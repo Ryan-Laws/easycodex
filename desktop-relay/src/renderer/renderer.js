@@ -15,6 +15,9 @@ const dictionaries = {
     eyebrow: 'Desktop Relay',
     title: 'EasyCodex Relay',
     subtitle: 'Start the local relay so your phone can control Codex on this computer.',
+    setupEyebrow: 'Setup',
+    setupTitle: 'Relay setup and logs',
+    setupSubtitle: 'Start the relay and connect your phone first. The task workbench is below for later use.',
     launch: 'Launch',
     language: 'Language',
     port: 'Port',
@@ -36,9 +39,13 @@ const dictionaries = {
     clear: 'Clear',
     windowTitle: 'EasyCodex Relay',
     firstUseTitle: 'First time?',
-    firstUseBody: 'Run Install/build once before starting the relay.',
+    firstUseBody: 'Use these steps to get your phone connected.',
+    firstUseStepInstall: 'Click Install/build once to prepare the relay dependencies.',
+    firstUseStepStart: 'Click Start relay and wait until the status is online or ready for phone connection.',
+    firstUseStepConnect: 'Scan the QR code with your phone camera to import the relay URL and API Key, then create a task on your phone.',
     portAvailable: 'Port is available',
     portBusy: 'Port is in use',
+    portRelayBusy: 'Existing EasyCodex relay will be restarted',
     invalidPort: 'Invalid port',
     offline: 'Offline',
     starting: 'Starting',
@@ -57,6 +64,7 @@ const dictionaries = {
     betaChannel: 'Beta',
     updateChecking: 'Checking for updates',
     updateAvailable: 'Update available',
+    updateNotice: 'Update notice',
     updateReady: (current, latest) => `Version ${latest} is available. Current version: ${current}.`,
     updateCurrent: (current) => `EasyCodex Relay is up to date (${current}).`,
     updateFailed: (message) => `Update check failed: ${message}`,
@@ -66,6 +74,9 @@ const dictionaries = {
     eyebrow: '电脑端中继',
     title: 'EasyCodex 中继',
     subtitle: '启动本机中继，让手机连接这台电脑上的 Codex。',
+    setupEyebrow: '设置',
+    setupTitle: '中继设置和日志',
+    setupSubtitle: '先启动中继并扫码连接；任务台在下面，连接后再使用。',
     launch: '启动',
     language: '语言',
     port: '端口',
@@ -87,9 +98,13 @@ const dictionaries = {
     clear: '清空',
     windowTitle: 'EasyCodex 中继',
     firstUseTitle: '第一次使用？',
-    firstUseBody: '请先点击“安装/构建”，准备好中继依赖后再启动。',
+    firstUseBody: '按这 3 步把手机连上来。',
+    firstUseStepInstall: '第一次使用先点“安装/构建”，完成依赖准备。',
+    firstUseStepStart: '点“启动中继”，等右上角状态变成在线或等待手机连接。',
+    firstUseStepConnect: '用手机相机扫右侧二维码导入地址和 API Key，然后在手机里创建任务。',
     portAvailable: '端口可用',
     portBusy: '端口已被占用',
+    portRelayBusy: '已存在 EasyCodex 中继，启动时会自动重启',
     invalidPort: '端口无效',
     offline: '未启动',
     starting: '启动中',
@@ -108,6 +123,7 @@ const dictionaries = {
     betaChannel: 'Beta 版',
     updateChecking: '正在检测更新',
     updateAvailable: '发现新版本',
+    updateNotice: '更新提醒',
     updateReady: (current, latest) => `可更新到 ${latest}，当前版本 ${current}。`,
     updateCurrent: (current) => `EasyCodex 中继已是最新版本（${current}）。`,
     updateFailed: (message) => `检测更新失败：${message}`,
@@ -117,6 +133,9 @@ const dictionaries = {
     eyebrow: '電腦端中繼',
     title: 'EasyCodex 中繼',
     subtitle: '啟動本機中繼，讓手機連接這台電腦上的 Codex。',
+    setupEyebrow: '設定',
+    setupTitle: '中繼設定和日誌',
+    setupSubtitle: '先啟動中繼並掃碼連線；任務台在下方，連線後再使用。',
     launch: '啟動',
     language: '語言',
     port: '連接埠',
@@ -138,9 +157,13 @@ const dictionaries = {
     clear: '清空',
     windowTitle: 'EasyCodex 中繼',
     firstUseTitle: '第一次使用？',
-    firstUseBody: '請先點擊「安裝/建置」，準備好中繼依賴後再啟動。',
+    firstUseBody: '照這 3 步把手機連上來。',
+    firstUseStepInstall: '第一次使用先點「安裝/建置」，完成依賴準備。',
+    firstUseStepStart: '點「啟動中繼」，等右上角狀態變成線上或等待手機連線。',
+    firstUseStepConnect: '用手機相機掃右側 QR Code 匯入位址和 API Key，然後在手機裡建立任務。',
     portAvailable: '連接埠可用',
     portBusy: '連接埠已被占用',
+    portRelayBusy: '已存在 EasyCodex 中繼，啟動時會自動重啟',
     invalidPort: '連接埠無效',
     offline: '未啟動',
     starting: '啟動中',
@@ -159,6 +182,7 @@ const dictionaries = {
     betaChannel: 'Beta 版',
     updateChecking: '正在檢測更新',
     updateAvailable: '發現新版本',
+    updateNotice: '更新提醒',
     updateReady: (current, latest) => `可更新到 ${latest}，目前版本 ${current}。`,
     updateCurrent: (current) => `EasyCodex 中繼已是最新版本（${current}）。`,
     updateFailed: (message) => `檢測更新失敗：${message}`,
@@ -168,6 +192,9 @@ const dictionaries = {
     eyebrow: 'デスクトップリレー',
     title: 'EasyCodex リレー',
     subtitle: 'ローカルリレーを起動して、このコンピューターの Codex にスマートフォンを接続します。',
+    setupEyebrow: 'セットアップ',
+    setupTitle: 'リレー設定とログ',
+    setupSubtitle: '先にリレーを起動してスマートフォンを接続します。タスクワークベンチは下にあります。',
     launch: '起動',
     language: '言語',
     port: 'ポート',
@@ -186,7 +213,10 @@ const dictionaries = {
     clear: '消去',
     windowTitle: 'EasyCodex リレー',
     firstUseTitle: '初めてですか?',
-    firstUseBody: 'リレーを起動する前に、まずインストール/ビルドを実行してください。',
+    firstUseBody: '次の 3 ステップでスマートフォンを接続します。',
+    firstUseStepInstall: '初回はインストール/ビルドを実行してリレー依存関係を準備します。',
+    firstUseStepStart: 'リレーを起動し、状態がオンラインまたは接続待機になるまで待ちます。',
+    firstUseStepConnect: 'スマートフォンのカメラで QR コードを読み取り、URL と API Key を取り込んでからタスクを作成します。',
     portAvailable: 'ポートは利用可能です',
     portBusy: 'ポートは使用中です',
     invalidPort: '無効なポート',
@@ -202,6 +232,9 @@ const dictionaries = {
     eyebrow: '데스크톱 릴레이',
     title: 'EasyCodex 릴레이',
     subtitle: '로컬 릴레이를 시작해 휴대폰이 이 컴퓨터의 Codex에 연결되도록 합니다.',
+    setupEyebrow: '설정',
+    setupTitle: '릴레이 설정 및 로그',
+    setupSubtitle: '먼저 릴레이를 시작하고 휴대폰을 연결하세요. 작업대는 아래에 있습니다.',
     launch: '시작',
     language: '언어',
     port: '포트',
@@ -220,7 +253,10 @@ const dictionaries = {
     clear: '지우기',
     windowTitle: 'EasyCodex 릴레이',
     firstUseTitle: '처음 사용하시나요?',
-    firstUseBody: '릴레이를 시작하기 전에 설치/빌드를 한 번 실행하세요.',
+    firstUseBody: '아래 3단계로 휴대폰을 연결하세요.',
+    firstUseStepInstall: '처음에는 설치/빌드를 한 번 실행해 릴레이 의존성을 준비합니다.',
+    firstUseStepStart: '릴레이 시작을 누르고 상태가 온라인 또는 휴대폰 연결 대기가 될 때까지 기다립니다.',
+    firstUseStepConnect: '휴대폰 카메라로 QR 코드를 스캔해 URL과 API Key를 가져온 뒤 휴대폰에서 작업을 만듭니다.',
     portAvailable: '포트를 사용할 수 있습니다',
     portBusy: '포트가 사용 중입니다',
     invalidPort: '잘못된 포트',
@@ -236,6 +272,9 @@ const dictionaries = {
     eyebrow: 'Relay de escritorio',
     title: 'EasyCodex Relay',
     subtitle: 'Inicia el relay local para que tu teléfono controle Codex en este ordenador.',
+    setupEyebrow: 'Configuración',
+    setupTitle: 'Configuración y registros del relay',
+    setupSubtitle: 'Primero inicia el relay y conecta el teléfono. El panel de tareas queda abajo.',
     launch: 'Inicio',
     language: 'Idioma',
     port: 'Puerto',
@@ -254,7 +293,10 @@ const dictionaries = {
     clear: 'Limpiar',
     windowTitle: 'EasyCodex Relay',
     firstUseTitle: '¿Primera vez?',
-    firstUseBody: 'Ejecuta Instalar/compilar una vez antes de iniciar el relay.',
+    firstUseBody: 'Sigue estos 3 pasos para conectar el teléfono.',
+    firstUseStepInstall: 'Haz clic en Instalar/compilar una vez para preparar las dependencias del relay.',
+    firstUseStepStart: 'Haz clic en Iniciar relay y espera hasta que el estado esté en línea o listo para el teléfono.',
+    firstUseStepConnect: 'Escanea el código QR con la cámara del teléfono para importar la URL y la API Key, y crea una tarea en el teléfono.',
     portAvailable: 'El puerto está disponible',
     portBusy: 'El puerto está en uso',
     invalidPort: 'Puerto no válido',
@@ -270,6 +312,9 @@ const dictionaries = {
     eyebrow: 'Relais bureau',
     title: 'Relais EasyCodex',
     subtitle: 'Démarrez le relais local pour connecter votre téléphone au Codex de cet ordinateur.',
+    setupEyebrow: 'Configuration',
+    setupTitle: 'Configuration du relais et journaux',
+    setupSubtitle: 'Démarrez le relais et connectez le téléphone en premier. Le plan de travail est en dessous.',
     launch: 'Lancement',
     language: 'Langue',
     port: 'Port',
@@ -288,7 +333,10 @@ const dictionaries = {
     clear: 'Effacer',
     windowTitle: 'Relais EasyCodex',
     firstUseTitle: 'Première utilisation ?',
-    firstUseBody: 'Exécutez Installer/compiler une fois avant de démarrer le relais.',
+    firstUseBody: 'Suivez ces 3 étapes pour connecter le téléphone.',
+    firstUseStepInstall: 'Cliquez sur Installer/compiler une fois pour préparer les dépendances du relais.',
+    firstUseStepStart: 'Cliquez sur Démarrer le relais et attendez que l’état soit en ligne ou prêt pour le téléphone.',
+    firstUseStepConnect: 'Scannez le QR code avec la caméra du téléphone pour importer l’URL et l’API Key, puis créez une tâche sur le téléphone.',
     portAvailable: 'Le port est disponible',
     portBusy: 'Le port est utilisé',
     invalidPort: 'Port invalide',
@@ -304,6 +352,9 @@ const dictionaries = {
     eyebrow: 'Desktop-Relay',
     title: 'EasyCodex Relay',
     subtitle: 'Starte das lokale Relay, damit dein Telefon Codex auf diesem Computer steuern kann.',
+    setupEyebrow: 'Einrichtung',
+    setupTitle: 'Relay-Einstellungen und Logs',
+    setupSubtitle: 'Starte zuerst das Relay und verbinde dein Telefon. Die Aufgabenansicht steht darunter.',
     launch: 'Start',
     language: 'Sprache',
     port: 'Port',
@@ -322,7 +373,10 @@ const dictionaries = {
     clear: 'Leeren',
     windowTitle: 'EasyCodex Relay',
     firstUseTitle: 'Erste Verwendung?',
-    firstUseBody: 'Führe Installieren/builden einmal aus, bevor du das Relay startest.',
+    firstUseBody: 'Verbinde dein Telefon in diesen 3 Schritten.',
+    firstUseStepInstall: 'Klicke einmal auf Installieren/builden, um die Relay-Abhängigkeiten vorzubereiten.',
+    firstUseStepStart: 'Klicke auf Relay starten und warte, bis der Status online oder bereit für die Telefonverbindung ist.',
+    firstUseStepConnect: 'Scanne den QR-Code mit der Telefonkamera, um URL und API Key zu importieren, und erstelle dann eine Aufgabe auf dem Telefon.',
     portAvailable: 'Port ist verfügbar',
     portBusy: 'Port wird bereits verwendet',
     invalidPort: 'Ungültiger Port',
@@ -413,6 +467,7 @@ const gitContextByCwd = new Map();
 const loadingGitCwds = new Set();
 const pendingRelayRequests = new Map();
 const refreshTimers = new Map();
+const nonBlockingPendingActions = new Set(['updateChecking']);
 
 function t(key, ...args) {
   const dict = dictionaries[currentLanguage] || dictionaries.en;
@@ -944,10 +999,11 @@ function setCodexStatus(state) {
 }
 
 function setControlsBusy(isBusy) {
+  const canUsePort = currentState?.portAvailable || currentState?.portReclaimable;
   elements.installButton.disabled = isBusy || currentState?.installRunning || currentState?.relayRunning;
   elements.checkUpdateButton.disabled = isBusy || currentState?.update?.checking || currentState?.update?.applying;
   elements.applyUpdateButton.disabled = isBusy || currentState?.update?.checking || currentState?.update?.applying || !currentState?.update?.info?.updateAvailable;
-  elements.startButton.disabled = isBusy || currentState?.installRunning || currentState?.relayRunning || !currentState?.relayReady || !currentState?.portAvailable || !currentState?.codex?.installed;
+  elements.startButton.disabled = isBusy || currentState?.installRunning || currentState?.relayRunning || !currentState?.relayReady || !canUsePort || !currentState?.codex?.installed;
   elements.stopButton.disabled = isBusy || !currentState?.relayRunning;
   elements.refreshKeyButton.disabled = isBusy || currentState?.relayRunning;
   elements.portInput.disabled = isBusy || currentState?.relayRunning;
@@ -971,7 +1027,7 @@ function renderUpdate(update) {
     elements.updateTitle.textContent = t('updateChecking');
     elements.updateText.textContent = '';
   } else if (update?.error) {
-    elements.updateTitle.textContent = t('updateChecking');
+    elements.updateTitle.textContent = t('updateNotice');
     elements.updateText.textContent = t('updateFailed', update.error);
   } else if (info?.updateAvailable) {
     elements.updateTitle.textContent = t('updateAvailable');
@@ -988,7 +1044,7 @@ function renderPendingStatus() {
   elements.statusCard.dataset.busy = 'true';
   elements.statusText.textContent = t(pendingAction);
   elements.healthText.textContent = t('healthPending');
-  setControlsBusy(true);
+  setControlsBusy(!nonBlockingPendingActions.has(pendingAction));
 }
 
 function renderLanguageOptions(state) {
@@ -1019,13 +1075,13 @@ function renderState(state) {
   elements.workbenchConnectionText.textContent = state.relayRunning
     ? `Relay: ${state.relayUrl}`
     : '启动中继后，电脑端任务台会连接本机任务流。';
-  elements.firstUseGuide.hidden = !state.guideVisible;
   renderUpdate(state.update);
   elements.statusCard.dataset.busy = 'false';
   elements.statusCard.dataset.state = state.relayRunning ? 'starting' : 'offline';
   elements.statusText.textContent = state.relayRunning ? t('starting') : t('offline');
   setControlsBusy(false);
   if (state.portAvailable) setPortStatus('ok', t('portAvailable'));
+  else if (state.portReclaimable) setPortStatus('ok', t('portRelayBusy'));
   else setPortStatus('error', t('portBusy'));
   setCodexStatus(state);
   renderHealth(state.health);
@@ -1133,12 +1189,12 @@ elements.portInput.addEventListener('input', () => {
       elements.relayUrlInput.value = preview.relayUrl;
       elements.qrImage.src = preview.qrDataUrl;
       currentState = { ...currentState, ...preview };
-      if (!preview.portAvailable) {
+      if (!preview.portAvailable && !preview.portReclaimable) {
         setPortStatus('error', t('portBusy'));
         elements.startButton.disabled = true;
         return;
       }
-      setPortStatus('ok', t('portAvailable'));
+      setPortStatus('ok', preview.portReclaimable ? t('portRelayBusy') : t('portAvailable'));
       const state = await window.easyCodexRelay.saveConfig({ port });
       renderState(state);
     } catch (error) {

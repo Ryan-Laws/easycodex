@@ -221,6 +221,7 @@ h2 {
 }
 
 .workbench-panel {
+  margin-top: 18px;
   min-height: min(720px, calc(100vh - 188px));
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr) 290px;
@@ -676,18 +677,31 @@ dd {
   display: block;
 }
 
-.setup-drawer {
-  margin-top: 18px;
+.setup-section {
+  display: grid;
+  gap: 18px;
 }
 
-.setup-drawer summary {
-  cursor: pointer;
+.section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(23, 26, 21, 0.9);
-  padding: 14px 16px;
+  padding: 16px 18px;
+}
+
+.section-heading h2 {
+  font-size: 1.2rem;
+}
+
+.section-heading p:not(.eyebrow) {
+  max-width: 520px;
   color: var(--muted);
-  font-weight: 900;
+  font-size: 0.86rem;
+  line-height: 1.45;
 }
 
 .panel {
@@ -861,8 +875,14 @@ select:focus {
   font-size: 0.9rem;
 }
 
-.guide[hidden] {
-  display: none;
+.guide ol {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0 0;
+  padding-left: 20px;
+  color: var(--ink);
+  font-size: 0.86rem;
+  line-height: 1.45;
 }
 
 .update-box {
@@ -957,6 +977,11 @@ select:focus {
   }
 
   .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .section-heading {
     align-items: flex-start;
     flex-direction: column;
   }

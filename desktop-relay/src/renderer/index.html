@@ -34,6 +34,128 @@
       </div>
     </section>
 
+    <section class="setup-section" aria-label="Relay setup and logs">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow" data-i18n="setupEyebrow">Setup</p>
+          <h2 data-i18n="setupTitle">中继设置和日志</h2>
+        </div>
+        <p data-i18n="setupSubtitle">先启动中继并扫码连接；任务台在下面，连接后再使用。</p>
+      </div>
+      <section class="content-grid">
+        <section class="panel control-panel">
+        <div class="panel-title">
+          <div>
+            <h2 data-i18n="launch">Launch</h2>
+            <p id="relayPath"></p>
+          </div>
+          <label class="language-picker">
+            <span data-i18n="language">Language</span>
+            <select id="languageSelect"></select>
+          </label>
+        </div>
+
+        <div class="form-grid">
+          <label class="field small-field">
+            <span data-i18n="port">Port</span>
+            <input id="portInput" inputmode="numeric" autocomplete="off">
+            <small class="field-status" id="portStatus"></small>
+          </label>
+
+          <label class="field small-field">
+            <span data-i18n="updateChannel">Update channel</span>
+            <select id="updateChannelSelect">
+              <option value="stable" data-i18n="stableChannel">Stable</option>
+              <option value="beta" data-i18n="betaChannel">Beta</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span data-i18n="workspace">Default workspace</span>
+            <div class="row">
+              <input id="workspaceInput" autocomplete="off">
+              <button id="browseButton" class="icon-button" title="Browse" aria-label="Browse">...</button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span data-i18n="codexPath">Codex executable</span>
+            <div class="row">
+              <input id="codexPathInput" autocomplete="off" placeholder="codex">
+              <button id="browseCodexButton" class="icon-button" title="Browse" aria-label="Browse">...</button>
+            </div>
+            <small class="field-status" id="codexStatus"></small>
+          </label>
+
+          <label class="field">
+            <span data-i18n="relayUrl">Relay URL</span>
+            <div class="row">
+              <input id="relayUrlInput" readonly>
+              <button id="copyConnectionButton" data-i18n="copy">Copy</button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span data-i18n="apiKey">API Key</span>
+            <div class="row">
+              <input id="apiKeyInput" readonly type="password">
+              <button id="copyKeyButton" data-i18n="copy">Copy</button>
+              <button id="refreshKeyButton" data-i18n="refresh">Refresh</button>
+            </div>
+          </label>
+        </div>
+
+        <div class="guide" id="firstUseGuide">
+          <strong data-i18n="firstUseTitle">First time?</strong>
+          <p data-i18n="firstUseBody">Run Install/build once before starting the relay.</p>
+          <ol>
+            <li data-i18n="firstUseStepInstall">第一次使用先点“安装/构建”，完成依赖准备。</li>
+            <li data-i18n="firstUseStepStart">点“启动中继”，等右上角状态变成在线或等待手机连接。</li>
+            <li data-i18n="firstUseStepConnect">用手机相机扫右侧二维码导入地址和 API Key，然后在手机里创建任务。</li>
+          </ol>
+        </div>
+
+        <div class="update-box" id="updateBox" hidden>
+          <div>
+            <strong id="updateTitle">Update available</strong>
+            <p id="updateText"></p>
+          </div>
+          <div class="update-actions">
+            <button id="checkUpdateButton" class="secondary" data-i18n="checkUpdate">Check</button>
+            <button id="applyUpdateButton" class="primary" data-i18n="quickUpdate">Update</button>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="installButton" class="secondary" data-i18n="installBuild">Install/build</button>
+          <button id="startButton" class="primary" data-i18n="startRelay">Start relay</button>
+          <button id="stopButton" class="secondary danger" data-i18n="stop">Stop</button>
+        </div>
+        </section>
+
+        <aside class="panel qr-panel">
+          <div class="panel-title">
+            <div>
+              <h2 data-i18n="quickConnect">Quick connect</h2>
+              <p data-i18n="qrHint">Scan with your phone camera to import URL and key.</p>
+            </div>
+          </div>
+          <div class="qr-box">
+            <img id="qrImage" alt="EasyCodex relay QR">
+          </div>
+          <button id="copyDeepLinkButton" class="secondary full" data-i18n="copyDeepLink">Copy deep link</button>
+        </aside>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="log-header">
+          <h2 data-i18n="logs">Logs</h2>
+          <button id="clearLogsButton" class="text-button" data-i18n="clear">Clear</button>
+        </div>
+        <pre id="logOutput"></pre>
+      </section>
+    </section>
+
     <section class="workbench-panel" aria-label="EasyCodex task workbench">
       <aside class="task-rail">
         <div class="rail-header">
@@ -107,117 +229,6 @@
         </div>
       </aside>
     </section>
-
-    <details class="setup-drawer">
-      <summary>中继设置和日志</summary>
-      <section class="content-grid">
-        <section class="panel control-panel">
-        <div class="panel-title">
-          <div>
-            <h2 data-i18n="launch">Launch</h2>
-            <p id="relayPath"></p>
-          </div>
-          <label class="language-picker">
-            <span data-i18n="language">Language</span>
-            <select id="languageSelect"></select>
-          </label>
-        </div>
-
-        <div class="form-grid">
-          <label class="field small-field">
-            <span data-i18n="port">Port</span>
-            <input id="portInput" inputmode="numeric" autocomplete="off">
-            <small class="field-status" id="portStatus"></small>
-          </label>
-
-          <label class="field small-field">
-            <span data-i18n="updateChannel">Update channel</span>
-            <select id="updateChannelSelect">
-              <option value="stable" data-i18n="stableChannel">Stable</option>
-              <option value="beta" data-i18n="betaChannel">Beta</option>
-            </select>
-          </label>
-
-          <label class="field">
-            <span data-i18n="workspace">Default workspace</span>
-            <div class="row">
-              <input id="workspaceInput" autocomplete="off">
-              <button id="browseButton" class="icon-button" title="Browse" aria-label="Browse">...</button>
-            </div>
-          </label>
-
-          <label class="field">
-            <span data-i18n="codexPath">Codex executable</span>
-            <div class="row">
-              <input id="codexPathInput" autocomplete="off" placeholder="codex">
-              <button id="browseCodexButton" class="icon-button" title="Browse" aria-label="Browse">...</button>
-            </div>
-            <small class="field-status" id="codexStatus"></small>
-          </label>
-
-          <label class="field">
-            <span data-i18n="relayUrl">Relay URL</span>
-            <div class="row">
-              <input id="relayUrlInput" readonly>
-              <button id="copyConnectionButton" data-i18n="copy">Copy</button>
-            </div>
-          </label>
-
-          <label class="field">
-            <span data-i18n="apiKey">API Key</span>
-            <div class="row">
-              <input id="apiKeyInput" readonly type="password">
-              <button id="copyKeyButton" data-i18n="copy">Copy</button>
-              <button id="refreshKeyButton" data-i18n="refresh">Refresh</button>
-            </div>
-          </label>
-        </div>
-
-        <div class="guide" id="firstUseGuide">
-          <strong data-i18n="firstUseTitle">First time?</strong>
-          <p data-i18n="firstUseBody">Run Install/build once before starting the relay.</p>
-        </div>
-
-        <div class="update-box" id="updateBox" hidden>
-          <div>
-            <strong id="updateTitle">Update available</strong>
-            <p id="updateText"></p>
-          </div>
-          <div class="update-actions">
-            <button id="checkUpdateButton" class="secondary" data-i18n="checkUpdate">Check</button>
-            <button id="applyUpdateButton" class="primary" data-i18n="quickUpdate">Update</button>
-          </div>
-        </div>
-
-        <div class="actions">
-          <button id="installButton" class="secondary" data-i18n="installBuild">Install/build</button>
-          <button id="startButton" class="primary" data-i18n="startRelay">Start relay</button>
-          <button id="stopButton" class="secondary danger" data-i18n="stop">Stop</button>
-        </div>
-        </section>
-
-        <aside class="panel qr-panel">
-          <div class="panel-title">
-            <div>
-              <h2 data-i18n="quickConnect">Quick connect</h2>
-              <p data-i18n="qrHint">Scan with your phone camera to import URL and key.</p>
-            </div>
-          </div>
-          <div class="qr-box">
-            <img id="qrImage" alt="EasyCodex relay QR">
-          </div>
-          <button id="copyDeepLinkButton" class="secondary full" data-i18n="copyDeepLink">Copy deep link</button>
-        </aside>
-      </section>
-
-      <section class="panel log-panel">
-        <div class="log-header">
-          <h2 data-i18n="logs">Logs</h2>
-          <button id="clearLogsButton" class="text-button" data-i18n="clear">Clear</button>
-        </div>
-        <pre id="logOutput"></pre>
-      </section>
-    </details>
   </main>
   <script src="./renderer.js"></script>
 </body>

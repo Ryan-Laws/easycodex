@@ -8,9 +8,7 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
-import android.media.AudioManager
 import android.media.RingtoneManager
-import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -42,6 +40,19 @@ private const val MOBILE_TEXT_TRUNCATED_NOTICE = "\n\n[EasyCodex mobile truncate
 private const val PLAN_MODE_PREFIX_FOR_DISPLAY = "请先进入计划模式处理下面的需求。"
 private const val PLAN_MODE_DEMAND_MARKER_FOR_DISPLAY = "需求："
 private const val CONTEXT_PLACEHOLDER_FOR_DISPLAY = "已加载项目上下文。"
+private const val USER_INPUT_REQUEST_METHOD = "item/tool/requestUserInput"
+private const val WORKING_STATUS_DOWNGRADE_GRACE_MS = 4_500L
+private const val RECENT_UNREAD_TASK_WINDOW_MS = 2 * 60 * 60 * 1000L
+private val PENDING_CODEX_THREAD_NAMES = setOf(
+    "new",
+    "new task",
+    "untitled",
+    "untitled task",
+    "获取到任务",
+    "正在获取中",
+    "新任务",
+    "未命名任务",
+)
 
 class EasyCodexController(private val context: android.content.Context) {
     private val client = OkHttpClient.Builder()
@@ -58,6 +69,7 @@ class EasyCodexController(private val context: android.content.Context) {
     private var agentsRefreshInFlight = false
     private var agentsRefreshQueued = false
     private var agentsRefreshRunnable: Runnable? = null
+    private var appInForeground = true
     private val prefs = context.getSharedPreferences("easycodex", android.content.Context.MODE_PRIVATE)
         .also(::applyDaylightThemeDefault)
     private val preferenceListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -82,6 +94,9 @@ class EasyCodexController(private val context: android.content.Context) {
     private val latestThreadDetailRequests = ConcurrentHashMap<String, Int>()
     private val detailedCodexThreads = ConcurrentHashMap<String, Agent>()
     private var hiddenTaskIds = prefs.getStringSet(PREF_HIDDEN_TASK_IDS, emptySet())
+        ?.toMutableSet()
+        ?: mutableSetOf()
+    private var readTaskKeys = prefs.getStringSet(PREF_READ_TASK_KEYS, emptySet())
         ?.toMutableSet()
         ?: mutableSetOf()
     private val threadDetailsInFlight = mutableSetOf<String>()
@@ -122,10 +137,25 @@ class EasyCodexController(private val context: android.content.Context) {
         private set
     var notificationLevelState by mutableStateOf<NotificationLevelState?>(null)
         private set
+    var cliConsole by mutableStateOf(
+        CliConsoleState(
+            windows = listOf(
+                CliConsoleWindow(
+                    id = "cli_1",
+                    title = "CLI 1",
+                    cwd = defaultCwd.ifBlank { DEFAULT_AGENT_CWD },
+                    model = defaultModel.ifBlank { DEFAULT_AGENT_MODEL },
+                    reasoningEffort = defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT },
+                ),
+            ),
+        ),
+    )
+        private set
     val agents = mutableStateListOf<Agent>()
     val codexModels = mutableStateListOf<CodexModelOption>()
     val alerts = mutableStateListOf<AgentAlert>()
     val approvalRequests = mutableStateListOf<AgentApprovalRequest>()
+    val userInputRequests = mutableStateListOf<AgentUserInputRequest>()
     val attachmentDrafts = mutableStateListOf<AttachmentDraft>()
     var agentsRevision by mutableStateOf(0)
         private set
@@ -237,6 +267,21 @@ class EasyCodexController(private val context: android.content.Context) {
         oledMode = prefs.getBoolean(PREF_OLED_MODE, false)
         if (shouldReconnect) connect()
         else if (previousLanguage != appLanguage && connectionStatus == "connected") syncClientLanguage()
+    }
+
+    fun setAppInForeground(inForeground: Boolean) {
+        if (appInForeground == inForeground) return
+        appInForeground = inForeground
+        if (inForeground) {
+            flushStreamDeltas()
+            reloadSettings()
+            if (connectionStatus == "connected") {
+                refreshAgents()
+                refreshActiveCodexThreadDetail()
+            }
+        } else {
+            cancelAgentsRefresh()
+        }
     }
 
     fun connect() {
@@ -366,7 +411,10 @@ class EasyCodexController(private val context: android.content.Context) {
             val array = data?.optJSONArray("data") ?: JSONArray()
             val nextAgents = mutableListOf<Agent>()
             for (index in 0 until array.length()) {
-                array.optJSONObject(index)?.let { nextAgents.add(parseAgent(it)) }
+                array.optJSONObject(index)?.let {
+                    nextAgents.add(parseAgent(it))
+                    syncPendingRequests(it)
+                }
             }
             val visibleNextAgents = nextAgents.filterNot(::isHiddenAgent)
             val selectedAgent = activeAgent
@@ -391,6 +439,7 @@ class EasyCodexController(private val context: android.content.Context) {
         draftProjectCwd = null
         draftProjectLocked = false
         activeAgentId = agentId
+        markAgentRead(agentId)
         alerts.removeAll { it.agentId == agentId }
         loadNotificationLevel(agentId)
         val selected = activeAgent
@@ -401,12 +450,157 @@ class EasyCodexController(private val context: android.content.Context) {
         refreshActiveCodexThreadDetail()
     }
 
+    fun startCliConsole(cwd: String? = null) {
+        val active = cliConsole.activeWindow
+        val requestedCwd = cleanNullablePath(cwd)
+            ?: cleanNullablePath(active.cwd)
+            ?: cleanNullablePath(activeAgent?.projectRoot ?: activeAgent?.cwd)
+            ?: cleanNullablePath(draftProjectCwd)
+            ?: defaultCwd.ifBlank { DEFAULT_AGENT_CWD }
+        val requestedModel = activeAgent?.model?.takeIf { it.isNotBlank() }
+            ?: active.model.ifBlank { draftModel.ifBlank { defaultModel.ifBlank { DEFAULT_AGENT_MODEL } } }
+        val requestedReasoning = activeAgent?.reasoningEffort?.takeIf { it.isNotBlank() }
+            ?: active.reasoningEffort.ifBlank { draftReasoningEffort.ifBlank { defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT } } }
+        updateCliWindow(active.id) { it.copy(cwd = requestedCwd, model = requestedModel, reasoningEffort = requestedReasoning) }
+        send(
+            "cli_start",
+            mapOf(
+                "windowId" to active.id,
+                "cwd" to requestedCwd,
+                "model" to requestedModel,
+                "reasoningEffort" to requestedReasoning,
+            ),
+        ) { data, error ->
+            if (error != null) {
+                appendCliLine("status", "Codex CLI 启动失败：$error")
+                updateCliWindow(active.id) { it.copy(running = false, busy = false) }
+                return@send
+            }
+            val payload = data?.optJSONObject("data") ?: JSONObject()
+            updateCliWindow(active.id) { window ->
+                window.copy(
+                    cwd = payload.optString("cwd", requestedCwd).ifBlank { requestedCwd },
+                    model = payload.optString("model", requestedModel).ifBlank { requestedModel },
+                    reasoningEffort = payload.optString("reasoningEffort", requestedReasoning).ifBlank { requestedReasoning },
+                    version = payload.optString("version", window.version),
+                    running = true,
+                    busy = payload.optBoolean("running", false),
+                    runId = payload.optString("runId").takeIf { it.isNotBlank() && it != "null" },
+                )
+            }
+            if (cliWindow(active.id).lines.isEmpty()) {
+                appendCliLine("status", "Codex CLI 已就绪。当前目录：${cliWindow(active.id).cwd}")
+            }
+        }
+    }
+
+    fun updateCliInput(value: String) {
+        updateActiveCliWindow { it.copy(input = value) }
+    }
+
+    fun updateCliCwd(value: String) {
+        updateActiveCliWindow { it.copy(cwd = value) }
+    }
+
+    fun sendCliCommand() {
+        val window = cliConsole.activeWindow
+        val prompt = window.input.trim()
+        if (prompt.isBlank() || window.busy) return
+        appendCliLine("user", prompt)
+        updateCliWindow(window.id) { it.copy(input = "", busy = true, running = true) }
+        send(
+            "cli_run",
+            mapOf(
+                "windowId" to window.id,
+                "cwd" to window.cwd.ifBlank { defaultCwd.ifBlank { DEFAULT_AGENT_CWD } },
+                "model" to window.model.ifBlank { defaultModel.ifBlank { DEFAULT_AGENT_MODEL } },
+                "reasoningEffort" to window.reasoningEffort.ifBlank { defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT } },
+                "prompt" to prompt,
+            ),
+        ) { data, error ->
+            if (error != null) {
+                appendCliLine("status", "Codex CLI 执行失败：$error")
+                updateCliWindow(window.id) { it.copy(busy = false) }
+                return@send
+            }
+            val payload = data?.optJSONObject("data") ?: JSONObject()
+            updateCliWindow(window.id) { current ->
+                current.copy(
+                    cwd = payload.optString("cwd", current.cwd).ifBlank { current.cwd },
+                    runId = payload.optString("runId").takeIf { runId -> runId.isNotBlank() && runId != "null" },
+                )
+            }
+        }
+    }
+
+    fun stopCliCommand() {
+        val windowId = cliConsole.activeWindow.id
+        send("cli_stop", mapOf("windowId" to windowId)) { _, error ->
+            if (error != null) {
+                appendCliLine("status", "停止 Codex CLI 失败：$error")
+            }
+        }
+    }
+
+    fun createCliWindow() {
+        val nextIndex = cliConsole.windows.size + 1
+        val active = cliConsole.activeWindow
+        val next = CliConsoleWindow(
+            id = "cli_${UUID.randomUUID()}",
+            title = "CLI $nextIndex",
+            cwd = active.cwd,
+            model = active.model,
+            reasoningEffort = active.reasoningEffort,
+            version = active.version,
+        )
+        cliConsole = cliConsole.copy(activeWindowId = next.id, windows = cliConsole.windows + next)
+        startCliConsole(next.cwd)
+    }
+
+    fun selectCliWindow(windowId: String) {
+        if (cliConsole.windows.none { it.id == windowId }) return
+        cliConsole = cliConsole.copy(activeWindowId = windowId)
+        startCliConsole(cliConsole.activeWindow.cwd)
+    }
+
     fun deleteAgent(agentId: String) {
         val agent = agents.firstOrNull { it.id == agentId } ?: return
-        val idsToHide = listOfNotNull(agent.id, agent.codexThreadId).filter { it.isNotBlank() }
-        if (idsToHide.isNotEmpty()) {
-            hiddenTaskIds.addAll(idsToHide)
-            prefs.edit().putStringSet(PREF_HIDDEN_TASK_IDS, hiddenTaskIds.toSet()).apply()
+        val threadId = agent.codexThreadId?.trim().orEmpty()
+        if (threadId.isNotEmpty()) {
+            val params = mutableMapOf<String, Any?>(
+                "threadId" to threadId,
+                "agentId" to agentId,
+            )
+            send("archive_codex_thread", params) { _, error ->
+                if (error != null) {
+                    statusText = strings.taskArchiveFailed(error)
+                    return@send
+                }
+                hideAgentLocally(agent, persistHidden = false)
+                statusText = strings.taskArchived
+            }
+            return
+        }
+
+        hideAgentLocally(agent)
+        statusText = strings.taskArchived
+        if (!agent.resumable || agent.isBusy()) {
+            send("stop_agent", mapOf("agentId" to agentId)) { _, error ->
+                if (error != null && !error.contains("not found", ignoreCase = true)) {
+                    statusText = strings.taskArchiveFailed(error)
+                }
+            }
+        }
+    }
+
+    private fun hideAgentLocally(agent: Agent, persistHidden: Boolean = true) {
+        val agentId = agent.id
+        if (persistHidden) {
+            val idsToHide = listOfNotNull(agent.id, agent.codexThreadId).filter { it.isNotBlank() }
+            if (idsToHide.isNotEmpty()) {
+                hiddenTaskIds.addAll(idsToHide)
+                prefs.edit().putStringSet(PREF_HIDDEN_TASK_IDS, hiddenTaskIds.toSet()).apply()
+            }
         }
         removeLocalAgent(agentId)
         agent.codexThreadId?.let { threadId ->
@@ -418,16 +612,9 @@ class EasyCodexController(private val context: android.content.Context) {
         }
         streamingAgentIds.remove(agentId)
         approvalRequests.removeAll { it.agentId == agentId }
+        userInputRequests.removeAll { it.agentId == agentId }
         alerts.removeAll { it.agentId == agentId }
         notificationLevelState = notificationLevelState?.takeUnless { it.agentId == agentId }
-        statusText = strings.taskDeleted
-        if (!agent.resumable || agent.isBusy()) {
-            send("stop_agent", mapOf("agentId" to agentId)) { _, error ->
-                if (error != null && !error.contains("not found", ignoreCase = true)) {
-                    statusText = strings.taskDeleteFailed(error)
-                }
-            }
-        }
     }
 
     fun startProjectDraft(cwd: String) {
@@ -875,13 +1062,12 @@ class EasyCodexController(private val context: android.content.Context) {
         val params = mutableMapOf<String, Any?>(
             "limit" to 100,
             "includeGlobal" to true,
-            "all" to true,
-            "activeOnly" to true,
         )
         if (!cursor.isNullOrBlank()) params["cursor"] = cursor
         send("list_codex_threads", params) { data, error ->
             if (error != null) {
                 statusText = "已连接，EasyCodex 任务同步失败：$error"
+                settleStaleResumableAgents(runningAgents)
                 agentsRefreshQueued = true
                 onComplete()
                 return@send
@@ -912,7 +1098,7 @@ class EasyCodexController(private val context: android.content.Context) {
                 data?.optJSONObject("data")?.optString("nextCursor").orEmpty(),
                 data?.optString("nextCursor").orEmpty(),
             ).firstOrNull { it.isNotBlank() && !it.equals("null", ignoreCase = true) }.orEmpty()
-            if (nextCursor.isNotBlank()) {
+            if (nextCursor.isNotBlank() && cursor != null) {
                 refreshCodexThreadsPage(runningAgents, nextImported, nextVisibleThreadIds, nextProjectRoots, nextCursor, onComplete)
                 return@send
             }
@@ -927,13 +1113,60 @@ class EasyCodexController(private val context: android.content.Context) {
                 selected != null && agents.any { it.id == selected } -> selected
                 else -> null
             }
+            refreshUnreadCompletedAlerts()
             if (activeAgentId == null && draftProjectCwd.isNullOrBlank()) {
                 draftProjectCwd = defaultCwd.ifBlank { DEFAULT_AGENT_CWD }
             }
-            prefetchCodexThreadDetails(nextImported)
+            prefetchCodexThreadDetails(visibleRunningAgents + nextImported)
             refreshActiveCodexThreadDetail()
             onComplete()
         }
+    }
+
+    private fun settleStaleResumableAgents(runningAgents: List<Agent>) {
+        val liveThreadIds = runningAgents.mapNotNull { it.codexThreadId }.toSet()
+        val staleAgents = agents
+            .filter { it.resumable && it.isBusy() }
+            .filter { agent -> agent.codexThreadId?.let { it !in liveThreadIds } != false }
+        if (staleAgents.isEmpty()) return
+        staleAgents.forEach { agent ->
+            updateAgent(agent.id) { current ->
+                current.asIdle(status = "可恢复", updatedAt = current.updatedAt)
+            }
+            if (alerts.none { it.agentId == agent.id }) {
+                recordAgentAlert(agent.id, AgentAlertKind.Completed, "任务状态已刷新，可点开查看最新内容。", notify = false)
+            }
+        }
+    }
+
+    private fun refreshUnreadCompletedAlerts() {
+        agents
+            .filter(::shouldShowUnreadCompletedAlert)
+            .forEach { agent ->
+                recordAgentAlert(agent.id, AgentAlertKind.Completed, agent.preview.orEmpty(), notify = false)
+            }
+    }
+
+    private fun shouldShowUnreadCompletedAlert(agent: Agent): Boolean {
+        if (!agent.resumable || agent.isBusy() || agent.id == activeAgentId) return false
+        if (alerts.any { it.agentId == agent.id }) return false
+        val updatedAt = agent.updatedAt
+        if (updatedAt <= 0L) return false
+        val age = System.currentTimeMillis() - updatedAt
+        if (age < 0L || age > RECENT_UNREAD_TASK_WINDOW_MS) return false
+        return taskReadKey(agent) !in readTaskKeys
+    }
+
+    private fun markAgentRead(agentId: String) {
+        val agent = agents.firstOrNull { it.id == agentId } ?: return
+        val key = taskReadKey(agent)
+        if (key in readTaskKeys) return
+        readTaskKeys.add(key)
+        prefs.edit().putStringSet(PREF_READ_TASK_KEYS, readTaskKeys.toSet()).apply()
+    }
+
+    private fun taskReadKey(agent: Agent): String {
+        return "${agent.codexThreadId ?: agent.id}:${agent.updatedAt}"
     }
 
     private fun finishAgentsRefresh() {
@@ -996,20 +1229,45 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun mergedStatus(current: Agent, incoming: Agent): String {
-        return incoming.status
+        if (incoming.isBusy() || !current.isBusy()) return incoming.status
+        if (incoming.hasTerminalProgressMessage()) return incoming.status
+
+        val incomingIsOlderSnapshot = incoming.updatedAt <= current.updatedAt
+        val currentWasJustWorking = System.currentTimeMillis() - current.updatedAt <= WORKING_STATUS_DOWNGRADE_GRACE_MS
+        return if (incoming.hasStreamingProgressMessage() || (incomingIsOlderSnapshot && currentWasJustWorking)) {
+            current.status
+        } else {
+            incoming.status
+        }
     }
 
     private fun mergedActivity(current: Agent, incoming: Agent, mergedStatus: String): String? {
-        return if (incoming.isBusy()) incoming.activity else null
+        return if (mergedStatus.trim().lowercase(Locale.ROOT) in setOf(
+                "initializing",
+                "resuming",
+                "working",
+                "running",
+                "active",
+                "in_progress",
+                "inprogress",
+                "in-progress",
+                "pending",
+                "processing",
+                "queued",
+                "starting",
+                "streaming",
+            )
+        ) {
+            incoming.activity ?: current.activity
+        } else {
+            null
+        }
     }
 
     private fun authoritativeSnapshot(agent: Agent): Agent {
         if (agent.isBusy()) return agent
         clearStreamingState(agent)
-        return agent.copy(
-            activity = null,
-            messages = agent.messages.map { it.copy(streaming = false) },
-        )
+        return agent.asIdle()
     }
 
     private fun authoritativeDetailSnapshot(agent: Agent): Agent {
@@ -1028,6 +1286,16 @@ class EasyCodexController(private val context: android.content.Context) {
             streamingAgentIds.remove(threadId)
             streamingAgentIds.remove("codex_$threadId")
         }
+    }
+
+    private fun Agent.asIdle(status: String = this.status, updatedAt: Long = this.updatedAt): Agent {
+        clearStreamingState(this)
+        return copy(
+            status = status,
+            activity = null,
+            updatedAt = updatedAt,
+            messages = messages.map { it.copy(streaming = false) },
+        )
     }
 
     private fun mergeMessagesForSnapshot(currentMessages: List<AgentMessage>, incoming: Agent): List<AgentMessage> {
@@ -1077,7 +1345,11 @@ class EasyCodexController(private val context: android.content.Context) {
         val detail = detailedCodexThreads[threadId] ?: return summary
         val authoritativeSummary = authoritativeSnapshot(summary)
         val authoritativeDetail = authoritativeDetailSnapshot(detail)
-        val statusSource = if (authoritativeDetail.isBusy()) authoritativeDetail else authoritativeSummary
+        val statusSource = if (authoritativeSummary.isBusy() && authoritativeDetail.isBusy()) {
+            authoritativeDetail
+        } else {
+            authoritativeSummary
+        }
         val messages = authoritativeDetail.messages.ifEmpty { summary.messages }
         return statusSource.copy(
             messages = if (statusSource.isBusy()) messages else messages.map { it.copy(streaming = false) },
@@ -1103,9 +1375,27 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun Agent.hasActiveProgressMessage(): Boolean {
-        return messages.asReversed().firstOrNull { it.role == "agent" }?.let { message ->
-            message.streaming || message.type in setOf("thinking", "command", "file_change", "plan")
-        } == true
+        return messages.asReversed().firstOrNull { it.role == "agent" }?.streaming == true
+    }
+
+    private fun Agent.hasStreamingProgressMessage(): Boolean {
+        return messages.asReversed().firstOrNull { it.role == "agent" }?.streaming == true
+    }
+
+    private fun Agent.hasTerminalProgressMessage(): Boolean {
+        val message = messages.asReversed().firstOrNull { it.role == "agent" } ?: return false
+        if (message.type == "error") return true
+        if (message.type != "status") return false
+        val text = message.text.trim().lowercase(Locale.ROOT)
+        return listOf(
+            "task complete",
+            "completed the task",
+            "turn aborted",
+            "task failed",
+            "任务失败",
+            "已完成任务",
+            "已中止",
+        ).any { marker -> marker in text }
     }
 
     private fun refreshActiveCodexThreadDetail() {
@@ -1114,6 +1404,7 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun prefetchCodexThreadDetails(importedAgents: List<Agent>) {
+        if (!appInForeground) return
         importedAgents
             .asSequence()
             .filter { it.resumable && !it.codexThreadId.isNullOrBlank() }
@@ -1498,6 +1789,29 @@ class EasyCodexController(private val context: android.content.Context) {
         }
     }
 
+    fun respondUserInputRequest(request: AgentUserInputRequest, answers: Map<String, String>) {
+        userInputRequests.removeAll { it.id == request.id && it.agentId == request.agentId }
+        val payload = JSONObject()
+        answers.forEach { (key, value) ->
+            if (key.isNotBlank() && value.isNotBlank()) payload.put(key, value)
+        }
+        send(
+            "respond_agent_user_input",
+            mapOf(
+                "agentId" to request.agentId,
+                "requestId" to request.id,
+                "answers" to payload,
+            ),
+        ) { _, error ->
+            if (error != null) statusText = "回答发送失败：$error"
+        }
+    }
+
+    fun deferUserInputRequest(request: AgentUserInputRequest) {
+        userInputRequests.removeAll { it.id == request.id && it.agentId == request.agentId }
+        selectAgent(request.agentId)
+    }
+
     private fun send(
         action: String,
         params: Map<String, Any?> = emptyMap(),
@@ -1586,13 +1900,18 @@ class EasyCodexController(private val context: android.content.Context) {
         reconnectRunnable = null
     }
 
-    private fun scheduleAgentsRefresh() {
+    private fun scheduleAgentsRefresh(delayMillis: Long = AGENTS_REFRESH_DEBOUNCE_MS) {
+        val effectiveDelay = if (appInForeground) {
+            delayMillis
+        } else {
+            maxOf(delayMillis, BACKGROUND_AGENTS_REFRESH_DEBOUNCE_MS)
+        }
         agentsRefreshRunnable?.let { main.removeCallbacks(it) }
         agentsRefreshRunnable = Runnable {
             agentsRefreshRunnable = null
             refreshAgents()
         }
-        main.postDelayed(agentsRefreshRunnable!!, AGENTS_REFRESH_DEBOUNCE_MS)
+        main.postDelayed(agentsRefreshRunnable!!, effectiveDelay.coerceAtLeast(0L))
     }
 
     private fun cancelAgentsRefresh() {
@@ -1678,11 +1997,16 @@ class EasyCodexController(private val context: android.content.Context) {
 
     private fun handleStream(agentId: String, event: String, data: JSONObject) {
         if (agentId.isBlank()) return
+        if (agentId == "cli") {
+            handleCliStream(event, data)
+            return
+        }
         when (event) {
-            "codex/threads_changed",
+            "codex/threads_changed" -> {
+                scheduleRelayStateRefresh(immediate = true)
+            }
             "agents/changed" -> {
-                refreshActiveCodexThreadDetail()
-                scheduleAgentsRefresh()
+                scheduleRelayStateRefresh(immediate = false)
             }
             "turn/started" -> {
                 streamingAgentIds.add(agentId)
@@ -1706,7 +2030,7 @@ class EasyCodexController(private val context: android.content.Context) {
             "turn/completed" -> {
                 streamingAgentIds.remove(agentId)
                 val completedAt = System.currentTimeMillis()
-                updateAgent(agentId) { it.copy(status = "ready", activity = null, updatedAt = completedAt) }
+                updateAgent(agentId) { it.asIdle(status = "ready", updatedAt = completedAt) }
                 recordAgentAlert(agentId, AgentAlertKind.Completed, data.optString("preview"))
                 scheduleAgentsRefresh()
             }
@@ -1714,13 +2038,13 @@ class EasyCodexController(private val context: android.content.Context) {
                 streamingAgentIds.remove(agentId)
                 val text = data.optJSONObject("error")?.optString("message") ?: "运行失败"
                 appendMessage(agentId, AgentMessage("agent", "status", text, System.currentTimeMillis()))
-                updateAgent(agentId) { it.copy(status = "error", activity = null, updatedAt = System.currentTimeMillis()) }
+                updateAgent(agentId) { it.asIdle(status = "error", updatedAt = System.currentTimeMillis()) }
                 recordAgentAlert(agentId, AgentAlertKind.Error, text)
                 scheduleAgentsRefresh()
             }
             "agent/stopped" -> {
                 streamingAgentIds.remove(agentId)
-                updateAgent(agentId) { it.copy(status = "stopped", activity = null, updatedAt = System.currentTimeMillis()) }
+                updateAgent(agentId) { it.asIdle(status = "stopped", updatedAt = System.currentTimeMillis()) }
                 val code = data.optString("code")
                 if (code.isNotBlank() && code != "0" && code != "null") {
                     recordAgentAlert(agentId, AgentAlertKind.Error, "任务进程已退出，退出码 $code")
@@ -1736,29 +2060,17 @@ class EasyCodexController(private val context: android.content.Context) {
             "agent/requested" -> {
                 val requestId = data.optString("requestId")
                 if (requestId.isNotBlank()) {
-                    val agent = agents.firstOrNull { it.id == agentId }
                     val method = data.optString("method").ifBlank { "approval" }
-                    val text = data.optString("text")
-                        .ifBlank { data.optJSONObject("params")?.let { jsonSummary(it) }.orEmpty() }
-                        .ifBlank { method }
-                    approvalRequests.removeAll { it.id == requestId && it.agentId == agentId }
-                    approvalRequests.add(
-                        AgentApprovalRequest(
-                            id = requestId,
-                            agentId = agentId,
-                            method = method,
-                            title = "${agent?.name ?: "EasyCodex"} 需要确认",
-                            detail = text,
-                            timestamp = data.optLong("timestamp", System.currentTimeMillis()),
-                        ),
-                    )
+                    val text = requestText(data, method)
+                    upsertPendingRequest(agentId, requestId, method, data.optJSONObject("params"), text, data.optLong("timestamp", System.currentTimeMillis()), announce = true)
                     finalizeMessage(agentId, "request_$requestId", text, "status", streaming = true)
-                    updateAgent(agentId) { it.copy(status = "working", activity = "正在等待你的确认", updatedAt = System.currentTimeMillis()) }
+                    updateAgent(agentId) { it.copy(status = "working", activity = if (isUserInputRequest(method)) "正在等待你回答问题" else "正在等待你的确认", updatedAt = System.currentTimeMillis()) }
                 }
             }
             "agent/request_resolved" -> {
                 val requestId = data.optString("requestId")
                 approvalRequests.removeAll { it.id == requestId && it.agentId == agentId }
+                userInputRequests.removeAll { it.id == requestId && it.agentId == agentId }
                 updateAgent(agentId) { it.copy(activity = "确认已发送，等待 Codex 继续执行", updatedAt = System.currentTimeMillis()) }
             }
             "item/started" -> {
@@ -1891,6 +2203,103 @@ class EasyCodexController(private val context: android.content.Context) {
         }
     }
 
+    private fun scheduleRelayStateRefresh(immediate: Boolean) {
+        if (appInForeground) {
+            refreshActiveCodexThreadDetail()
+            scheduleAgentsRefresh(if (immediate) 0L else AGENTS_REFRESH_DEBOUNCE_MS)
+        } else {
+            scheduleAgentsRefresh(BACKGROUND_AGENTS_REFRESH_DEBOUNCE_MS)
+        }
+    }
+
+    private fun handleCliStream(event: String, data: JSONObject) {
+        val windowId = data.optString("windowId").takeIf { it.isNotBlank() } ?: cliConsole.activeWindowId
+        when (event) {
+            "cli/started" -> {
+                val runId = data.optString("runId").takeIf { it.isNotBlank() }
+                val window = cliWindow(windowId)
+                val cwd = data.optString("cwd", window.cwd).ifBlank { window.cwd }
+                updateCliWindow(windowId) { current ->
+                    current.copy(
+                        running = true,
+                        busy = true,
+                        runId = runId,
+                        cwd = cwd,
+                        model = data.optString("model", current.model).ifBlank { current.model },
+                        reasoningEffort = data.optString("reasoningEffort", current.reasoningEffort).ifBlank { current.reasoningEffort },
+                    )
+                }
+                appendCliLine("status", "codex exec 已启动。", windowId)
+            }
+
+            "cli/output" -> {
+                val chunk = data.optString("chunk")
+                if (chunk.isNotBlank()) appendCliOutput(chunk, data.optString("stream", "stdout"), windowId)
+            }
+
+            "cli/exited" -> {
+                val code = data.optString("code").takeIf { it.isNotBlank() && it != "null" } ?: "0"
+                val durationMs = data.optLong("durationMs", 0L)
+                updateCliWindow(windowId) { it.copy(running = true, busy = false, runId = null) }
+                appendCliLine("status", "Codex CLI 已结束，退出码 $code${formatCliDuration(durationMs)}", windowId)
+            }
+
+            "cli/failed" -> {
+                val error = data.optString("error", "unknown error")
+                updateCliWindow(windowId) { it.copy(running = true, busy = false, runId = null) }
+                appendCliLine("status", "Codex CLI 运行失败：$error", windowId)
+            }
+        }
+    }
+
+    private fun appendCliLine(role: String, text: String, windowId: String = cliConsole.activeWindowId) {
+        if (text.isBlank()) return
+        val line = CliConsoleLine(
+            id = "cli_${System.currentTimeMillis()}_${UUID.randomUUID()}",
+            role = role,
+            text = text,
+            timestamp = System.currentTimeMillis(),
+        )
+        updateCliWindow(windowId) { it.copy(lines = (it.lines + line).takeLast(120)) }
+    }
+
+    private fun appendCliOutput(chunk: String, stream: String, windowId: String) {
+        val normalizedRole = if (stream == "stderr") "stderr" else "stdout"
+        val window = cliWindow(windowId)
+        val lines = window.lines.toMutableList()
+        val lastIndex = lines.indexOfLast { it.role == normalizedRole && it.streaming }
+        if (lastIndex >= 0) {
+            val current = lines[lastIndex]
+            lines[lastIndex] = current.copy(text = capMobileMessageText(current.text + chunk, "command_output"))
+        } else {
+            lines.add(
+                CliConsoleLine(
+                    id = "cli_${System.currentTimeMillis()}_${UUID.randomUUID()}",
+                    role = normalizedRole,
+                    text = capMobileMessageText(chunk, "command_output"),
+                    timestamp = System.currentTimeMillis(),
+                    streaming = true,
+                ),
+            )
+        }
+        updateCliWindow(windowId) { it.copy(lines = lines.takeLast(120)) }
+    }
+
+    private fun cliWindow(windowId: String): CliConsoleWindow {
+        return cliConsole.windows.firstOrNull { it.id == windowId } ?: cliConsole.activeWindow
+    }
+
+    private fun updateActiveCliWindow(transform: (CliConsoleWindow) -> CliConsoleWindow) {
+        updateCliWindow(cliConsole.activeWindowId, transform)
+    }
+
+    private fun updateCliWindow(windowId: String, transform: (CliConsoleWindow) -> CliConsoleWindow) {
+        val windows = cliConsole.windows.map { window ->
+            if (window.id == windowId) transform(window) else window
+        }
+        cliConsole = cliConsole.copy(windows = windows)
+    }
+
     private fun handleEventMessage(agentId: String, payload: JSONObject) {
         when (payload.optString("type")) {
             "task_started" -> {
@@ -1907,14 +2316,14 @@ class EasyCodexController(private val context: android.content.Context) {
                 val text = payload.optString("last_agent_message")
                 if (text.isNotBlank()) finalizeMessage(agentId, "agent_${System.currentTimeMillis()}", text, "agent")
                 streamingAgentIds.remove(agentId)
-                updateAgent(agentId) { it.copy(status = "ready", activity = null, updatedAt = System.currentTimeMillis()) }
+                updateAgent(agentId) { it.asIdle(status = "ready", updatedAt = System.currentTimeMillis()) }
                 recordAgentAlert(agentId, classifyCompletionAlert(text), text)
                 scheduleAgentsRefresh()
             }
             "error" -> {
                 val text = payload.optString("message").ifBlank { payload.optString("error") }.ifBlank { "运行失败" }
                 finalizeMessage(agentId, "error_${System.currentTimeMillis()}", text, "status")
-                updateAgent(agentId) { it.copy(status = "error", activity = null, updatedAt = System.currentTimeMillis()) }
+                updateAgent(agentId) { it.asIdle(status = "error", updatedAt = System.currentTimeMillis()) }
                 recordAgentAlert(agentId, AgentAlertKind.Error, text)
             }
             "turn_aborted" -> {
@@ -1922,7 +2331,7 @@ class EasyCodexController(private val context: android.content.Context) {
                 val text = if (reason.isNotBlank()) "任务已中止：$reason" else "任务已中止"
                 finalizeMessage(agentId, "aborted_${System.currentTimeMillis()}", text, "status")
                 streamingAgentIds.remove(agentId)
-                updateAgent(agentId) { it.copy(status = "ready", activity = null, updatedAt = System.currentTimeMillis()) }
+                updateAgent(agentId) { it.asIdle(status = "ready", updatedAt = System.currentTimeMillis()) }
                 recordAgentAlert(agentId, AgentAlertKind.Confirmation, text)
             }
             "exec_command_begin" -> {
@@ -1960,7 +2369,7 @@ class EasyCodexController(private val context: android.content.Context) {
         }
     }
 
-    private fun recordAgentAlert(agentId: String, kind: AgentAlertKind, detail: String = "") {
+    private fun recordAgentAlert(agentId: String, kind: AgentAlertKind, detail: String = "", notify: Boolean = true) {
         val agent = agents.firstOrNull { it.id == agentId }
         val agentName = agent?.name?.takeIf { it.isNotBlank() } ?: "EasyCodex"
         val fallbackDetail = agent?.messages?.lastOrNull { it.role == "agent" && it.type == "agent" }?.text.orEmpty()
@@ -1990,8 +2399,7 @@ class EasyCodexController(private val context: android.content.Context) {
         )
         alerts.add(0, alert)
         while (alerts.size > 60) alerts.removeAt(alerts.lastIndex)
-        playAgentAlertSound(kind)
-        showAgentSystemNotification(alert)
+        if (notify) showAgentSystemNotification(alert)
     }
 
     private fun classifyCompletionAlert(text: String): AgentAlertKind {
@@ -2003,21 +2411,6 @@ class EasyCodexController(private val context: android.content.Context) {
             needsConfirmation -> AgentAlertKind.Confirmation
             asksQuestion -> AgentAlertKind.Question
             else -> AgentAlertKind.Completed
-        }
-    }
-
-    private fun playAgentAlertSound(kind: AgentAlertKind) {
-        val toneType = when (kind) {
-            AgentAlertKind.Completed -> ToneGenerator.TONE_PROP_ACK
-            AgentAlertKind.Question,
-            AgentAlertKind.Confirmation -> ToneGenerator.TONE_PROP_BEEP
-            AgentAlertKind.Error -> ToneGenerator.TONE_PROP_NACK
-        }
-        runCatching {
-            ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80).apply {
-                startTone(toneType, 180)
-                main.postDelayed({ release() }, 260)
-            }
         }
     }
 
@@ -2389,6 +2782,134 @@ class EasyCodexController(private val context: android.content.Context) {
         return if (label.isNotBlank()) "正在运行命令：$label" else "正在运行命令。"
     }
 
+    private fun syncPendingRequests(agentJson: JSONObject) {
+        val agentId = agentJson.optString("id")
+        if (agentId.isBlank()) return
+        val pending = agentJson.optJSONArray("pendingRequests") ?: return
+        val seen = mutableSetOf<String>()
+        for (index in 0 until pending.length()) {
+            val requestJson = pending.optJSONObject(index) ?: continue
+            val requestId = requestJson.optString("requestId")
+            if (requestId.isBlank()) continue
+            seen.add(requestId)
+            val method = requestJson.optString("method").ifBlank { "approval" }
+            upsertPendingRequest(
+                agentId = agentId,
+                requestId = requestId,
+                method = method,
+                params = requestJson.optJSONObject("params"),
+                text = requestText(requestJson, method),
+                timestamp = requestJson.optLong("timestamp", System.currentTimeMillis()),
+            )
+        }
+        approvalRequests.removeAll { it.agentId == agentId && it.id !in seen }
+        userInputRequests.removeAll { it.agentId == agentId && it.id !in seen }
+    }
+
+    private fun upsertPendingRequest(
+        agentId: String,
+        requestId: String,
+        method: String,
+        params: JSONObject?,
+        text: String,
+        timestamp: Long,
+        announce: Boolean = false,
+    ) {
+        val agent = agents.firstOrNull { it.id == agentId }
+        if (isUserInputRequest(method)) {
+            userInputRequests.removeAll { it.id == requestId && it.agentId == agentId }
+            userInputRequests.add(
+                AgentUserInputRequest(
+                    id = requestId,
+                    agentId = agentId,
+                    title = "${agent?.name ?: "EasyCodex"} 有问题等你回答",
+                    detail = text,
+                    questions = parseUserInputQuestions(params),
+                    timestamp = timestamp,
+                ),
+            )
+            if (announce) recordAgentAlert(agentId, AgentAlertKind.Question, text)
+            return
+        }
+        approvalRequests.removeAll { it.id == requestId && it.agentId == agentId }
+        approvalRequests.add(
+            AgentApprovalRequest(
+                id = requestId,
+                agentId = agentId,
+                method = method,
+                title = "${agent?.name ?: "EasyCodex"} 需要确认",
+                detail = text,
+                timestamp = timestamp,
+            ),
+        )
+    }
+
+    private fun isUserInputRequest(method: String): Boolean {
+        return method == USER_INPUT_REQUEST_METHOD || method.contains("requestUserInput", ignoreCase = true)
+    }
+
+    private fun requestText(json: JSONObject, method: String): String {
+        return json.optString("text")
+            .ifBlank { json.optJSONObject("params")?.let { userInputRequestText(it).ifBlank { jsonSummary(it) } }.orEmpty() }
+            .ifBlank { method }
+    }
+
+    private fun userInputRequestText(params: JSONObject): String {
+        val questions = params.optJSONArray("questions") ?: return params.optString("message")
+        return buildList {
+            for (index in 0 until questions.length()) {
+                val question = questions.optJSONObject(index) ?: continue
+                val header = question.optString("header")
+                val prompt = question.optString("question")
+                val line = listOf(header, prompt).filter { it.isNotBlank() }.joinToString("：")
+                if (line.isNotBlank()) add(line)
+            }
+        }.joinToString("\n")
+    }
+
+    private fun parseUserInputQuestions(params: JSONObject?): List<AgentUserInputQuestion> {
+        val questions = params?.optJSONArray("questions") ?: JSONArray()
+        val parsed = buildList {
+            for (index in 0 until questions.length()) {
+                val question = questions.optJSONObject(index) ?: continue
+                val questionId = question.optString("id").ifBlank { "question_$index" }
+                val options = question.optJSONArray("options")
+                add(
+                    AgentUserInputQuestion(
+                        id = questionId,
+                        header = question.optString("header"),
+                        question = question.optString("question"),
+                        isOther = question.optBoolean("isOther", true),
+                        isSecret = question.optBoolean("isSecret", false),
+                        options = buildList {
+                            if (options == null) return@buildList
+                            for (optionIndex in 0 until options.length()) {
+                                val option = options.optJSONObject(optionIndex) ?: continue
+                                add(
+                                    AgentUserInputOption(
+                                        label = option.optString("label"),
+                                        description = option.optString("description"),
+                                    ),
+                                )
+                            }
+                        },
+                    ),
+                )
+            }
+        }
+        if (parsed.isNotEmpty()) return parsed
+        return listOf(
+            AgentUserInputQuestion(
+                id = "answer",
+                header = "",
+                question = params?.optString("message").orEmpty().ifBlank { "请输入你的回答。" },
+                isOther = true,
+                isSecret = false,
+                options = emptyList(),
+            ),
+        )
+    }
+
     private fun parseAgent(json: JSONObject): Agent {
         val messages = json.optJSONArray("messages") ?: JSONArray()
         val parsedMessages = buildList {
@@ -2398,7 +2919,7 @@ class EasyCodexController(private val context: android.content.Context) {
         }
         return Agent(
             id = json.optString("id"),
-            name = json.optString("name", "EasyCodex"),
+            name = displayTaskName(json.optString("name", "EasyCodex")),
             model = json.optString("model", DEFAULT_AGENT_MODEL).ifBlank { DEFAULT_AGENT_MODEL },
             cwd = json.optString("cwd", "."),
             projectRoot = cleanNullablePath(json.optString("projectRoot")),
@@ -2412,18 +2933,22 @@ class EasyCodexController(private val context: android.content.Context) {
             codexThreadId = json.optString("codexThreadId")
                 .ifBlank { json.optString("threadId") }
                 .takeIf { it.isNotBlank() },
-            updatedAt = parsedMessages.maxOfOrNull { it.timestamp }
-                ?: jsonTimestamp(json, "updatedAt", System.currentTimeMillis()),
+            pinned = json.optBoolean("pinned", false),
+            updatedAt = jsonTimestamp(json, "updatedAt", parsedMessages.maxOfOrNull { it.timestamp }
+                ?: System.currentTimeMillis()),
             queuedFollowUps = parseQueuedFollowUps(json),
         )
     }
 
     private fun parseCodexThread(json: JSONObject): Agent {
         val threadId = json.optString("id")
-        val cwd = json.optString("cwd", ".")
-        val name = json.optString("name").takeIf { it.isNotBlank() }
+        val cwd = cleanNullablePath(json.optString("cwd")).orEmpty()
+        val projectless = json.optBoolean("projectless", false)
+        val projectRoot = cleanNullablePath(json.optString("projectRoot"))
+            ?: if (projectless || cwd.isBlank()) CONVERSATION_PROJECT_PATH else null
+        val name = displayTaskName(json.optString("name").takeIf { it.isNotBlank() }
             ?: cwd.split('\\', '/').lastOrNull { it.isNotBlank() }
-            ?: "EasyCodex 任务"
+            ?: "EasyCodex 任务")
         val preview = json.optString("preview").takeIf { it.isNotBlank() }
         val updatedAt = jsonTimestamp(json, "updatedAt", jsonTimestamp(json, "createdAt", 0L))
         val queuedFollowUps = parseQueuedFollowUps(json)
@@ -2438,7 +2963,7 @@ class EasyCodexController(private val context: android.content.Context) {
             model = json.optString("model", defaultModel.ifBlank { DEFAULT_AGENT_MODEL })
                 .ifBlank { defaultModel.ifBlank { DEFAULT_AGENT_MODEL } },
             cwd = cwd,
-            projectRoot = cleanNullablePath(json.optString("projectRoot")),
+            projectRoot = projectRoot,
             status = codexThreadStatus(json),
             serviceTier = normalizeServiceTier(
                 json.optString("serviceTier", defaultServiceTier.ifBlank { DEFAULT_SERVICE_TIER })
@@ -2453,9 +2978,15 @@ class EasyCodexController(private val context: android.content.Context) {
             codexThreadId = threadId,
             preview = preview,
             resumable = true,
+            pinned = json.optBoolean("pinned", false),
             updatedAt = updatedAt,
             queuedFollowUps = queuedFollowUps,
         )
+    }
+
+    private fun displayTaskName(name: String): String {
+        val normalized = name.trim().lowercase(Locale.ROOT)
+        return if (normalized.isBlank() || normalized in PENDING_CODEX_THREAD_NAMES) "null" else name
     }
 
     private fun parseProjectRoots(json: JSONObject?): List<String> {
@@ -2489,16 +3020,12 @@ class EasyCodexController(private val context: android.content.Context) {
                 queuedFollowUpMessage(summary.queuedFollowUps, summary.updatedAt)?.let { add(it) }
             }
         }
-        val authoritativeUpdatedAt = listOf(
-            summary.updatedAt,
-            detailMessages.maxOfOrNull { it.timestamp } ?: 0L,
-        ).filter { it > 0L }.maxOrNull()
         return summary.copy(
             id = fallback.id,
             status = summary.status,
             messages = detailMessages.ifEmpty { summary.messages.ifEmpty { fallback.messages } },
             resumable = true,
-            updatedAt = authoritativeUpdatedAt ?: fallback.updatedAt,
+            updatedAt = summary.updatedAt.takeIf { it > 0L } ?: fallback.updatedAt,
         )
     }
 
@@ -2946,7 +3473,8 @@ class EasyCodexController(private val context: android.content.Context) {
             streamDeltaFlushRunnable = null
             flushStreamDeltas()
         }
-        main.postDelayed(streamDeltaFlushRunnable!!, STREAM_DELTA_FLUSH_MS)
+        val delayMs = if (appInForeground) STREAM_DELTA_FLUSH_MS else BACKGROUND_STREAM_DELTA_FLUSH_MS
+        main.postDelayed(streamDeltaFlushRunnable!!, delayMs)
     }
 
     private fun flushStreamDeltas() {
@@ -3147,5 +3675,11 @@ class EasyCodexController(private val context: android.content.Context) {
             listOfNotNull(uri.host, uri.port.takeIf { it > 0 }?.toString()).joinToString(":")
         }.getOrNull()?.takeIf { it.isNotBlank() } ?: relayUrl.ifBlank { strings.endpointNotFilled }
     }
+}
+
+private fun formatCliDuration(durationMs: Long): String {
+    if (durationMs <= 0L) return ""
+    val seconds = durationMs / 1000
+    return if (seconds <= 0L) "，耗时 <1 秒" else "，耗时 ${seconds} 秒"
 }
 

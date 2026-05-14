@@ -137,6 +137,89 @@ fun ApprovalRequestDialog(
 }
 
 @Composable
+fun UserInputRequestDialog(
+    request: AgentUserInputRequest,
+    onSubmit: (Map<String, String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var answers by remember(request.id) { mutableStateOf(emptyMap<String, String>()) }
+    val canSubmit = request.questions.all { question ->
+        answers[question.id].orEmpty().isNotBlank()
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(request.title) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (request.detail.isNotBlank()) {
+                    Text(
+                        request.detail,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                request.questions.forEach { question ->
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val label = question.header.ifBlank { question.question.ifBlank { "你的回答" } }
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        if (question.header.isNotBlank() && question.question.isNotBlank()) {
+                            Text(
+                                question.question,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (question.options.isNotEmpty()) {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                question.options.forEach { option ->
+                                    val selected = answers[question.id] == option.label
+                                    FilterChip(
+                                        selected = selected,
+                                        onClick = { answers = answers + (question.id to option.label) },
+                                        label = { Text(option.label) },
+                                    )
+                                }
+                            }
+                        }
+                        if (question.isOther || question.options.isEmpty()) {
+                            OutlinedTextField(
+                                value = answers[question.id].orEmpty(),
+                                onValueChange = { answers = answers + (question.id to it) },
+                                modifier = Modifier.fillMaxWidth(),
+                                minLines = 2,
+                                label = { Text("输入回答") },
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = canSubmit,
+                onClick = { onSubmit(answers.mapValues { it.value.trim() }.filterValues { it.isNotBlank() }) },
+            ) {
+                Text("发送回答")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("稍后")
+            }
+        },
+    )
+}
+
+@Composable
 fun PlanReviewDialog(
     review: PlanReview,
     onDismiss: () -> Unit,

@@ -34,6 +34,9 @@ class AppStrings {
     lateinit var saveSettings: String
     lateinit var saved: String
     lateinit var importedFromQr: String
+    lateinit var testingConnection: String
+    lateinit var connectionTestSucceeded: String
+    lateinit var connectionTestFailed: (String) -> String
     lateinit var scanUnavailable: String
     lateinit var invalidQrCode: String
     lateinit var scanCanceled: String
@@ -131,13 +134,13 @@ class AppStrings {
     lateinit var searchTasksOrProjects: String
     lateinit var noMatchingTasks: String
     lateinit var taskActionsContentDescription: String
-    lateinit var deleteTask: String
-    lateinit var deleteTaskTitle: String
-    lateinit var deleteTaskBody: String
-    lateinit var deleteRunningTaskBody: String
-    lateinit var confirmDeleteTask: String
-    lateinit var taskDeleted: String
-    lateinit var taskDeleteFailed: (String) -> String
+    lateinit var archiveTask: String
+    lateinit var archiveTaskTitle: String
+    lateinit var archiveTaskBody: String
+    lateinit var archiveRunningTaskBody: String
+    lateinit var confirmArchiveTask: String
+    lateinit var taskArchived: String
+    lateinit var taskArchiveFailed: (String) -> String
     lateinit var runDirectly: String
     lateinit var planFirst: String
     lateinit var copyContent: String
@@ -170,6 +173,7 @@ class AppStrings {
     lateinit var attachmentTooLarge: (String) -> String
     lateinit var attachmentUploadFailed: (String) -> String
     lateinit var attachmentNoPath: String
+    lateinit var pinned: String
     lateinit var projects: String
     lateinit var expandAll: String
     lateinit var collapseAll: String
@@ -361,6 +365,9 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     saveSettings = "保存设置"
     saved = "已保存"
     importedFromQr = "已从二维码导入"
+    testingConnection = "正在检测连接..."
+    connectionTestSucceeded = "连接检测成功，设置已保存"
+    connectionTestFailed = { "设置已保存，但连接检测失败：$it" }
     scanUnavailable = "当前无法打开扫码"
     invalidQrCode = "二维码不是 EasyCodex 连接配置"
     scanCanceled = "已取消扫码"
@@ -391,13 +398,13 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     checkForUpdates = "检查更新"
     checkingForUpdates = "正在检查更新"
     appUpToDate = { "当前已是最新版本：$it" }
-    updateAvailable = { "发现新版本 $it，请确认后下载 APK。" }
+    updateAvailable = { "发现新版本 $it，可选择下载 APK；不更新也可以继续使用。" }
     updateCheckFailed = { "检查更新失败：${it.ifBlank { "网络或服务异常" }}" }
     downloadStarted = { "已开始下载 EasyCodex $it，完成后可在系统下载通知中安装。" }
     noApkFound = { "已找到版本 $it，但没有可下载的 Android APK。" }
     downloadManagerUnavailable = "系统下载服务不可用"
     updateInstallPromptTitle = { "下载 EasyCodex $it 更新？" }
-    updateInstallPromptBody = { "Android 会通过系统安装界面完成 APK 升级。安装开始后当前 EasyCodex 可能会被系统关闭，请先保存正在进行的操作。" }
+    updateInstallPromptBody = { "这是可选更新。Android 会通过系统安装界面完成 APK 升级，安装开始后当前 EasyCodex 可能会被系统关闭。" }
     downloadUpdate = "下载更新"
     connectionInstructions = "连接说明"
     connectionInstructionsDetail = "手机相机扫描终端二维码会自动保存地址和 API Key，也可在这里手动修改。"
@@ -458,13 +465,13 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     searchTasksOrProjects = "搜索任务或项目"
     noMatchingTasks = "没有匹配的任务"
     taskActionsContentDescription = "任务操作"
-    deleteTask = "删除任务"
-    deleteTaskTitle = "删除任务？"
-    deleteTaskBody = "删除后，此任务会从手机端列表中移除。"
-    deleteRunningTaskBody = "此任务仍在运行。删除会先停止任务，然后从手机端列表中移除。"
-    confirmDeleteTask = "删除"
-    taskDeleted = "任务已删除"
-    taskDeleteFailed = { "删除任务失败：$it" }
+    archiveTask = "归档任务"
+    archiveTaskTitle = "归档任务？"
+    archiveTaskBody = "归档后，此任务会从手机端和 Codex 任务列表中移除。"
+    archiveRunningTaskBody = "此任务仍在运行。归档会先停止任务，然后从手机端和 Codex 任务列表中移除。"
+    confirmArchiveTask = "归档"
+    taskArchived = "任务已归档"
+    taskArchiveFailed = { "归档任务失败：$it" }
     runDirectly = "直接执行"
     planFirst = "先计划"
     copyContent = "复制内容"
@@ -497,6 +504,7 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     attachmentTooLarge = { "$it 超过 12 MB，未上传任何附件" }
     attachmentUploadFailed = { "附件上传失败：$it" }
     attachmentNoPath = "附件已上传，但没有返回文件路径"
+    pinned = "置顶"
     projects = "项目"
     expandAll = "展开全部"
     collapseAll = "收起全部"
@@ -555,7 +563,7 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     startConfiguration = "开始配置"
     startUsing = "开始使用"
     later = "稍后"
-    sendToEasyCodex = "发送给 EasyCodex"
+    sendToEasyCodex = "发送给电脑中的 Codex CLI"
     openAttachmentPanel = "打开附件面板"
     openEmojiPanel = "打开表情面板"
     openVoicePanel = "打开语音面板"
@@ -631,6 +639,9 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     saveSettings = "Save settings"
     saved = "Saved"
     importedFromQr = "Imported from QR code"
+    testingConnection = "Testing connection..."
+    connectionTestSucceeded = "Connection test passed. Settings saved."
+    connectionTestFailed = { "Settings saved, but the connection test failed: $it" }
     scanUnavailable = "Scanner is unavailable right now"
     invalidQrCode = "This QR code is not an EasyCodex connection config"
     scanCanceled = "Scan canceled"
@@ -661,13 +672,13 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     checkForUpdates = "Check for updates"
     checkingForUpdates = "Checking for updates"
     appUpToDate = { "You are on the latest version: $it" }
-    updateAvailable = { "Found version $it. Confirm to download the APK." }
+    updateAvailable = { "Found version $it. You can download the APK now or keep using the app." }
     updateCheckFailed = { "Update check failed: ${it.ifBlank { "network or service error" }}" }
     downloadStarted = { "Started downloading EasyCodex $it. Install it from the system download notification when it finishes." }
     noApkFound = { "Found version $it, but no Android APK is attached." }
     downloadManagerUnavailable = "System download service is unavailable"
     updateInstallPromptTitle = { "Download EasyCodex $it update?" }
-    updateInstallPromptBody = { "Android installs APK updates through the system installer. Once installation starts, Android may close the current EasyCodex app, so finish any active work first." }
+    updateInstallPromptBody = { "This update is optional. Android installs APK updates through the system installer, and may close EasyCodex once installation starts." }
     downloadUpdate = "Download update"
     connectionInstructions = "Connection help"
     connectionInstructionsDetail = "Scan the terminal QR code with your phone camera to save the address and API Key, or edit them manually here."
@@ -728,13 +739,13 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     searchTasksOrProjects = "Search tasks or projects"
     noMatchingTasks = "No matching tasks"
     taskActionsContentDescription = "Task actions"
-    deleteTask = "Delete task"
-    deleteTaskTitle = "Delete task?"
-    deleteTaskBody = "This task will be removed from the mobile list."
-    deleteRunningTaskBody = "This task is still running. Deleting it will stop the task and remove it from the mobile list."
-    confirmDeleteTask = "Delete"
-    taskDeleted = "Task deleted"
-    taskDeleteFailed = { "Failed to delete task: $it" }
+    archiveTask = "Archive task"
+    archiveTaskTitle = "Archive task?"
+    archiveTaskBody = "This task will be removed from the mobile and Codex task lists."
+    archiveRunningTaskBody = "This task is still running. Archiving it will stop the task and remove it from the mobile and Codex task lists."
+    confirmArchiveTask = "Archive"
+    taskArchived = "Task archived"
+    taskArchiveFailed = { "Failed to archive task: $it" }
     runDirectly = "Run now"
     planFirst = "Plan first"
     copyContent = "Copy content"
@@ -767,6 +778,7 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     attachmentTooLarge = { "$it is over 12 MB. No attachments were uploaded." }
     attachmentUploadFailed = { "Attachment upload failed: $it" }
     attachmentNoPath = "Attachment uploaded, but no file path was returned"
+    pinned = "Pinned"
     projects = "Projects"
     expandAll = "Expand all"
     collapseAll = "Collapse all"
@@ -825,7 +837,7 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     startConfiguration = "Start setup"
     startUsing = "Start using"
     later = "Later"
-    sendToEasyCodex = "Send to EasyCodex"
+    sendToEasyCodex = "Send to the Codex CLI on your computer"
     openAttachmentPanel = "Open attachment panel"
     openEmojiPanel = "Open emoji panel"
     openVoicePanel = "Open voice panel"

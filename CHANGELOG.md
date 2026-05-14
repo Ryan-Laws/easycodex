@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.1.2 - 2026-05-15
+
+### Added
+
+- Added phone-accessible Codex CLI consoles for launching separate one-shot `codex exec` prompts in selected workspaces.
+
+### Fixed
+
+- Separated active mobile tasks from resumable Codex history so completed `notLoaded` threads no longer remain in project task counts.
+- Used Codex session lifecycle events and archived thread state when syncing tasks from the relay.
+- Refreshed Android task status merging so completed threads stop showing stale working indicators.
+
+### Improved
+
+- Expanded the desktop relay workbench with richer task history, live conversation controls, file-change context, and update handling.
+- Tightened mobile conversation behavior around auto-scroll, file-change summaries, queued task taps, and connection reliability.
+
 ## 0.1.2-beta.2 - 2026-05-15
 
 ### Fixed

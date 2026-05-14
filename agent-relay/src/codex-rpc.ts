@@ -119,6 +119,10 @@ export function codexThreadReadCall(threadId: string, includeTurns = true): stri
   return rpcCall('thread/read', { threadId, includeTurns });
 }
 
+export function codexThreadArchiveCall(threadId: string): string {
+  return rpcCall('thread/archive', { threadId });
+}
+
 export function codexThreadTurnsListCall(
   threadId: string,
   params: {

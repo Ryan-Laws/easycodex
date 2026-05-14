@@ -3,8 +3,8 @@ package com.easycodex.mobile
 import android.content.ClipData
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.Base64
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -16,6 +16,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,8 +47,8 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -72,6 +73,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -90,6 +92,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.net.URL
+import java.net.URLEncoder
 
 private data class ConversationLayoutMetrics(
     val listPadding: PaddingValues,
@@ -98,13 +104,13 @@ private data class ConversationLayoutMetrics(
     val bubbleShape: androidx.compose.ui.unit.Dp,
     val userBubbleWidth: Float,
     val assistantBubbleWidth: Float,
+    val detailBubbleWidth: Float,
 )
 
 private const val LONG_DETAIL_TEXT_LIMIT = 6_000
 private const val LONG_MESSAGE_TEXT_LIMIT = 1_600
 private const val MESSAGE_PREVIEW_TEXT_LIMIT = 900
 private const val MESSAGE_PREVIEW_LINE_LIMIT = 14
-private const val LONG_CODE_TEXT_LIMIT = 1_200
 
 private fun AttachmentDraft.isPreviewImage(): Boolean {
     return !previewUri.isNullOrBlank() && mimeType?.startsWith("image/") == true
@@ -123,8 +129,9 @@ private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMet
             itemSpacing = 6.dp,
             bubblePadding = 10.dp,
             bubbleShape = 14.dp,
-            userBubbleWidth = 0.92f,
+            userBubbleWidth = 0.98f,
             assistantBubbleWidth = 0.98f,
+            detailBubbleWidth = 0.98f,
         )
 
         "spacious" -> ConversationLayoutMetrics(
@@ -132,8 +139,9 @@ private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMet
             itemSpacing = 14.dp,
             bubblePadding = 16.dp,
             bubbleShape = 24.dp,
-            userBubbleWidth = 0.78f,
-            assistantBubbleWidth = 0.88f,
+            userBubbleWidth = 0.92f,
+            assistantBubbleWidth = 0.96f,
+            detailBubbleWidth = 0.92f,
         )
 
         else -> ConversationLayoutMetrics(
@@ -141,8 +149,9 @@ private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMet
             itemSpacing = 10.dp,
             bubblePadding = 14.dp,
             bubbleShape = 20.dp,
-            userBubbleWidth = 0.86f,
-            assistantBubbleWidth = 0.94f,
+            userBubbleWidth = 0.96f,
+            assistantBubbleWidth = 0.98f,
+            detailBubbleWidth = 0.96f,
         )
     }
 }
@@ -152,6 +161,8 @@ fun Conversation(
     agent: Agent?,
     layoutMode: String = DEFAULT_APP_LAYOUT,
     emptyMessage: String = "创建或选择一个智能体开始。",
+    relayUrl: String = "",
+    apiKey: String = "",
     onOpenDiffReview: () -> Unit = {},
     onOpenPlan: (AgentMessage) -> Unit = {},
 ) {
@@ -173,9 +184,10 @@ fun Conversation(
             agent.messages.filter { it.isPrimaryConversationVisible() }
         }
     }
-    val visibleMessageKeys = remember(visibleMessages) { visibleMessages.uniqueLazyKeys() }
-    val bottomIndex = visibleMessages.size
-    val bottomAnchorCount = visibleMessages.size + 1
+    val conversationItems = remember(visibleMessages) { visibleMessages.toConversationListItems() }
+    val visibleMessageKeys = remember(conversationItems) { conversationItems.uniqueLazyKeys() }
+    val bottomIndex = conversationItems.size
+    val bottomAnchorCount = conversationItems.size + 1
     val lastMessage = visibleMessages.lastOrNull()
     val outputRevision = "${agent.updatedAt}:${visibleMessages.size}:${lastMessage?.stableKey().orEmpty()}:${lastMessage?.text?.length ?: 0}:${lastMessage?.text?.hashCode() ?: 0}:${lastMessage?.streaming == true}"
     val isAtBottom by remember(listState, bottomAnchorCount) {
@@ -220,15 +232,26 @@ fun Conversation(
                 contentPadding = metrics.listPadding,
             ) {
                 itemsIndexed(
-                    visibleMessages,
-                    key = { index, message -> visibleMessageKeys.getOrNull(index) ?: "${message.stableKey()}#$index" },
-                ) { _, message ->
-                    MessageBubble(
-                        message = message,
-                        metrics = metrics,
-                        onOpenPlan = { onOpenPlan(message) },
-                        onOpenDiffReview = onOpenDiffReview,
-                    )
+                    conversationItems,
+                    key = { index, item -> visibleMessageKeys.getOrNull(index) ?: "${item.stableKey()}#$index" },
+                ) { _, item ->
+                    when (item) {
+                        is ConversationListItem.Message -> MessageBubble(
+                            message = item.message,
+                            metrics = metrics,
+                            relayUrl = relayUrl,
+                            apiKey = apiKey,
+                            onOpenPlan = { onOpenPlan(item.message) },
+                            onOpenDiffReview = onOpenDiffReview,
+                        )
+
+                        is ConversationListItem.DetailGroup -> DetailGroupBubble(
+                            messages = item.messages,
+                            kind = item.kind,
+                            metrics = metrics,
+                            onOpenDiffReview = onOpenDiffReview,
+                        )
+                    }
                 }
                 item(key = "conversation-bottom-anchor") {
                     Spacer(Modifier.height(1.dp))
@@ -279,11 +302,29 @@ fun AgentMessage.stableKey(): String {
     return itemId ?: "${timestamp}_${role}_${type}"
 }
 
-private fun List<AgentMessage>.uniqueLazyKeys(): List<String> {
+private sealed class ConversationListItem {
+    data class Message(val message: AgentMessage) : ConversationListItem()
+    data class DetailGroup(val messages: List<AgentMessage>, val kind: DetailGroupKind) : ConversationListItem()
+
+    fun stableKey(): String {
+        return when (this) {
+            is Message -> message.stableKey()
+            is DetailGroup -> "${kind.name.lowercase()}_group_${messages.first().stableKey()}_${messages.last().stableKey()}_${messages.size}"
+        }
+    }
+}
+
+private enum class DetailGroupKind {
+    Command,
+    FileChange,
+    Mixed,
+}
+
+private fun List<ConversationListItem>.uniqueLazyKeys(): List<String> {
     val totals = groupingBy { it.stableKey() }.eachCount()
     val seen = mutableMapOf<String, Int>()
-    return map { message ->
-        val baseKey = message.stableKey()
+    return map { item ->
+        val baseKey = item.stableKey()
         if ((totals[baseKey] ?: 0) <= 1) {
             baseKey
         } else {
@@ -291,6 +332,45 @@ private fun List<AgentMessage>.uniqueLazyKeys(): List<String> {
             seen[baseKey] = occurrence + 1
             "$baseKey#$occurrence"
         }
+    }
+}
+
+private fun List<AgentMessage>.toConversationListItems(): List<ConversationListItem> {
+    val items = mutableListOf<ConversationListItem>()
+    var index = 0
+    while (index < size) {
+        val message = this[index]
+        if (!message.isDetailGroupCandidate()) {
+            items.add(ConversationListItem.Message(message))
+            index += 1
+            continue
+        }
+
+        val group = mutableListOf<AgentMessage>()
+        while (index < size && this[index].isDetailGroupCandidate()) {
+            group.add(this[index])
+            index += 1
+        }
+        if (group.size >= 2) {
+            items.add(ConversationListItem.DetailGroup(group, group.detailGroupKind()))
+        } else {
+            items.add(ConversationListItem.Message(group.first()))
+        }
+    }
+    return items
+}
+
+private fun AgentMessage.isDetailGroupCandidate(): Boolean {
+    return role == "agent" && type in setOf("command", "command_output", "file_change")
+}
+
+private fun List<AgentMessage>.detailGroupKind(): DetailGroupKind {
+    val hasCommand = any { it.type == "command" || it.type == "command_output" }
+    val hasFileChange = any { it.type == "file_change" }
+    return when {
+        hasCommand && hasFileChange -> DetailGroupKind.Mixed
+        hasFileChange -> DetailGroupKind.FileChange
+        else -> DetailGroupKind.Command
     }
 }
 
@@ -344,7 +424,6 @@ private fun AgentMessage.isInternalStatusMessage(): Boolean {
 }
 
 private fun AgentMessage.isPrimaryConversationVisible(): Boolean {
-    if (role == "user" || type == "user") return false
     if (text.isBlank()) return false
     if (text.trim() == "已加载项目上下文。") return false
     if (isInternalStatusMessage()) return false
@@ -553,6 +632,56 @@ private fun String.compactDetailTitle(limit: Int = 96): String {
     return singleLine.take(limit).trimEnd() + "..."
 }
 
+@Composable
+private fun LightweightDetailHeader(
+    title: String,
+    subtitle: String,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onToggleExpanded() }
+            .padding(horizontal = 2.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(
+            Icons.Default.Description,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.66f),
+            modifier = Modifier.size(15.dp),
+        )
+        Text(
+            title,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (subtitle.isNotBlank()) {
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(0.72f, fill = false),
+            )
+        }
+        Icon(
+            if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+            contentDescription = if (expanded) "收起细节" else "展开细节",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f),
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
 private fun formatDurationToken(raw: String): String {
     val value = raw.trim()
     val millis = value.removeSuffix("ms").toLongOrNull() ?: return value
@@ -599,9 +728,84 @@ private fun markdownBlocks(text: String): List<MarkdownBlock> {
 }
 
 @Composable
+private fun DetailGroupBubble(
+    messages: List<AgentMessage>,
+    kind: DetailGroupKind,
+    metrics: ConversationLayoutMetrics,
+    onOpenDiffReview: () -> Unit = {},
+) {
+    var expanded by remember(messages.firstOrNull()?.stableKey(), messages.lastOrNull()?.stableKey(), messages.size) { mutableStateOf(false) }
+    val running = messages.any { it.streaming }
+    val commandCount = messages.count { it.type == "command" }.takeIf { it > 0 } ?: messages.size
+    val fileCount = remember(messages) {
+        messages.sumOf { message ->
+            message.detailDisplay().files.size.coerceAtLeast(
+                if (message.type == "file_change") 1 else 0,
+            )
+        }.coerceAtLeast(messages.size)
+    }
+    val latestTitle = remember(messages) {
+        messages.lastOrNull()
+            ?.detailDisplay()
+            ?.title
+            .orEmpty()
+    }
+    val commandTitle = if (running) "正在运行 $commandCount 条命令" else "已运行 $commandCount 条命令"
+    val fileTitle = "$fileCount 个文件已更改"
+    val title = when (kind) {
+        DetailGroupKind.Command -> commandTitle
+        DetailGroupKind.FileChange -> fileTitle
+        DetailGroupKind.Mixed -> "$commandTitle · $fileTitle"
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start,
+    ) {
+        Box(Modifier.fillMaxWidth(metrics.detailBubbleWidth)) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                LightweightDetailHeader(
+                    title = title,
+                    subtitle = latestTitle,
+                    expanded = expanded,
+                    onToggleExpanded = { expanded = !expanded },
+                )
+                AnimatedVisibility(
+                    visible = expanded,
+                    enter = expandVertically(
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        expandFrom = Alignment.Top,
+                    ) + fadeIn(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
+                    exit = shrinkVertically(
+                        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                        shrinkTowards = Alignment.Top,
+                    ) + fadeOut(animationSpec = tween(durationMillis = 100, easing = FastOutSlowInEasing)),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 18.dp, end = 4.dp, bottom = 2.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        messages.forEachIndexed { index, message ->
+                            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.48f))
+                            DetailMessageCard(message, onOpenDiffReview)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun MessageBubble(
     message: AgentMessage,
     metrics: ConversationLayoutMetrics = conversationLayoutMetrics(DEFAULT_APP_LAYOUT),
+    relayUrl: String = "",
+    apiKey: String = "",
     onOpenPlan: () -> Unit = {},
     onOpenDiffReview: () -> Unit = {},
 ) {
@@ -609,42 +813,100 @@ private fun MessageBubble(
     val isPlainAssistant = !isUser && message.type != "plan" && !message.isDetailMessage()
     val isDetail = message.isDetailMessage()
     if (isDetail) {
-        DetailMessageCard(message, onOpenDiffReview)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Start,
+        ) {
+            Box(Modifier.fillMaxWidth(metrics.detailBubbleWidth)) {
+                DetailMessageCard(message, onOpenDiffReview)
+            }
+        }
         return
     }
     val container = when {
-        isUser -> MaterialTheme.colorScheme.surfaceContainerHigh
+        isUser -> MaterialTheme.colorScheme.surfaceContainerHighest
         message.type == "thinking" -> MaterialTheme.colorScheme.surfaceContainer
         message.type == "plan" -> MaterialTheme.colorScheme.surfaceContainer
         else -> Color.Transparent
+    }
+    val contentPadding = when {
+        isPlainAssistant -> PaddingValues(horizontal = 2.dp, vertical = 2.dp)
+        isUser -> PaddingValues(horizontal = metrics.bubblePadding, vertical = metrics.bubblePadding)
+        else -> PaddingValues(metrics.bubblePadding)
     }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
     ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(
-                when {
-                    isUser -> metrics.userBubbleWidth
-                    else -> metrics.assistantBubbleWidth
+        val clipboard = LocalClipboard.current
+        val clipboardScope = rememberCoroutineScope()
+        val strings = LocalAppStrings.current
+        var copyMenuExpanded by remember(message.stableKey(), message.text) { mutableStateOf(false) }
+        val bubbleWidth = when {
+            isUser -> metrics.userBubbleWidth
+            else -> metrics.assistantBubbleWidth
+        }
+        Box(Modifier.fillMaxWidth(bubbleWidth)) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (message.text.isBlank()) {
+                            Modifier
+                        } else {
+                            Modifier.pointerInput(message.text) {
+                                detectTapGestures(
+                                    onLongPress = { copyMenuExpanded = true },
+                                )
+                            }
+                        },
+                    ),
+                color = container,
+                border = if (isUser || message.type == "plan") {
+                    BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (isUser) 0.28f else 0.72f))
+                } else {
+                    null
                 },
-            ),
-            color = container,
-            border = if (isUser || message.type == "plan") {
-                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
-            } else {
-                null
-            },
-            shape = RoundedCornerShape(if (isPlainAssistant) 12.dp else metrics.bubbleShape),
-        ) {
-            Column(Modifier.padding(metrics.bubblePadding)) {
-                if (message.attachments.any { it.isPreviewImage() }) {
-                    AttachmentPreviewRow(message.attachments)
+                shape = RoundedCornerShape(if (isPlainAssistant) 12.dp else metrics.bubbleShape),
+            ) {
+                Column(
+                    modifier = Modifier.padding(contentPadding),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (message.attachments.any { it.isPreviewImage() }) {
+                        AttachmentPreviewRow(message.attachments)
+                    }
+                    when {
+                        message.type == "plan" -> PlanMessageCard(message, onOpenPlan)
+                        else -> MarkdownMessageContent(
+                            text = message.text.ifBlank { "..." },
+                            previewLongContent = isPlainAssistant,
+                            relayUrl = relayUrl,
+                            apiKey = apiKey,
+                        )
+                    }
                 }
-                when {
-                    message.type == "plan" -> PlanMessageCard(message, onOpenPlan)
-                    else -> MarkdownMessageContent(message.text.ifBlank { "..." }, previewLongContent = true)
-                }
+            }
+            DropdownMenu(
+                expanded = copyMenuExpanded,
+                onDismissRequest = { copyMenuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text(strings.copyContent) },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    },
+                    onClick = {
+                        copyMenuExpanded = false
+                        clipboardScope.launch {
+                            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("EasyCodex", message.text)))
+                        }
+                    },
+                )
             }
         }
     }
@@ -656,17 +918,17 @@ private fun AttachmentPreviewRow(attachments: List<AttachmentDraft>) {
     if (images.isEmpty()) return
     FlowRow(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         images.forEach { attachment ->
-            AttachmentImagePreview(attachment)
+            AttachmentImagePreview(attachment, wide = images.size == 1)
         }
     }
 }
 
 @Composable
-private fun AttachmentImagePreview(attachment: AttachmentDraft) {
+private fun AttachmentImagePreview(attachment: AttachmentDraft, wide: Boolean) {
     val context = LocalContext.current
     var image by remember(attachment.previewUri) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
     LaunchedEffect(attachment.previewUri) {
@@ -681,10 +943,18 @@ private fun AttachmentImagePreview(attachment: AttachmentDraft) {
             }
     }
     Surface(
-        shape = RoundedCornerShape(12.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.56f)),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.size(116.dp),
+        modifier = if (wide) {
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 132.dp, max = 220.dp)
+        } else {
+            Modifier
+                .width(148.dp)
+                .height(112.dp)
+        },
     ) {
         if (image != null) {
             Image(
@@ -764,37 +1034,12 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
             .padding(vertical = 2.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .clickable { expanded = !expanded },
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                detail.title,
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (detail.subtitle.isNotBlank()) {
-                Text(
-                    detail.subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Icon(
-                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                contentDescription = if (expanded) "收起细节" else "展开细节",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
-                modifier = Modifier.size(20.dp),
-            )
-        }
+        LightweightDetailHeader(
+            title = detail.title,
+            subtitle = detail.subtitle,
+            expanded = expanded,
+            onToggleExpanded = { expanded = !expanded },
+        )
         AnimatedVisibility(
             visible = expanded,
             enter = expandVertically(
@@ -807,9 +1052,7 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
             ) + fadeOut(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
         ) {
             Column(
-                modifier = Modifier.animateContentSize(
-                    animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
-                ),
+                modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -875,43 +1118,36 @@ private fun FileChangeCard(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceContainerLowest,
-            shape = RoundedCornerShape(8.dp),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.64f)),
-            modifier = Modifier.fillMaxWidth(),
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .clickable { onToggleExpanded() }
+                .padding(horizontal = 2.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onToggleExpanded() }
-                    .padding(horizontal = 9.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Icon(
-                    Icons.Default.Description,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(16.dp),
-                )
-                Text(
-                    "${detail.files.size.coerceAtLeast(1)} 个文件已更改",
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                FileChangeStatText(detail.additions, detail.deletions)
-                Icon(
-                    if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                    contentDescription = if (expanded) "收起细节" else "展开细节",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
+            Icon(
+                Icons.Default.Description,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.66f),
+                modifier = Modifier.size(15.dp),
+            )
+            Text(
+                "${detail.files.size.coerceAtLeast(1)} 个文件已更改",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            FileChangeStatText(detail.additions, detail.deletions)
+            Icon(
+                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                contentDescription = if (expanded) "收起细节" else "展开细节",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f),
+                modifier = Modifier.size(18.dp),
+            )
         }
         AnimatedVisibility(
             visible = expanded,
@@ -927,7 +1163,7 @@ private fun FileChangeCard(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 6.dp, end = 6.dp, bottom = 2.dp),
+                    .padding(start = 18.dp, end = 4.dp, bottom = 2.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1010,7 +1246,12 @@ private fun FileChangeStatText(additions: Int, deletions: Int) {
 }
 
 @Composable
-fun MarkdownMessageContent(text: String, previewLongContent: Boolean = false) {
+fun MarkdownMessageContent(
+    text: String,
+    previewLongContent: Boolean = false,
+    relayUrl: String = "",
+    apiKey: String = "",
+) {
     var expanded by remember(text) { mutableStateOf(false) }
     val isLong = previewLongContent && textNeedsPreview(text)
     val visibleText = remember(text, expanded, previewLongContent) {
@@ -1018,9 +1259,7 @@ fun MarkdownMessageContent(text: String, previewLongContent: Boolean = false) {
     }
     val blocks = remember(visibleText) { markdownBlocks(visibleText) }
     Column(
-        modifier = Modifier.animateContentSize(
-            animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
-        ),
+        modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         blocks.forEach { block ->
@@ -1028,7 +1267,12 @@ fun MarkdownMessageContent(text: String, previewLongContent: Boolean = false) {
                 MarkdownCodeBlock(block)
             } else {
                 block.text.lines().forEach { line ->
-                    MarkdownTextLine(line)
+                    val image = markdownImage(line)
+                    if (image != null) {
+                        MarkdownImage(image, relayUrl, apiKey)
+                    } else {
+                        MarkdownTextLine(line)
+                    }
                 }
             }
         }
@@ -1059,12 +1303,105 @@ private fun messagePreviewText(text: String): String {
     return "$charLimited\n..."
 }
 
+private data class MarkdownImageRef(
+    val alt: String,
+    val source: String,
+)
+
+private fun markdownImage(line: String): MarkdownImageRef? {
+    val match = Regex("^\\s*!\\[([^\\]]*)]\\(([^)]+)\\)\\s*$").find(line) ?: return null
+    val source = match.groupValues[2].trim().trim('"')
+    if (source.isBlank()) return null
+    return MarkdownImageRef(match.groupValues[1].trim(), source)
+}
+
+private fun String.isHttpImageSource(): Boolean {
+    return startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
+}
+
+private fun String.isDataImageSource(): Boolean {
+    return startsWith("data:image/", ignoreCase = true)
+}
+
+private fun String.isLocalImagePath(): Boolean {
+    return startsWith("file://", ignoreCase = true) ||
+        Regex("^[A-Za-z]:[\\\\/].+").containsMatchIn(this) ||
+        startsWith("\\\\") ||
+        startsWith("/")
+}
+
+private fun relayHttpBase(relayUrl: String): String {
+    return relayUrl.trim()
+        .replace(Regex("^ws://", RegexOption.IGNORE_CASE), "http://")
+        .replace(Regex("^wss://", RegexOption.IGNORE_CASE), "https://")
+        .trimEnd('/')
+}
+
+private fun imageLoadSource(source: String, relayUrl: String, apiKey: String): String {
+    val clean = source.trim()
+    if (!clean.isLocalImagePath() || relayUrl.isBlank() || apiKey.isBlank()) return clean
+    val localPath = if (clean.startsWith("file://", ignoreCase = true)) {
+        runCatching { Uri.parse(clean).path }.getOrNull().orEmpty().ifBlank { clean.removePrefix("file://") }
+    } else {
+        clean
+    }
+    return "${relayHttpBase(relayUrl)}/media/image?key=${URLEncoder.encode(apiKey, "UTF-8")}&path=${URLEncoder.encode(localPath, "UTF-8")}"
+}
+
+@Composable
+private fun MarkdownImage(image: MarkdownImageRef, relayUrl: String, apiKey: String) {
+    var bitmap by remember(image.source, relayUrl, apiKey) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    var failed by remember(image.source, relayUrl, apiKey) { mutableStateOf(false) }
+    val loadSource = remember(image.source, relayUrl, apiKey) { imageLoadSource(image.source, relayUrl, apiKey) }
+    LaunchedEffect(loadSource) {
+        failed = false
+        bitmap = withContext(Dispatchers.IO) {
+            runCatching {
+                when {
+                    loadSource.isDataImageSource() -> {
+                        val encoded = loadSource.substringAfter(',', "")
+                        val bytes = Base64.decode(encoded, Base64.DEFAULT)
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    }
+                    loadSource.isHttpImageSource() -> {
+                        URL(loadSource).openStream().use { stream -> BitmapFactory.decodeStream(stream) }
+                    }
+                    else -> null
+                }?.asImageBitmap()
+            }.getOrNull()
+        }
+        failed = bitmap == null
+    }
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 120.dp, max = 360.dp),
+    ) {
+        when {
+            bitmap != null -> Image(
+                bitmap = bitmap!!,
+                contentDescription = image.alt.ifBlank { "image" },
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            failed -> Text(
+                image.source,
+                modifier = Modifier.padding(12.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            else -> Box(Modifier.fillMaxWidth().height(160.dp), contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Description, contentDescription = image.alt.ifBlank { "image" }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
 @Composable
 private fun MarkdownCodeBlock(block: MarkdownBlock) {
-    val strings = LocalAppStrings.current
-    var expanded by remember(block.text) { mutableStateOf(false) }
-    val isLong = block.text.length > LONG_CODE_TEXT_LIMIT
-    val visibleText = if (isLong && !expanded) block.text.take(LONG_CODE_TEXT_LIMIT) else block.text
     val clipboard = LocalClipboard.current
     val clipboardScope = rememberCoroutineScope()
     fun copyText(text: String) {
@@ -1080,8 +1417,7 @@ private fun MarkdownCodeBlock(block: MarkdownBlock) {
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
         modifier = Modifier
             .fillMaxWidth()
-            .clip(codeBlockShape)
-            .animateContentSize(animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing)),
+            .clip(codeBlockShape),
     ) {
         Column {
             Row(
@@ -1111,7 +1447,7 @@ private fun MarkdownCodeBlock(block: MarkdownBlock) {
                     .padding(horizontal = 12.dp, vertical = 12.dp),
             ) {
                 Text(
-                    visibleText.ifBlank { "..." },
+                    block.text.ifBlank { "..." },
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 13.sp,
@@ -1119,16 +1455,6 @@ private fun MarkdownCodeBlock(block: MarkdownBlock) {
                     color = MaterialTheme.colorScheme.onSurface,
                     softWrap = false,
                 )
-            }
-            if (isLong) {
-                OutlinedButton(
-                    onClick = { expanded = !expanded },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 10.dp),
-                ) {
-                    Text(if (expanded) strings.collapse else strings.expandMore)
-                }
             }
         }
     }

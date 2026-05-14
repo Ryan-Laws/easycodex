@@ -10,6 +10,8 @@ In EasyCodex, an agent is a `codex app-server` child process managed by the agen
 Mobile app <-> Agent Relay <-> codex app-server process <-> Codex thread
 ```
 
+EasyCodex also exposes mobile Codex CLI consoles. The phone still does not run Codex itself; it opens one or more console windows, while the relay runs one `codex exec` process per active window in an allowed desktop workspace and streams stdout/stderr back over the authenticated WebSocket.
+
 Each running EasyCodex agent has:
 
 - an internal EasyCodex agent id
@@ -73,6 +75,9 @@ Agent actions:
 | `stop_agent` | Stop an agent process. |
 | `update_agent_model` | Change an agent model. |
 | `update_agent_config` | Change model, cwd, approval policy, system prompt, service tier, or reasoning effort. |
+| `cli_start` | Prepare a mobile CLI window for an allowed workspace and return Codex CLI metadata. |
+| `cli_run` | Start one `codex exec` run for a CLI `windowId` and stream `cli/*` events. |
+| `cli_stop` | Stop the active CLI run for a CLI `windowId` if one is running. |
 
 Codex metadata actions:
 
