@@ -18,6 +18,10 @@ const configPath = path.join(configDir, 'config.json');
 const desktopConfigPath = path.join(configDir, 'desktop-relay.json');
 const runtimeRelayDir = path.join(configDir, 'desktop-relay-runtime');
 const supportedLanguages = ['system', 'zh', 'zh-Hant', 'en', 'ja', 'ko', 'es', 'fr', 'de'];
+const supportedUpdateChannels = ['stable', 'beta'];
+const UPDATE_REQUEST_TIMEOUT_MS = 15000;
+const UPDATE_DOWNLOAD_TIMEOUT_MS = 30000;
+const UPDATE_NETWORK_RETRIES = 3;
 const iconPath = app.isPackaged ? path.join(process.resourcesPath, 'icon.png') : path.join(__dirname, 'assets', 'icon.png');
 const windowIconPath = process.platform === 'win32'
   ? (app.isPackaged ? path.join(process.resourcesPath, 'icon.ico') : path.join(__dirname, '..', 'build', 'icon.ico'))
@@ -374,6 +378,7 @@ function loadDesktopConfig() {
     codexPath: typeof config.codexPath === 'string' && config.codexPath.trim() ? config.codexPath.trim() : '',
     languageMode: config.languageMode === 'manual' ? 'manual' : 'follow-phone',
     language: supportedLanguages.includes(config.language) ? config.language : 'system',
+    updateChannel: supportedUpdateChannels.includes(config.updateChannel) ? config.updateChannel : 'stable',
     guideSeen: config.guideSeen === true,
   };
 }
@@ -390,19 +395,39 @@ function normalizeVersion(value) {
   return String(value || '').trim().replace(/^v/i, '');
 }
 
-function versionParts(value) {
-  return normalizeVersion(value)
-    .split(/[.+-]/)
-    .map((part) => Number.parseInt(part, 10))
-    .map((part) => (Number.isFinite(part) ? part : 0));
+function splitVersion(value) {
+  const [main, prerelease = ''] = normalizeVersion(value).split('-', 2);
+  return {
+    numbers: main.split('.').map((part) => Number.parseInt(part, 10)).map((part) => (Number.isFinite(part) ? part : 0)),
+    prerelease: prerelease.split(/[.+]/).filter(Boolean),
+  };
 }
 
 function compareVersions(a, b) {
-  const left = versionParts(a);
-  const right = versionParts(b);
-  const length = Math.max(left.length, right.length, 3);
+  const left = splitVersion(a);
+  const right = splitVersion(b);
+  const length = Math.max(left.numbers.length, right.numbers.length, 3);
   for (let i = 0; i < length; i += 1) {
-    const diff = (left[i] || 0) - (right[i] || 0);
+    const diff = (left.numbers[i] || 0) - (right.numbers[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  if (left.prerelease.length === 0 && right.prerelease.length > 0) return 1;
+  if (left.prerelease.length > 0 && right.prerelease.length === 0) return -1;
+  const prereleaseLength = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let i = 0; i < prereleaseLength; i += 1) {
+    const leftPart = left.prerelease[i];
+    const rightPart = right.prerelease[i];
+    if (leftPart === rightPart) continue;
+    if (leftPart == null) return -1;
+    if (rightPart == null) return 1;
+    const leftNumber = Number.parseInt(leftPart, 10);
+    const rightNumber = Number.parseInt(rightPart, 10);
+    const leftNumeric = String(leftNumber) === leftPart;
+    const rightNumeric = String(rightNumber) === rightPart;
+    if (leftNumeric && rightNumeric) return leftNumber - rightNumber;
+    if (leftNumeric) return -1;
+    if (rightNumeric) return 1;
+    const diff = leftPart.localeCompare(rightPart);
     if (diff !== 0) return diff;
   }
   return 0;
@@ -415,7 +440,7 @@ function requestJson(url, redirects = 0) {
         accept: 'application/vnd.github+json',
         'user-agent': `EasyCodex-Desktop-Relay/${app.getVersion()}`,
       },
-      timeout: 10000,
+      timeout: UPDATE_REQUEST_TIMEOUT_MS,
     }, (res) => {
       const location = res.headers.location;
       if (res.statusCode >= 300 && res.statusCode < 400 && location && redirects < 5) {
@@ -445,7 +470,27 @@ function requestJson(url, redirects = 0) {
   });
 }
 
-function serializeRelease(release) {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withNetworkRetry(label, task, attempts = UPDATE_NETWORK_RETRIES) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await task();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts) break;
+      const waitMs = 700 * attempt;
+      appendLog(`${label} failed (${error.message || error}); retrying in ${waitMs}ms...`);
+      await delay(waitMs);
+    }
+  }
+  throw lastError;
+}
+
+function serializeRelease(release, channel) {
   const currentVersion = app.getVersion();
   const latestVersion = normalizeVersion(release?.tag_name || '');
   const assets = Array.isArray(release?.assets)
@@ -458,6 +503,7 @@ function serializeRelease(release) {
       }))
     : [];
   return {
+    channel,
     currentVersion,
     latestVersion: latestVersion || null,
     updateAvailable: Boolean(latestVersion && compareVersions(latestVersion, currentVersion) > 0),
@@ -469,15 +515,27 @@ function serializeRelease(release) {
   };
 }
 
+function selectReleaseForChannel(payload, channel) {
+  if (!Array.isArray(payload)) return payload;
+  if (channel === 'beta') return payload.find((release) => release?.prerelease === true) || null;
+  return payload.find((release) => release?.prerelease !== true) || null;
+}
+
 async function checkForUpdates(reason = 'manual') {
   updateState = { ...updateState, checking: true, error: '' };
   await broadcastState();
   try {
-    const release = await requestJson(`https://api.github.com/repos/${updateRepository()}/releases/latest`);
-    updateState = { checking: false, applying: false, info: serializeRelease(release), error: '' };
+    const channel = loadDesktopConfig().updateChannel;
+    const endpoint = channel === 'beta' ? 'releases?per_page=30' : 'releases/latest';
+    const release = selectReleaseForChannel(
+      await withNetworkRetry('Update check', () => requestJson(`https://api.github.com/repos/${updateRepository()}/${endpoint}`)),
+      channel,
+    );
+    if (!release) throw new Error(channel === 'beta' ? 'No beta release is available.' : 'No stable release is available.');
+    updateState = { checking: false, applying: false, info: serializeRelease(release, channel), error: '' };
     appendLog(updateState.info.updateAvailable
-      ? `Update available: ${updateState.info.currentVersion} -> ${updateState.info.latestVersion}`
-      : `EasyCodex Relay is up to date (${updateState.info.currentVersion}).`);
+      ? `Update available (${channel}): ${updateState.info.currentVersion} -> ${updateState.info.latestVersion}`
+      : `EasyCodex Relay is up to date on ${channel} (${updateState.info.currentVersion}).`);
   } catch (error) {
     updateState = { checking: false, applying: false, info: updateState.info, error: error.message || String(error) };
     appendLog(`Update check failed: ${updateState.error}`);
@@ -512,14 +570,18 @@ function selectUpdateAsset(info) {
     .sort((a, b) => b.score - a.score)[0]?.asset || null;
 }
 
-function downloadFile(url, targetPath, redirects = 0) {
+function downloadFileOnce(url, targetPath, redirects = 0) {
   return new Promise((resolve, reject) => {
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-    const req = https.get(url, { headers: { 'user-agent': `EasyCodex-Desktop-Relay/${app.getVersion()}` } }, (res) => {
+    const tempPath = `${targetPath}.download`;
+    const req = https.get(url, {
+      headers: { 'user-agent': `EasyCodex-Desktop-Relay/${app.getVersion()}` },
+      timeout: UPDATE_DOWNLOAD_TIMEOUT_MS,
+    }, (res) => {
       const location = res.headers.location;
       if (res.statusCode >= 300 && res.statusCode < 400 && location && redirects < 5) {
         res.resume();
-        downloadFile(location, targetPath, redirects + 1).then(resolve, reject);
+        downloadFileOnce(location, targetPath, redirects + 1).then(resolve, reject);
         return;
       }
       if (res.statusCode !== 200) {
@@ -527,13 +589,25 @@ function downloadFile(url, targetPath, redirects = 0) {
         reject(new Error(`Download failed with HTTP ${res.statusCode}`));
         return;
       }
-      const stream = fs.createWriteStream(targetPath);
+      const stream = fs.createWriteStream(tempPath);
       res.pipe(stream);
-      stream.on('finish', () => stream.close(() => resolve(targetPath)));
+      stream.on('finish', () => stream.close(() => {
+        fs.rename(tempPath, targetPath, (error) => {
+          if (error) reject(error);
+          else resolve(targetPath);
+        });
+      }));
       stream.on('error', reject);
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error('Download timed out.'));
     });
     req.on('error', reject);
   });
+}
+
+async function downloadFile(url, targetPath) {
+  return withNetworkRetry('Update download', () => downloadFileOnce(url, targetPath));
 }
 
 function runSimpleCommand(args, cwd, onDone) {
@@ -808,6 +882,8 @@ async function appState() {
     health: mergeRelayEventHealth(lastHealth),
     languageMode: config.languageMode,
     language: config.language,
+    updateChannel: config.updateChannel,
+    supportedUpdateChannels,
     effectiveLanguage: effectiveLanguage(config, mergeRelayEventHealth(lastHealth)),
     supportedLanguages,
     qrDataUrl: await QRCode.toDataURL(details.connectUrl, {
@@ -1062,6 +1138,7 @@ async function startRelay(input) {
     CODEX_CWD: workspace,
     CODEX_EXECUTABLE: codex.path,
     EASYCODEX_NO_TERMINAL_QR: '1',
+    EASYCODEX_UPDATE_CHANNEL: loadDesktopConfig().updateChannel,
   };
   try {
     relayProcess = spawn(command, args, {
@@ -1261,6 +1338,10 @@ ipcMain.handle('save-config', async (_event, input) => {
   }
   if (input?.languageMode === 'manual' || input?.languageMode === 'follow-phone') next.languageMode = input.languageMode;
   if (supportedLanguages.includes(input?.language)) next.language = input.language;
+  if (supportedUpdateChannels.includes(input?.updateChannel)) {
+    next.updateChannel = input.updateChannel;
+    updateState = { checking: false, applying: false, info: null, error: '' };
+  }
   saveDesktopConfig(next);
   return appState();
 });

@@ -772,7 +772,8 @@ dd {
   color: var(--danger);
 }
 
-input {
+input,
+select {
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--line);

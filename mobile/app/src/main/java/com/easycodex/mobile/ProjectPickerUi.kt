@@ -30,14 +30,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -95,10 +99,12 @@ private data class DrawerAgentItem(
 @Composable
 fun AgentDrawer(
     agents: List<Agent>,
+    projectOptions: List<String>,
     activeAgentId: String?,
     onHome: () -> Unit,
     onSelect: (String) -> Unit,
     onCreateInProject: (String) -> Unit,
+    onDeleteAgent: (String) -> Unit,
 ) {
     val strings = LocalAppStrings.current
     var query by remember { mutableStateOf("") }
@@ -132,10 +138,19 @@ fun AgentDrawer(
             }
         }
     }
-    val groupedAgents = remember(visibleAgents) {
-        visibleAgents
+    val groupedAgents = remember(visibleAgents, projectOptions, normalizedQuery) {
+        val visibleProjectOptions = projectOptions
+            .mapNotNull(::cleanNullablePath)
+            .filter { projectPath ->
+                normalizedQuery.isBlank() || projectNameFromCwd(projectPath).lowercase(Locale.ROOT).contains(normalizedQuery) ||
+                    projectPath.lowercase(Locale.ROOT).contains(normalizedQuery)
+            }
+        val groupedTasks = visibleAgents
             .sortedByDescending { it.updatedAt }
             .groupBy { it.projectPath }
+        (visibleProjectOptions + groupedTasks.keys)
+            .distinctBy(::normalizePathKey)
+            .associateWith { groupedTasks[it].orEmpty() }
     }
     val projectPaths = groupedAgents.keys.toList()
     var collapsedProjectPaths by remember { mutableStateOf(emptySet<String>()) }
@@ -202,7 +217,7 @@ fun AgentDrawer(
                 .fillMaxWidth()
                 .padding(horizontal = 14.dp, vertical = 6.dp),
         )
-        if (agents.isEmpty()) {
+        if (agents.isEmpty() && projectPaths.isEmpty()) {
             Text(
                 strings.noAgents,
                 modifier = Modifier.padding(24.dp),
@@ -210,7 +225,7 @@ fun AgentDrawer(
             )
             return@ModalDrawerSheet
         }
-        if (visibleAgents.isEmpty()) {
+        if (visibleAgents.isEmpty() && projectPaths.isEmpty()) {
             Text(
                 strings.noMatchingTasks,
                 modifier = Modifier.padding(24.dp),
@@ -288,6 +303,7 @@ fun AgentDrawer(
                                     agent = agent,
                                     selected = agent.id == activeAgentId,
                                     onClick = { onSelect(agent.id) },
+                                    onDelete = { onDeleteAgent(agent.id) },
                                 )
                             }
                         }
@@ -302,7 +318,12 @@ fun AgentDrawer(
 }
 
 @Composable
-private fun DrawerAgentProjectRow(agent: DrawerAgentItem, selected: Boolean, onClick: () -> Unit) {
+private fun DrawerAgentProjectRow(
+    agent: DrawerAgentItem,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
     val strings = LocalAppStrings.current
     val rowColor = if (selected) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent
     Surface(
@@ -365,6 +386,10 @@ private fun DrawerAgentProjectRow(agent: DrawerAgentItem, selected: Boolean, onC
                     maxLines = 1,
                 )
             }
+            AgentTaskActions(
+                isBusy = agent.isBusy(),
+                onDelete = onDelete,
+            )
         }
     }
 }
@@ -441,7 +466,12 @@ fun ProjectHeader(
 }
 
 @Composable
-fun AgentProjectRow(agent: Agent, selected: Boolean, onClick: () -> Unit) {
+fun AgentProjectRow(
+    agent: Agent,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onDelete: (() -> Unit)? = null,
+) {
     val strings = LocalAppStrings.current
     val rowColor = if (selected) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent
     Surface(
@@ -504,7 +534,77 @@ fun AgentProjectRow(agent: Agent, selected: Boolean, onClick: () -> Unit) {
                     maxLines = 1,
                 )
             }
+            if (onDelete != null) {
+                AgentTaskActions(
+                    isBusy = agent.isBusy(),
+                    onDelete = onDelete,
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun AgentTaskActions(
+    isBusy: Boolean,
+    onDelete: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    var menuExpanded by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    IconButton(
+        onClick = { menuExpanded = true },
+        modifier = Modifier.size(36.dp),
+    ) {
+        Icon(
+            Icons.Default.MoreVert,
+            contentDescription = strings.taskActionsContentDescription,
+            modifier = Modifier.size(20.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    DropdownMenu(
+        expanded = menuExpanded,
+        onDismissRequest = { menuExpanded = false },
+    ) {
+        DropdownMenuItem(
+            text = { Text(strings.deleteTask) },
+            leadingIcon = {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            },
+            onClick = {
+                menuExpanded = false
+                showDeleteConfirm = true
+            },
+        )
+    }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text(strings.deleteTaskTitle) },
+            text = { Text(if (isBusy) strings.deleteRunningTaskBody else strings.deleteTaskBody) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteConfirm = false
+                        onDelete()
+                    },
+                ) {
+                    Text(strings.confirmDeleteTask, color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text(strings.cancel)
+                }
+            },
+        )
     }
 }
 
@@ -522,6 +622,7 @@ fun HomeTaskScreen(
     onReasoningEffortChange: (String) -> Unit,
     onServiceTierChange: (String) -> Unit,
     onOpenAgent: (String) -> Unit,
+    onDeleteAgent: (String) -> Unit,
     onBrowseDirectories: (String?, (DirectoryListing?, String?) -> Unit) -> Unit,
 ) {
     val strings = LocalAppStrings.current
@@ -632,6 +733,7 @@ fun HomeTaskScreen(
                     agent = agent,
                     selected = false,
                     onClick = { onOpenAgent(agent.id) },
+                    onDelete = { onDeleteAgent(agent.id) },
                 )
             }
         }

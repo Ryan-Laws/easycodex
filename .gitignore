@@ -28,6 +28,7 @@ sessions/
 threads/
 conversations/
 transcripts/
+desktop-relay-artifacts-*/
 *.session.json
 *.thread.json
 *.conversation.json
@@ -36,6 +37,8 @@ transcripts/
 # Android
 .gradle/
 mobile/.gradle/
+mobile/.gradle-home/
+mobile/.android-home/
 mobile/build/
 mobile/app/build/
 mobile/local.properties

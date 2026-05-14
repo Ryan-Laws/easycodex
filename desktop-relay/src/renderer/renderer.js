@@ -52,6 +52,9 @@ const dictionaries = {
     phoneConnected: (count) => `Phone connected (${count})`,
     checkUpdate: 'Check',
     quickUpdate: 'Update',
+    updateChannel: 'Update channel',
+    stableChannel: 'Stable',
+    betaChannel: 'Beta',
     updateChecking: 'Checking for updates',
     updateAvailable: 'Update available',
     updateReady: (current, latest) => `Version ${latest} is available. Current version: ${current}.`,
@@ -100,6 +103,9 @@ const dictionaries = {
     phoneConnected: (count) => `手机已连接（${count}）`,
     checkUpdate: '检查',
     quickUpdate: '更新',
+    updateChannel: '更新通道',
+    stableChannel: '正式版',
+    betaChannel: 'Beta 版',
     updateChecking: '正在检测更新',
     updateAvailable: '发现新版本',
     updateReady: (current, latest) => `可更新到 ${latest}，当前版本 ${current}。`,
@@ -148,6 +154,9 @@ const dictionaries = {
     phoneConnected: (count) => `手機已連線（${count}）`,
     checkUpdate: '檢查',
     quickUpdate: '更新',
+    updateChannel: '更新通道',
+    stableChannel: '正式版',
+    betaChannel: 'Beta 版',
     updateChecking: '正在檢測更新',
     updateAvailable: '發現新版本',
     updateReady: (current, latest) => `可更新到 ${latest}，目前版本 ${current}。`,
@@ -338,6 +347,7 @@ const elements = {
   relayPath: document.getElementById('relayPath'),
   languageSelect: document.getElementById('languageSelect'),
   portInput: document.getElementById('portInput'),
+  updateChannelSelect: document.getElementById('updateChannelSelect'),
   portStatus: document.getElementById('portStatus'),
   workspaceInput: document.getElementById('workspaceInput'),
   codexPathInput: document.getElementById('codexPathInput'),
@@ -941,6 +951,7 @@ function setControlsBusy(isBusy) {
   elements.stopButton.disabled = isBusy || !currentState?.relayRunning;
   elements.refreshKeyButton.disabled = isBusy || currentState?.relayRunning;
   elements.portInput.disabled = isBusy || currentState?.relayRunning;
+  elements.updateChannelSelect.disabled = isBusy;
   elements.browseButton.disabled = isBusy;
   elements.codexPathInput.disabled = isBusy || currentState?.relayRunning;
   elements.browseCodexButton.disabled = isBusy || currentState?.relayRunning;
@@ -998,6 +1009,7 @@ function renderState(state) {
   renderLanguageOptions(state);
   elements.relayPath.textContent = state.relayDir;
   elements.portInput.value = state.port;
+  elements.updateChannelSelect.value = state.updateChannel || 'stable';
   elements.workspaceInput.value = state.workspace;
   elements.codexPathInput.value = state.codexPath || state.codex?.path || '';
   elements.relayUrlInput.value = state.relayUrl;
@@ -1134,6 +1146,12 @@ elements.portInput.addEventListener('input', () => {
       elements.startButton.disabled = true;
     }
   }, 250);
+});
+
+elements.updateChannelSelect.addEventListener('change', () => {
+  runAction(elements.updateChannelSelect, () => window.easyCodexRelay.saveConfig({
+    updateChannel: elements.updateChannelSelect.value,
+  }));
 });
 
 elements.copyConnectionButton.addEventListener('click', () => {

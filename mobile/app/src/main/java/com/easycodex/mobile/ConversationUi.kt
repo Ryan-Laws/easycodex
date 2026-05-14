@@ -47,6 +47,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -155,49 +156,50 @@ fun Conversation(
     }
     val filteredMessages by remember(agent.messages, filter) {
         derivedStateOf {
+        val visibleMessages = agent.messages.filter { it.isPrimaryConversationVisible() }
         when (filter) {
-            ConversationFilter.All -> agent.messages
-            ConversationFilter.Results -> agent.messages.filter { message ->
-                message.role == "user" || message.type in setOf("agent", "plan", "status")
+            ConversationFilter.All -> visibleMessages
+            ConversationFilter.Results -> visibleMessages.filter { message ->
+                message.type in setOf("agent", "plan", "status")
             }
-            ConversationFilter.Changes -> agent.messages.filter { it.type == "file_change" }
+            ConversationFilter.Changes -> visibleMessages.filter { it.type == "file_change" }
         }
         }
     }
     val filteredMessageKeys = remember(filteredMessages) { filteredMessages.uniqueLazyKeys() }
     val lastListIndex = filteredMessages.size
+    val lastMessageIndex = (lastListIndex - 1).coerceAtLeast(0)
     val lastMessage = filteredMessages.lastOrNull()
     val lastMessageStreamMarker = lastMessage?.let { "${it.stableKey()}:${it.text.length}:${it.streaming}" }
     val isAtBottom by remember(listState, lastListIndex) {
         derivedStateOf {
             val visibleItems = listState.layoutInfo.visibleItemsInfo
-            visibleItems.isEmpty() || (visibleItems.lastOrNull()?.index ?: 0) >= lastListIndex
+            visibleItems.isEmpty() || (visibleItems.lastOrNull()?.index ?: 0) >= lastMessageIndex
         }
     }
     val shouldFollowOutput by remember(listState, lastListIndex) {
         derivedStateOf {
             val visibleItems = listState.layoutInfo.visibleItemsInfo
-            visibleItems.isEmpty() || (visibleItems.lastOrNull()?.index ?: 0) >= (lastListIndex - 1).coerceAtLeast(0)
+            visibleItems.isEmpty() || (visibleItems.lastOrNull()?.index ?: 0) >= lastMessageIndex
         }
     }
     LaunchedEffect(agent.id, filter, lastListIndex) {
         if (lastListIndex > 0 && !initializedAtBottom) {
-            listState.animateScrollToItem(lastListIndex)
+            listState.animateScrollToItem(lastMessageIndex)
             initializedAtBottom = true
         }
     }
     LaunchedEffect(agent.id, filter, lastListIndex, lastMessageStreamMarker) {
-        if (lastListIndex > 0 && shouldFollowOutput) listState.animateScrollToItem(lastListIndex)
+        if (lastListIndex > 0 && shouldFollowOutput) listState.animateScrollToItem(lastMessageIndex)
     }
 
     Box(Modifier.fillMaxSize()) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(metrics.itemSpacing),
-            contentPadding = metrics.listPadding,
-        ) {
-            item {
+        Column(Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
                 ConversationStatusHeader(
                     agent = agent,
                     filter = filter,
@@ -232,6 +234,14 @@ fun Conversation(
                     Text(strings.noMessagesForFilter, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(metrics.itemSpacing),
+                contentPadding = metrics.listPadding,
+            ) {
             itemsIndexed(
                 filteredMessages,
                 key = { index, message -> filteredMessageKeys.getOrNull(index) ?: "${message.stableKey()}#$index" },
@@ -242,6 +252,7 @@ fun Conversation(
                     onOpenPlan = { onOpenPlan(message) },
                     onOpenDiffReview = onOpenDiffReview,
                 )
+            }
             }
         }
 
@@ -256,7 +267,7 @@ fun Conversation(
             FloatingActionButton(
                 onClick = {
                     scrollScope.launch {
-                        listState.animateScrollToItem(lastListIndex)
+                        listState.animateScrollToItem(lastMessageIndex)
                     }
                 },
                 shape = CircleShape,
@@ -448,12 +459,20 @@ private data class DetailDisplay(
     val additions: Int = 0,
     val deletions: Int = 0,
     val files: List<String> = emptyList(),
+    val fileEntries: List<FileChangeEntry> = emptyList(),
 )
 
 private data class FileChangeStats(
     val files: List<String>,
     val additions: Int,
     val deletions: Int,
+    val entries: List<FileChangeEntry>,
+)
+
+private data class FileChangeEntry(
+    val path: String,
+    val additions: Int = 0,
+    val deletions: Int = 0,
 )
 
 private fun AgentMessage.isDetailMessage(): Boolean {
@@ -463,6 +482,24 @@ private fun AgentMessage.isDetailMessage(): Boolean {
         type == "sub_agent" ||
         type == "tool" ||
         type == "tool_call"
+}
+
+private fun AgentMessage.isInternalStatusMessage(): Boolean {
+    if (type != "status") return false
+    val normalizedText = text.trimStart()
+    return itemId?.startsWith("tokens_") == true ||
+        itemId?.startsWith("queued_followups_") == true ||
+        normalizedText.startsWith("Token usage") ||
+        normalizedText == "Token usage updated." ||
+        normalizedText.startsWith("已排队 ") && normalizedText.contains("个后续任务")
+}
+
+private fun AgentMessage.isPrimaryConversationVisible(): Boolean {
+    if (role == "user" || type == "user") return false
+    if (text.isBlank()) return false
+    if (text.trim() == "已加载项目上下文。") return false
+    if (isInternalStatusMessage()) return false
+    return true
 }
 
 private fun messageTypeLabel(type: String): String {
@@ -510,6 +547,7 @@ private fun commandDisplay(raw: String, isOutput: Boolean): DetailDisplay {
 
             command.isBlank() &&
                 trimmed.isNotBlank() &&
+                trimmed !in setOf("运行命令", "命令已完成", "正在运行命令。", "命令执行完成。", "命令已完成，输出已省略。") &&
                 !trimmed.startsWith("cwd:", ignoreCase = true) &&
                 !trimmed.startsWith("status:", ignoreCase = true) &&
                 !trimmed.startsWith("exit:", ignoreCase = true) &&
@@ -521,9 +559,9 @@ private fun commandDisplay(raw: String, isOutput: Boolean): DetailDisplay {
     val title = when {
         isOutput && duration.isNotBlank() -> "已处理 $duration"
         isOutput -> status.ifBlank { "已处理" }
-        command.isNotBlank() -> command
+        command.isNotBlank() -> "已运行 $command"
         else -> "命令"
-    }
+    }.compactDetailTitle()
     val subtitleParts = if (isOutput) {
         listOf(command, exit.takeIf { it.isNotBlank() }?.let { "exit $it" }.orEmpty(), status)
     } else {
@@ -545,30 +583,43 @@ private fun fileChangeDisplay(raw: String): DetailDisplay {
         paths.size == 1 -> paths.first().substringAfterLast('\\').substringAfterLast('/')
         paths.size > 1 -> "${paths.size} 个文件改动"
         else -> "文件改动"
-    }
+    }.compactDetailTitle()
     val subtitle = listOf(
         status.ifBlank { "已处理" },
         if (stats.additions + stats.deletions > 0) "+${stats.additions} -${stats.deletions}" else "",
         paths.firstOrNull().orEmpty(),
     ).filter { it.isNotBlank() }.joinToString(" · ")
-    return DetailDisplay("文件改动", title, subtitle, raw, stats.additions, stats.deletions, paths)
+    return DetailDisplay("文件改动", title, subtitle, raw, stats.additions, stats.deletions, paths, stats.entries)
 }
 
 private fun fileChangeStats(raw: String): FileChangeStats {
     val paths = linkedSetOf<String>()
+    val entryStats = linkedMapOf<String, FileChangeEntry>()
     var additions = 0
     var deletions = 0
+    val rawLooksLikeDiff = raw.lineSequence().any { line ->
+        line.startsWith("diff --git ") || line.startsWith("@@")
+    }
     raw.lineSequence().forEach { line ->
         val trimmed = line.trim()
+        val summaryEntry = parseFileSummaryLine(trimmed)
+        if (summaryEntry != null) {
+            paths.add(summaryEntry.path)
+            entryStats[summaryEntry.path] = summaryEntry
+            return@forEach
+        }
         when {
-            line.startsWith("+") && !line.startsWith("+++") -> additions += 1
-            line.startsWith("-") && !line.startsWith("---") -> deletions += 1
+            rawLooksLikeDiff && line.startsWith("+") && !line.startsWith("+++") -> additions += 1
+            rawLooksLikeDiff && line.startsWith("-") && !line.startsWith("---") -> deletions += 1
         }
         val diffPath = Regex("^diff --git a/(.+?) b/(.+)$").find(trimmed)?.groupValues?.getOrNull(2)
         val newPath = Regex("^\\+\\+\\+ b/(.+)$").find(trimmed)?.groupValues?.getOrNull(1)
         val oldPath = Regex("^--- a/(.+)$").find(trimmed)?.groupValues?.getOrNull(1)
         val plainPath = trimmed.takeIf { value ->
             value.isNotBlank() &&
+                value != "文件改动" &&
+                value != "Files:" &&
+                !value.startsWith("Files:", ignoreCase = true) &&
                 !value.startsWith("@@") &&
                 !value.startsWith("+") &&
                 !value.startsWith("-") &&
@@ -581,7 +632,36 @@ private fun fileChangeStats(raw: String): FileChangeStats {
             .filter { it.isNotBlank() && it != "/dev/null" }
             .forEach { paths.add(it) }
     }
-    return FileChangeStats(paths.toList(), additions, deletions)
+    val entries = if (entryStats.isNotEmpty()) {
+        entryStats.values.toList()
+    } else {
+        paths.map { FileChangeEntry(it) }
+    }
+    val summaryAdditions = entries.sumOf { it.additions }
+    val summaryDeletions = entries.sumOf { it.deletions }
+    return FileChangeStats(
+        files = paths.toList(),
+        additions = if (summaryAdditions > 0 || summaryDeletions > 0) summaryAdditions else additions,
+        deletions = if (summaryAdditions > 0 || summaryDeletions > 0) summaryDeletions else deletions,
+        entries = entries,
+    )
+}
+
+private fun parseFileSummaryLine(trimmed: String): FileChangeEntry? {
+    val bullet = Regex("^[-•]\\s+(.+?)(?:\\s+\\+(\\d+)\\s+-(\\d+))?$").find(trimmed) ?: return null
+    val path = bullet.groupValues.getOrNull(1)?.trim().orEmpty()
+    if (path.isBlank() || (!path.contains("/") && !path.contains("\\") && !path.contains("."))) return null
+    return FileChangeEntry(
+        path = path.removePrefix("a/").removePrefix("b/"),
+        additions = bullet.groupValues.getOrNull(2)?.toIntOrNull() ?: 0,
+        deletions = bullet.groupValues.getOrNull(3)?.toIntOrNull() ?: 0,
+    )
+}
+
+private fun String.compactDetailTitle(limit: Int = 96): String {
+    val singleLine = trim().replace(Regex("\\s+"), " ")
+    if (singleLine.length <= limit) return singleLine
+    return singleLine.take(limit).trimEnd() + "..."
 }
 
 private fun formatDurationToken(raw: String): String {
@@ -638,11 +718,15 @@ private fun MessageBubble(
 ) {
     val isUser = message.role == "user"
     val isPlainAssistant = !isUser && message.type != "plan" && !message.isDetailMessage()
+    val isDetail = message.isDetailMessage()
+    if (isDetail) {
+        DetailMessageCard(message, onOpenDiffReview)
+        return
+    }
     val container = when {
         isUser -> MaterialTheme.colorScheme.surfaceContainerHigh
         message.type == "thinking" -> MaterialTheme.colorScheme.surfaceContainer
         message.type == "plan" -> MaterialTheme.colorScheme.surfaceContainer
-        message.isDetailMessage() -> MaterialTheme.colorScheme.surface
         else -> Color.Transparent
     }
     Row(
@@ -650,9 +734,14 @@ private fun MessageBubble(
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
     ) {
         Surface(
-            modifier = Modifier.fillMaxWidth(if (isUser) metrics.userBubbleWidth else metrics.assistantBubbleWidth),
+            modifier = Modifier.fillMaxWidth(
+                when {
+                    isUser -> metrics.userBubbleWidth
+                    else -> metrics.assistantBubbleWidth
+                },
+            ),
             color = container,
-            border = if (isUser || message.isDetailMessage() || message.type == "plan") {
+            border = if (isUser || message.type == "plan") {
                 BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
             } else {
                 null
@@ -662,7 +751,6 @@ private fun MessageBubble(
             Column(Modifier.padding(metrics.bubblePadding)) {
                 when {
                     message.type == "plan" -> PlanMessageCard(message, onOpenPlan)
-                    message.isDetailMessage() -> DetailMessageCard(message, onOpenDiffReview)
                     else -> MarkdownMessageContent(message.text.ifBlank { "..." }, previewLongContent = true)
                 }
             }
@@ -714,7 +802,28 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
             clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("EasyCodex", text)))
         }
     }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    if (message.type == "file_change") {
+        FileChangeCard(
+            detail = detail,
+            expanded = expanded,
+            textExpanded = textExpanded,
+            body = body,
+            visibleBody = visibleBody,
+            bodyIsLong = bodyIsLong,
+            onToggleExpanded = { expanded = !expanded },
+            onToggleTextExpanded = { textExpanded = !textExpanded },
+            onCopyText = { copyText(detail.body.ifBlank { message.text }) },
+            onOpenDiffReview = onOpenDiffReview,
+        )
+        return
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -722,38 +831,28 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
                 .clickable { expanded = !expanded },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
-                if (message.type == "file_change") {
-                    FileChangeSummary(detail)
-                    Spacer(Modifier.height(6.dp))
-                } else {
-                    Text(
-                        detail.label,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+            Text(
+                detail.title,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (detail.subtitle.isNotBlank()) {
                 Text(
-                    detail.title,
-                    style = if (message.type == "file_change") MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = if (message.type == "file_change") 2 else 1,
+                    detail.subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (detail.subtitle.isNotBlank()) {
-                    Text(
-                        detail.subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
             }
             Icon(
                 if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                 contentDescription = if (expanded) "收起细节" else "展开细节",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                modifier = Modifier.size(20.dp),
             )
         }
         AnimatedVisibility(
@@ -823,43 +922,160 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
 }
 
 @Composable
-private fun FileChangeSummary(detail: DetailDisplay) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+private fun FileChangeCard(
+    detail: DetailDisplay,
+    expanded: Boolean,
+    textExpanded: Boolean,
+    body: String,
+    visibleBody: String,
+    bodyIsLong: Boolean,
+    onToggleExpanded: () -> Unit,
+    onToggleTextExpanded: () -> Unit,
+    onCopyText: () -> Unit,
+    onOpenDiffReview: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Text(
-            detail.label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (detail.additions + detail.deletions > 0) {
-            Surface(
-                color = MaterialTheme.colorScheme.primaryContainer,
-                shape = RoundedCornerShape(999.dp),
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggleExpanded() }
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "+${detail.additions}",
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    fontWeight = FontWeight.SemiBold,
+                    "${detail.files.size.coerceAtLeast(1)} 个文件已更改",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                FileChangeStatText(detail.additions, detail.deletions)
+                Spacer(Modifier.width(6.dp))
+                Icon(
+                    if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = if (expanded) "收起细节" else "展开细节",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
                 )
             }
-            Surface(
-                color = MaterialTheme.colorScheme.errorContainer,
-                shape = RoundedCornerShape(999.dp),
-            ) {
+            val entries = detail.fileEntries.ifEmpty { detail.files.map { FileChangeEntry(it) } }
+            entries.take(8).forEach { entry ->
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
+                FileChangeRow(entry)
+            }
+            if (entries.size > 8) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
                 Text(
-                    "-${detail.deletions}",
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    fontWeight = FontWeight.SemiBold,
+                    "另有 ${entries.size - 8} 个文件",
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(
+                    animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                    expandFrom = Alignment.Top,
+                ) + fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
+                exit = shrinkVertically(
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                    shrinkTowards = Alignment.Top,
+                ) + fadeOut(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        AssistChip(
+                            onClick = onOpenDiffReview,
+                            leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            label = { Text(strings.viewFullDiff) },
+                        )
+                        AssistChip(
+                            onClick = onCopyText,
+                            leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            label = { Text(if (bodyIsLong) strings.copyFullText else strings.copyContent) },
+                        )
+                    }
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            visibleBody,
+                            modifier = Modifier
+                                .heightIn(max = 260.dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(10.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    if (bodyIsLong) {
+                        OutlinedButton(
+                            onClick = onToggleTextExpanded,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(if (textExpanded) strings.collapse else strings.expandMore)
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+@Composable
+private fun FileChangeRow(entry: FileChangeEntry) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            entry.path,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        FileChangeStatText(entry.additions, entry.deletions)
+    }
+}
+
+@Composable
+private fun FileChangeStatText(additions: Int, deletions: Int) {
+    if (additions <= 0 && deletions <= 0) return
+    Text(
+        buildAnnotatedString {
+            withStyle(SpanStyle(color = Color(0xFF159447))) {
+                append("+$additions")
+            }
+            append(" ")
+            withStyle(SpanStyle(color = Color(0xFFE11D2E))) {
+                append("-$deletions")
+            }
+        },
+        style = MaterialTheme.typography.bodyMedium,
+        fontWeight = FontWeight.Medium,
+        maxLines = 1,
+    )
 }
 
 @Composable
