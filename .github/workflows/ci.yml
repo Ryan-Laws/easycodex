@@ -132,8 +132,7 @@ jobs:
           emulator-boot-timeout: 600
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: |
-            bash <<'BASH'
-            set -euo pipefail
+            set -eu
             adb install -r mobile/app/build/outputs/apk/release/EasyCodex.Mobile.ci-smoke.apk
             adb logcat -c
             adb shell am start -W -n com.easycodex.mobile/.MainActivity
@@ -143,4 +142,3 @@ jobs:
             if grep -E "FATAL EXCEPTION|AndroidRuntime|VerifyError|Force finishing activity com.easycodex.mobile" "$RUNNER_TEMP/easycodex-logcat.txt"; then
               exit 1
             fi
-            BASH
