@@ -60,6 +60,17 @@ Local Android signing is only for emergency validation and uses `scripts/sign-an
 
 Do not commit keystores, passwords, `.release-secrets`, or generated signed APKs.
 
+## Local Android Smoke
+
+When Android Studio or a local emulator is available, validate the signed APK before sharing it:
+
+```powershell
+.\scripts\sign-android-release.ps1 -SkipBuild
+.\scripts\smoke-android-release.ps1
+```
+
+The smoke script installs the signed APK, grants expected runtime permissions, launches `MainActivity`, waits for the process to remain alive, and fails on fatal startup logs, verifier errors, or low-memory process death.
+
 ## Recovery Rule
 
 If a released Android APK fails to install over an older build with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, the old app was signed by a different key. That should not happen for public releases after this pipeline is in place. Investigate the signing certificate before publishing another APK.
