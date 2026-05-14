@@ -1,6 +1,8 @@
 package com.easycodex.mobile
 
 import android.content.ClipData
+import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -12,6 +14,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,8 +31,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,13 +44,10 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -62,12 +64,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -76,6 +87,8 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 private data class ConversationLayoutMetrics(
@@ -87,17 +100,21 @@ private data class ConversationLayoutMetrics(
     val assistantBubbleWidth: Float,
 )
 
-private enum class ConversationFilter {
-    All,
-    Results,
-    Changes,
-}
-
 private const val LONG_DETAIL_TEXT_LIMIT = 6_000
 private const val LONG_MESSAGE_TEXT_LIMIT = 1_600
 private const val MESSAGE_PREVIEW_TEXT_LIMIT = 900
 private const val MESSAGE_PREVIEW_LINE_LIMIT = 14
 private const val LONG_CODE_TEXT_LIMIT = 1_200
+
+private fun AttachmentDraft.isPreviewImage(): Boolean {
+    return !previewUri.isNullOrBlank() && mimeType?.startsWith("image/") == true
+}
+
+private suspend fun LazyListState.scrollToBottomAnchor(bottomIndex: Int) {
+    scrollToItem(bottomIndex)
+    withFrameNanos { }
+    if (canScrollForward) scrollToItem(bottomIndex)
+}
 
 private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMetrics {
     return when (layoutMode) {
@@ -135,18 +152,15 @@ fun Conversation(
     agent: Agent?,
     layoutMode: String = DEFAULT_APP_LAYOUT,
     emptyMessage: String = "创建或选择一个智能体开始。",
-    notificationLevelState: NotificationLevelState? = null,
-    onInterrupt: () -> Unit = {},
     onOpenDiffReview: () -> Unit = {},
-    onNotificationLevelChange: (String, String) -> Unit = { _, _ -> },
     onOpenPlan: (AgentMessage) -> Unit = {},
 ) {
     val metrics = conversationLayoutMetrics(layoutMode)
     val strings = LocalAppStrings.current
     val listState = rememberLazyListState()
     val scrollScope = rememberCoroutineScope()
-    var filter by remember(agent?.id) { mutableStateOf(ConversationFilter.All) }
-    var initializedAtBottom by remember(agent?.id, filter) { mutableStateOf(false) }
+    var initializedAtBottom by remember(agent?.id) { mutableStateOf(false) }
+    var followOutput by remember(agent?.id) { mutableStateOf(true) }
 
     if (agent == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -154,110 +168,76 @@ fun Conversation(
         }
         return
     }
-    val filteredMessages by remember(agent.messages, filter) {
+    val visibleMessages by remember(agent.messages) {
         derivedStateOf {
-        val visibleMessages = agent.messages.filter { it.isPrimaryConversationVisible() }
-        when (filter) {
-            ConversationFilter.All -> visibleMessages
-            ConversationFilter.Results -> visibleMessages.filter { message ->
-                message.type in setOf("agent", "plan", "status")
+            agent.messages.filter { it.isPrimaryConversationVisible() }
+        }
+    }
+    val visibleMessageKeys = remember(visibleMessages) { visibleMessages.uniqueLazyKeys() }
+    val bottomIndex = visibleMessages.size
+    val bottomAnchorCount = visibleMessages.size + 1
+    val lastMessage = visibleMessages.lastOrNull()
+    val outputRevision = "${agent.updatedAt}:${visibleMessages.size}:${lastMessage?.stableKey().orEmpty()}:${lastMessage?.text?.length ?: 0}:${lastMessage?.text?.hashCode() ?: 0}:${lastMessage?.streaming == true}"
+    val isAtBottom by remember(listState, bottomAnchorCount) {
+        derivedStateOf {
+            !listState.canScrollForward
+        }
+    }
+    val userScrollConnection = remember(agent.id) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y > 0f) followOutput = false
+                return Offset.Zero
             }
-            ConversationFilter.Changes -> visibleMessages.filter { it.type == "file_change" }
-        }
         }
     }
-    val filteredMessageKeys = remember(filteredMessages) { filteredMessages.uniqueLazyKeys() }
-    val lastListIndex = filteredMessages.size
-    val lastMessageIndex = (lastListIndex - 1).coerceAtLeast(0)
-    val lastMessage = filteredMessages.lastOrNull()
-    val lastMessageStreamMarker = lastMessage?.let { "${it.stableKey()}:${it.text.length}:${it.streaming}" }
-    val isAtBottom by remember(listState, lastListIndex) {
-        derivedStateOf {
-            val visibleItems = listState.layoutInfo.visibleItemsInfo
-            visibleItems.isEmpty() || (visibleItems.lastOrNull()?.index ?: 0) >= lastMessageIndex
-        }
-    }
-    val shouldFollowOutput by remember(listState, lastListIndex) {
-        derivedStateOf {
-            val visibleItems = listState.layoutInfo.visibleItemsInfo
-            visibleItems.isEmpty() || (visibleItems.lastOrNull()?.index ?: 0) >= lastMessageIndex
-        }
-    }
-    LaunchedEffect(agent.id, filter, lastListIndex) {
-        if (lastListIndex > 0 && !initializedAtBottom) {
-            listState.animateScrollToItem(lastMessageIndex)
+    LaunchedEffect(agent.id, bottomAnchorCount) {
+        if (visibleMessages.isNotEmpty() && !initializedAtBottom) {
+            listState.scrollToBottomAnchor(bottomIndex)
             initializedAtBottom = true
         }
     }
-    LaunchedEffect(agent.id, filter, lastListIndex, lastMessageStreamMarker) {
-        if (lastListIndex > 0 && shouldFollowOutput) listState.animateScrollToItem(lastMessageIndex)
+    LaunchedEffect(agent.id) {
+        snapshotFlow { !listState.canScrollForward }
+            .distinctUntilChanged()
+            .collect { atBottom ->
+                if (atBottom) followOutput = true
+            }
+    }
+    LaunchedEffect(agent.id, outputRevision, followOutput) {
+        if (visibleMessages.isNotEmpty() && followOutput) listState.scrollToBottomAnchor(bottomIndex)
     }
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-            ) {
-                ConversationStatusHeader(
-                    agent = agent,
-                    filter = filter,
-                    notificationLevelState = notificationLevelState,
-                    onFilterChange = { filter = it },
-                    onInterrupt = onInterrupt,
-                    onOpenDiffReview = onOpenDiffReview,
-                    onNotificationLevelChange = onNotificationLevelChange,
-                )
-                AnimatedVisibility(
-                    visible = !agent.activity.isNullOrBlank(),
-                    enter = expandVertically(
-                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                        expandFrom = Alignment.Top,
-                    ) + fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
-                    exit = shrinkVertically(
-                        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-                        shrinkTowards = Alignment.Top,
-                    ) + fadeOut(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
-                ) {
-                    Column {
-                        Spacer(Modifier.height(8.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(8.dp))
-                            Text(agent.activity.orEmpty(), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-                if (filter != ConversationFilter.All && filteredMessages.isEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(strings.noMessagesForFilter, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
             LazyColumn(
                 state = listState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
+                    .weight(1f)
+                    .nestedScroll(userScrollConnection),
                 verticalArrangement = Arrangement.spacedBy(metrics.itemSpacing),
                 contentPadding = metrics.listPadding,
             ) {
-            itemsIndexed(
-                filteredMessages,
-                key = { index, message -> filteredMessageKeys.getOrNull(index) ?: "${message.stableKey()}#$index" },
-            ) { _, message ->
-                MessageBubble(
-                    message = message,
-                    metrics = metrics,
-                    onOpenPlan = { onOpenPlan(message) },
-                    onOpenDiffReview = onOpenDiffReview,
-                )
-            }
+                itemsIndexed(
+                    visibleMessages,
+                    key = { index, message -> visibleMessageKeys.getOrNull(index) ?: "${message.stableKey()}#$index" },
+                ) { _, message ->
+                    MessageBubble(
+                        message = message,
+                        metrics = metrics,
+                        onOpenPlan = { onOpenPlan(message) },
+                        onOpenDiffReview = onOpenDiffReview,
+                    )
+                }
+                item(key = "conversation-bottom-anchor") {
+                    Spacer(Modifier.height(1.dp))
+                }
             }
         }
 
         AnimatedVisibility(
-            visible = lastListIndex > 0 && !isAtBottom,
+            visible = visibleMessages.isNotEmpty() && !isAtBottom,
             enter = fadeIn() + scaleIn(),
             exit = fadeOut() + scaleOut(),
             modifier = Modifier
@@ -266,8 +246,9 @@ fun Conversation(
         ) {
             FloatingActionButton(
                 onClick = {
+                    followOutput = true
                     scrollScope.launch {
-                        listState.animateScrollToItem(lastMessageIndex)
+                        listState.scrollToBottomAnchor(bottomIndex)
                     }
                 },
                 shape = CircleShape,
@@ -279,138 +260,6 @@ fun Conversation(
             }
         }
     }
-}
-
-@Composable
-private fun ConversationStatusHeader(
-    agent: Agent,
-    filter: ConversationFilter,
-    notificationLevelState: NotificationLevelState?,
-    onFilterChange: (ConversationFilter) -> Unit,
-    onInterrupt: () -> Unit,
-    onOpenDiffReview: () -> Unit,
-    onNotificationLevelChange: (String, String) -> Unit,
-) {
-    val strings = LocalAppStrings.current
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = when {
-                        agent.isBusy() -> MaterialTheme.colorScheme.primary
-                        agent.status.equals("error", ignoreCase = true) -> MaterialTheme.colorScheme.error
-                        else -> MaterialTheme.colorScheme.outlineVariant
-                    },
-                    modifier = Modifier.size(10.dp),
-                ) {}
-                Column(Modifier.weight(1f)) {
-                    Text(agent.name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(agent.model, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                Surface(
-                    shape = RoundedCornerShape(999.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainer,
-                ) {
-                    Text(
-                        agentStatusLabel(agent),
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                }
-            }
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                ConversationFilterChip(strings.filterAllMessages, ConversationFilter.All, filter, onFilterChange)
-                ConversationFilterChip(strings.filterResults, ConversationFilter.Results, filter, onFilterChange)
-                ConversationFilterChip(strings.filterChanges, ConversationFilter.Changes, filter, onFilterChange)
-                if (agent.messages.any { it.type == "file_change" }) {
-                    AssistChip(
-                        onClick = onOpenDiffReview,
-                        leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                        label = { Text(strings.reviewChanges) },
-                    )
-                }
-                if (agent.isBusy()) {
-                    AssistChip(
-                        onClick = onInterrupt,
-                        leadingIcon = { Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                        label = { Text(strings.interrupt) },
-                    )
-                }
-            }
-            NotificationLevelRow(
-                agentId = agent.id,
-                state = notificationLevelState,
-                onLevelChange = onNotificationLevelChange,
-            )
-        }
-    }
-}
-
-@Composable
-private fun NotificationLevelRow(
-    agentId: String,
-    state: NotificationLevelState?,
-    onLevelChange: (String, String) -> Unit,
-) {
-    val strings = LocalAppStrings.current
-    val activeLevel = state?.takeIf { it.agentId == agentId }?.level ?: "all"
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            strings.notificationLevel,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        listOf(
-            "all" to strings.all,
-            "errors" to strings.errorsOnly,
-            "muted" to strings.muted,
-        ).forEach { (level, label) ->
-            FilterChip(
-                selected = activeLevel == level,
-                enabled = state?.loading != true,
-                onClick = { onLevelChange(agentId, level) },
-                label = { Text(label) },
-            )
-        }
-        if (state?.loading == true) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-        }
-    }
-    state?.error?.takeIf { it.isNotBlank() }?.let { error ->
-        Text(
-            error,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error,
-        )
-    }
-}
-
-@Composable
-private fun ConversationFilterChip(
-    label: String,
-    value: ConversationFilter,
-    selected: ConversationFilter,
-    onSelect: (ConversationFilter) -> Unit,
-) {
-    FilterChip(
-        selected = value == selected,
-        onClick = { onSelect(value) },
-        label = { Text(label) },
-    )
 }
 
 fun agentStatusLabel(agent: Agent): String {
@@ -592,6 +441,20 @@ private fun fileChangeDisplay(raw: String): DetailDisplay {
     return DetailDisplay("文件改动", title, subtitle, raw, stats.additions, stats.deletions, paths, stats.entries)
 }
 
+private fun cleanFileChangeBody(raw: String): String {
+    val noiseLine = Regex(
+        pattern = "^(success\\s+)?(update|updated|modify|modified|edit|edited)\\b.*\\b(following\\s+files?|files?)\\b.*$",
+        option = RegexOption.IGNORE_CASE,
+    )
+    return raw.lineSequence()
+        .filterNot { line ->
+            val trimmed = line.trim()
+            trimmed.equals("Files:", ignoreCase = true) || noiseLine.matches(trimmed)
+        }
+        .joinToString("\n")
+        .trim()
+}
+
 private fun fileChangeStats(raw: String): FileChangeStats {
     val paths = linkedSetOf<String>()
     val entryStats = linkedMapOf<String, FileChangeEntry>()
@@ -605,8 +468,21 @@ private fun fileChangeStats(raw: String): FileChangeStats {
         val summaryEntry = parseFileSummaryLine(trimmed)
         if (summaryEntry != null) {
             paths.add(summaryEntry.path)
-            entryStats[summaryEntry.path] = summaryEntry
+            val existing = entryStats[summaryEntry.path]
+            entryStats[summaryEntry.path] = if (existing == null) {
+                summaryEntry
+            } else {
+                existing.copy(
+                    additions = existing.additions + summaryEntry.additions,
+                    deletions = existing.deletions + summaryEntry.deletions,
+                )
+            }
             return@forEach
+        }
+        val inlineStats = parseInlineFileChangeStats(trimmed)
+        if (inlineStats != null) {
+            additions += inlineStats.first
+            deletions += inlineStats.second
         }
         when {
             rawLooksLikeDiff && line.startsWith("+") && !line.startsWith("+++") -> additions += 1
@@ -648,14 +524,27 @@ private fun fileChangeStats(raw: String): FileChangeStats {
 }
 
 private fun parseFileSummaryLine(trimmed: String): FileChangeEntry? {
-    val bullet = Regex("^[-•]\\s+(.+?)(?:\\s+\\+(\\d+)\\s+-(\\d+))?$").find(trimmed) ?: return null
-    val path = bullet.groupValues.getOrNull(1)?.trim().orEmpty()
+    val bullet = Regex(
+        "^[-•]\\s+(.+?)(?:\\s+\\(?\\+(\\d+)\\s+-(\\d+)\\)?)?$",
+    ).find(trimmed)
+    val edited = Regex(
+        "^(?:已编辑|已修改|修改|edited|modified|updated)\\s+(.+?)(?:\\s+\\(?\\+(\\d+)\\s+-(\\d+)\\)?)?$",
+        RegexOption.IGNORE_CASE,
+    ).find(trimmed)
+    val match = bullet ?: edited ?: return null
+    val path = match.groupValues.getOrNull(1)?.trim().orEmpty()
     if (path.isBlank() || (!path.contains("/") && !path.contains("\\") && !path.contains("."))) return null
     return FileChangeEntry(
         path = path.removePrefix("a/").removePrefix("b/"),
-        additions = bullet.groupValues.getOrNull(2)?.toIntOrNull() ?: 0,
-        deletions = bullet.groupValues.getOrNull(3)?.toIntOrNull() ?: 0,
+        additions = match.groupValues.getOrNull(2)?.toIntOrNull() ?: 0,
+        deletions = match.groupValues.getOrNull(3)?.toIntOrNull() ?: 0,
     )
+}
+
+private fun parseInlineFileChangeStats(trimmed: String): Pair<Int, Int>? {
+    val match = Regex("\\+\\s*(\\d+)\\s+-\\s*(\\d+)").find(trimmed) ?: return null
+    return (match.groupValues.getOrNull(1)?.toIntOrNull() ?: 0) to
+        (match.groupValues.getOrNull(2)?.toIntOrNull() ?: 0)
 }
 
 private fun String.compactDetailTitle(limit: Int = 96): String {
@@ -749,10 +638,64 @@ private fun MessageBubble(
             shape = RoundedCornerShape(if (isPlainAssistant) 12.dp else metrics.bubbleShape),
         ) {
             Column(Modifier.padding(metrics.bubblePadding)) {
+                if (message.attachments.any { it.isPreviewImage() }) {
+                    AttachmentPreviewRow(message.attachments)
+                }
                 when {
                     message.type == "plan" -> PlanMessageCard(message, onOpenPlan)
                     else -> MarkdownMessageContent(message.text.ifBlank { "..." }, previewLongContent = true)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AttachmentPreviewRow(attachments: List<AttachmentDraft>) {
+    val images = attachments.filter { it.isPreviewImage() }
+    if (images.isEmpty()) return
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        images.forEach { attachment ->
+            AttachmentImagePreview(attachment)
+        }
+    }
+}
+
+@Composable
+private fun AttachmentImagePreview(attachment: AttachmentDraft) {
+    val context = LocalContext.current
+    var image by remember(attachment.previewUri) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    LaunchedEffect(attachment.previewUri) {
+        image = attachment.previewUri
+            ?.let { uri -> runCatching { Uri.parse(uri) }.getOrNull() }
+            ?.let { uri ->
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { stream ->
+                        BitmapFactory.decodeStream(stream)?.asImageBitmap()
+                    }
+                }.getOrNull()
+            }
+    }
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = Modifier.size(116.dp),
+    ) {
+        if (image != null) {
+            Image(
+                bitmap = image!!,
+                contentDescription = attachment.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Description, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -792,7 +735,9 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
     var expanded by remember(message.stableKey()) { mutableStateOf(false) }
     var textExpanded by remember(message.stableKey()) { mutableStateOf(false) }
     val detail = remember(message.text, message.type) { message.detailDisplay() }
-    val body = detail.body.ifBlank { "..." }
+    val body = remember(detail.body, message.type) {
+        if (message.type == "file_change") cleanFileChangeBody(detail.body) else detail.body
+    }.ifBlank { "..." }
     val bodyIsLong = body.length > LONG_DETAIL_TEXT_LIMIT
     val visibleBody = if (bodyIsLong && !textExpanded) body.take(LONG_DETAIL_TEXT_LIMIT) else body
     val clipboard = LocalClipboard.current
@@ -806,13 +751,8 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
         FileChangeCard(
             detail = detail,
             expanded = expanded,
-            textExpanded = textExpanded,
-            body = body,
-            visibleBody = visibleBody,
-            bodyIsLong = bodyIsLong,
             onToggleExpanded = { expanded = !expanded },
-            onToggleTextExpanded = { textExpanded = !textExpanded },
-            onCopyText = { copyText(detail.body.ifBlank { message.text }) },
+            onCopyText = { copyText(body.ifBlank { message.text }) },
             onOpenDiffReview = onOpenDiffReview,
         )
         return
@@ -925,111 +865,102 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
 private fun FileChangeCard(
     detail: DetailDisplay,
     expanded: Boolean,
-    textExpanded: Boolean,
-    body: String,
-    visibleBody: String,
-    bodyIsLong: Boolean,
     onToggleExpanded: () -> Unit,
-    onToggleTextExpanded: () -> Unit,
     onCopyText: () -> Unit,
     onOpenDiffReview: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(12.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+    val entries = detail.fileEntries.ifEmpty { detail.files.map { FileChangeEntry(it) } }
+    Column(
         modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Column {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerLowest,
+            shape = RoundedCornerShape(8.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.64f)),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { onToggleExpanded() }
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                    .padding(horizontal = 9.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+                Icon(
+                    Icons.Default.Description,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
+                )
                 Text(
                     "${detail.files.size.coerceAtLeast(1)} 个文件已更改",
                     modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 FileChangeStatText(detail.additions, detail.deletions)
-                Spacer(Modifier.width(6.dp))
                 Icon(
                     if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                     contentDescription = if (expanded) "收起细节" else "展开细节",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp),
+                    modifier = Modifier.size(18.dp),
                 )
             }
-            val entries = detail.fileEntries.ifEmpty { detail.files.map { FileChangeEntry(it) } }
-            entries.take(8).forEach { entry ->
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
-                FileChangeRow(entry)
-            }
-            if (entries.size > 8) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
-                Text(
-                    "另有 ${entries.size - 8} 个文件",
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            AnimatedVisibility(
-                visible = expanded,
-                enter = expandVertically(
-                    animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
-                    expandFrom = Alignment.Top,
-                ) + fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
-                exit = shrinkVertically(
-                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                    shrinkTowards = Alignment.Top,
-                ) + fadeOut(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
+        }
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                expandFrom = Alignment.Top,
+            ) + fadeIn(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
+            exit = shrinkVertically(
+                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                shrinkTowards = Alignment.Top,
+            ) + fadeOut(animationSpec = tween(durationMillis = 100, easing = FastOutSlowInEasing)),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 6.dp, end = 6.dp, bottom = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    AssistChip(
+                        onClick = onOpenDiffReview,
+                        leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        label = { Text(strings.viewFullDiff) },
+                    )
+                    AssistChip(
+                        onClick = onCopyText,
+                        leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        label = { Text(strings.copyContent) },
+                    )
+                }
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.56f)),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        AssistChip(
-                            onClick = onOpenDiffReview,
-                            leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                            label = { Text(strings.viewFullDiff) },
-                        )
-                        AssistChip(
-                            onClick = onCopyText,
-                            leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                            label = { Text(if (bodyIsLong) strings.copyFullText else strings.copyContent) },
-                        )
-                    }
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceContainerLowest,
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            visibleBody,
-                            modifier = Modifier
-                                .heightIn(max = 260.dp)
-                                .verticalScroll(rememberScrollState())
-                                .padding(10.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                    }
-                    if (bodyIsLong) {
-                        OutlinedButton(
-                            onClick = onToggleTextExpanded,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(if (textExpanded) strings.collapse else strings.expandMore)
+                    Column {
+                        entries.take(4).forEachIndexed { index, entry ->
+                            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.56f))
+                            FileChangeRow(entry)
+                        }
+                        if (entries.size > 4) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.56f))
+                            Text(
+                                "另有 ${entries.size - 4} 个文件",
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
@@ -1043,14 +974,14 @@ private fun FileChangeRow(entry: FileChangeEntry) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 11.dp),
+            .padding(horizontal = 9.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Text(
             entry.path,
             modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1072,7 +1003,7 @@ private fun FileChangeStatText(additions: Int, deletions: Int) {
                 append("-$deletions")
             }
         },
-        style = MaterialTheme.typography.bodyMedium,
+        style = MaterialTheme.typography.bodySmall,
         fontWeight = FontWeight.Medium,
         maxLines = 1,
     )
@@ -1141,34 +1072,60 @@ private fun MarkdownCodeBlock(block: MarkdownBlock) {
             clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("EasyCodex", text)))
         }
     }
+    val codeScroll = rememberScrollState()
+    val codeBlockShape = RoundedCornerShape(10.dp)
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = codeBlockShape,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
         modifier = Modifier
             .fillMaxWidth()
+            .clip(codeBlockShape)
             .animateContentSize(animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing)),
     ) {
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, top = 6.dp, end = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
                     block.language ?: "code",
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 IconButton(onClick = { copyText(block.text) }, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.ContentCopy, contentDescription = "复制代码", modifier = Modifier.size(18.dp))
                 }
             }
-            Text(
-                visibleText.ifBlank { "..." },
-                style = MaterialTheme.typography.bodyMedium,
-                fontFamily = FontFamily.Monospace,
-            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.56f))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(codeScroll)
+                    .padding(horizontal = 12.dp, vertical = 12.dp),
+            ) {
+                Text(
+                    visibleText.ifBlank { "..." },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    softWrap = false,
+                )
+            }
             if (isLong) {
                 OutlinedButton(
                     onClick = { expanded = !expanded },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
                 ) {
                     Text(if (expanded) strings.collapse else strings.expandMore)
                 }

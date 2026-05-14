@@ -64,6 +64,7 @@ const BG_BLUE = '\x1b[44m';
 const WHITE = '\x1b[37m';
 const AGENTS_STATE_PATH = path.join(os.homedir(), '.easycodex', 'agents.json');
 const CODEX_GLOBAL_STATE_PATH = path.join(os.homedir(), '.codex', '.codex-global-state.json');
+const CODEX_STATE_DB_PATH = path.join(os.homedir(), '.codex', 'state_5.sqlite');
 const FILE_SNAPSHOT_LIMIT_BYTES = 512 * 1024;
 const FILE_DIFF_LIMIT_CHARS = 16000;
 const MOBILE_MESSAGE_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_MESSAGE_TEXT_LIMIT || 20000);
@@ -75,6 +76,14 @@ const PLAN_MODE_PREFIX = '请先进入计划模式处理下面的需求。';
 const PLAN_MODE_DEMAND_MARKER = '需求：';
 const CONTEXT_PLACEHOLDER = '已加载项目上下文。';
 const DEFAULT_SERVICE_TIER = 'default';
+
+interface CodexSessionRuntimeState {
+  running: boolean;
+  updatedAt: number;
+  activityLabel: string | null;
+}
+
+const sessionRuntimeCache = new Map<string, { size: number; mtimeMs: number; state: CodexSessionRuntimeState | null }>();
 
 function cleanExecutablePath(value: unknown): string {
   return String(value || '').trim().replace(/^"+|"+$/g, '');
@@ -130,6 +139,7 @@ export interface CodexThreadSummary {
   createdAt: number;
   updatedAt: number;
   status: string;
+  activityLabel?: string | null;
   queuedFollowUpCount: number;
   queuedFollowUps: QueuedFollowUpSummary[];
 }
@@ -322,15 +332,77 @@ const HIDDEN_THREAD_STATUSES = new Set([
   'trashed',
 ]);
 
+const ACTIVE_THREAD_STATUSES = new Set([
+  'initializing',
+  'resuming',
+  'working',
+  'running',
+  'active',
+  'in_progress',
+  'inprogress',
+  'in-progress',
+  'pending',
+  'processing',
+  'queued',
+  'starting',
+  'streaming',
+]);
+
 function isHiddenThreadStatus(status: string): boolean {
   return HIDDEN_THREAD_STATUSES.has(status.trim().toLowerCase());
+}
+
+function isActiveThreadStatus(status: string): boolean {
+  return ACTIVE_THREAD_STATUSES.has(status.trim().toLowerCase());
+}
+
+type SqliteRow = Record<string, unknown>;
+type SqliteStatement = { all: () => SqliteRow[] };
+type SqliteDatabase = { prepare: (sql: string) => SqliteStatement; close: () => void };
+type SqliteDatabaseConstructor = new (filename: string, options?: { readOnly?: boolean }) => SqliteDatabase;
+
+let warnedCodexStateDbReadFailure = false;
+
+function nodeSqliteDatabase(): SqliteDatabaseConstructor | null {
+  try {
+    const nodeRequire = eval('require') as (moduleName: string) => unknown;
+    const sqlite = nodeRequire('node:sqlite') as { DatabaseSync?: SqliteDatabaseConstructor };
+    return typeof sqlite?.DatabaseSync === 'function' ? sqlite.DatabaseSync : null;
+  } catch {
+    return null;
+  }
+}
+
+function codexArchivedThreadIds(): Set<string> {
+  if (!fs.existsSync(CODEX_STATE_DB_PATH)) return new Set();
+  const DatabaseSync = nodeSqliteDatabase();
+  if (!DatabaseSync) return new Set();
+
+  let db: SqliteDatabase | null = null;
+  try {
+    db = new DatabaseSync(CODEX_STATE_DB_PATH, { readOnly: true });
+    const rows = db.prepare('select id from threads where archived = 1 or archived_at is not null').all();
+    return new Set(rows.map((row) => usableString(row.id)).filter(Boolean));
+  } catch (err) {
+    if (!warnedCodexStateDbReadFailure) {
+      warnedCodexStateDbReadFailure = true;
+      console.warn('[threads] Failed to read Codex archived thread state:', err);
+    }
+    return new Set();
+  } finally {
+    try { db?.close(); } catch {}
+  }
 }
 
 function booleanField(value: Record<string, unknown>, keys: string[]): boolean {
   return keys.some((key) => value[key] === true);
 }
 
-function shouldShowCodexThread(thread: Record<string, unknown>): boolean {
+function shouldShowCodexThread(thread: Record<string, unknown>, archivedThreadIds: Set<string> = new Set()): boolean {
+  const id = usableString(thread.id);
+  if (id && archivedThreadIds.has(id)) {
+    return false;
+  }
   if (booleanField(thread, ['archived', 'deleted', 'removed', 'trashed', 'isArchived', 'isDeleted'])) {
     return false;
   }
@@ -845,8 +917,6 @@ function inferThreadActivity(messages: AgentInfo['messages']): string | null {
       return '正在思考中，推理内容持续返回';
     case 'command':
       return '正在运行命令，等待执行结果';
-    case 'command_output':
-      return '正在读取命令输出';
     case 'file_change':
       return '正在修改文件，改动内容持续更新';
     case 'plan':
@@ -856,12 +926,115 @@ function inferThreadActivity(messages: AgentInfo['messages']): string | null {
   }
 }
 
-function inferThreadStatus(status: string, messages: AgentInfo['messages']): string {
-  const normalized = status.trim().toLowerCase();
-  if (['working', 'running', 'active', 'in_progress', 'inprogress', 'streaming'].includes(normalized)) return status;
-  const lastAgentMessage = [...messages].reverse().find((message) => message.role === 'agent');
-  const recentActivity = lastAgentMessage && Date.now() - lastAgentMessage.timestamp < 10 * 60 * 1000;
-  return recentActivity && inferThreadActivity(messages) ? 'working' : status;
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function sessionEventPayload(record: Record<string, unknown>): Record<string, unknown> {
+  const direct = objectRecord(record.payload);
+  if (direct) return direct;
+  const msg = objectRecord(record.msg);
+  return objectRecord(msg?.payload) || {};
+}
+
+function sessionActivityLabel(topType: string, payload: Record<string, unknown>): string | null {
+  const payloadType = usableString(payload.type);
+  if (topType === 'event_msg') {
+    switch (payloadType) {
+      case 'agent_message':
+        return '正在生成回复';
+      case 'exec_command_begin':
+      case 'mcp_tool_call_begin':
+        return '正在运行命令，等待执行结果';
+      case 'exec_command_end':
+      case 'mcp_tool_call_end':
+        return '正在读取命令输出';
+      case 'patch_apply_begin':
+        return '正在修改文件，改动内容持续更新';
+      case 'patch_apply_end':
+        return '正在整理文件改动';
+      default:
+        return null;
+    }
+  }
+  if (topType === 'response_item') {
+    switch (payloadType) {
+      case 'reasoning':
+        return '正在思考中，整理执行步骤';
+      case 'function_call':
+        return '正在运行命令，等待执行结果';
+      case 'function_call_output':
+        return '正在读取命令输出';
+      case 'message':
+        return '正在生成回复';
+      default:
+        return null;
+    }
+  }
+  return null;
+}
+
+function readCodexSessionRuntimeState(sessionPath: unknown): CodexSessionRuntimeState | null {
+  const cleanPath = usablePathString(sessionPath);
+  if (!cleanPath) return null;
+  try {
+    const stat = fs.statSync(cleanPath);
+    if (!stat.isFile()) return null;
+    const cached = sessionRuntimeCache.get(cleanPath);
+    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.state;
+
+    const lines = fs.readFileSync(cleanPath, 'utf8').split(/\r?\n/);
+    let lifecycle: 'started' | 'terminal' | null = null;
+    let updatedAt = 0;
+    let activityLabel: string | null = null;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const record = objectRecord(parsed);
+      if (!record) continue;
+      const topType = usableString(record.type);
+      const payload = sessionEventPayload(record);
+      const payloadType = usableString(payload.type);
+      const timestamp = toTimestampMs(record.timestamp, updatedAt);
+      if (timestamp > 0) updatedAt = Math.max(updatedAt, timestamp);
+
+      if (topType === 'event_msg' && payloadType === 'task_started') {
+        lifecycle = 'started';
+        activityLabel = '正在运行中，AI 正在接手任务';
+        continue;
+      }
+      if (
+        topType === 'event_msg'
+        && ['task_complete', 'task_failed', 'turn_aborted', 'error'].includes(payloadType)
+      ) {
+        lifecycle = 'terminal';
+        activityLabel = null;
+        continue;
+      }
+      if (lifecycle === 'started') {
+        activityLabel = sessionActivityLabel(topType, payload) || activityLabel;
+      }
+    }
+
+    const state = lifecycle
+      ? {
+          running: lifecycle === 'started',
+          updatedAt,
+          activityLabel: lifecycle === 'started' ? activityLabel : null,
+        }
+      : null;
+    sessionRuntimeCache.set(cleanPath, { size: stat.size, mtimeMs: stat.mtimeMs, state });
+    return state;
+  } catch {
+    return null;
+  }
 }
 
 function isWithinBase(base: string, targetPath: string): boolean {
@@ -1368,6 +1541,8 @@ function normalizeThreadSummary(thread: Record<string, unknown>, projectRoot: st
   const id = typeof thread.id === 'string' ? thread.id : '';
   const cwd = usablePathString(thread.cwd);
   const createdAt = toTimestampMs(thread.createdAt);
+  const runtime = readCodexSessionRuntimeState(thread.path);
+  const updatedAt = toTimestampMs(thread.updatedAt, createdAt);
   const queuedFollowUps = codexQueuedFollowUpsForThread(id);
   return {
     id,
@@ -1378,11 +1553,16 @@ function normalizeThreadSummary(thread: Record<string, unknown>, projectRoot: st
     path: typeof thread.path === 'string' ? thread.path : '',
     source: typeof thread.source === 'string' ? thread.source : null,
     createdAt,
-    updatedAt: toTimestampMs(thread.updatedAt, createdAt),
-    status: extractThreadStatus(thread.status),
+    updatedAt: Math.max(updatedAt, runtime?.updatedAt || 0),
+    status: runtime?.running ? 'working' : extractThreadStatus(thread.status),
+    activityLabel: runtime?.running ? runtime.activityLabel : null,
     queuedFollowUpCount: queuedFollowUps.length,
     queuedFollowUps,
   };
+}
+
+function shouldShowActiveCodexThread(summary: CodexThreadSummary): boolean {
+  return isActiveThreadStatus(summary.status) || summary.queuedFollowUpCount > 0;
 }
 
 export class SessionOrchestrator {
@@ -1834,10 +2014,11 @@ export class SessionOrchestrator {
     this.persistAgentsToDisk();
   }
 
-  async listCodexThreads(params: { limit?: number; cursor?: string; cwd?: string; all?: boolean } = {}) {
+  async listCodexThreads(params: { limit?: number; cursor?: string; cwd?: string; all?: boolean; activeOnly?: boolean } = {}) {
     const cwdFilter = params.cwd ? path.resolve(params.cwd) : null;
     const visibleWorkspaceRoots = cwdFilter ? [] : codexDesktopVisibleWorkspaceRoots();
     const workspaceRootHints = cwdFilter ? new Map<string, string>() : codexThreadWorkspaceRootHints();
+    const archivedThreadIds = codexArchivedThreadIds();
     const allData: Record<string, unknown>[] = [];
     let nextCursor: string | null = typeof params.cursor === 'string' && params.cursor.trim() ? params.cursor : null;
     let page = 0;
@@ -1860,9 +2041,10 @@ export class SessionOrchestrator {
     return {
       projectRoots: visibleWorkspaceRoots,
       data: allData
-        .filter((entry) => shouldShowCodexThread(entry))
+        .filter((entry) => shouldShowCodexThread(entry, archivedThreadIds))
         .filter((entry) => shouldShowCodexThreadInDesktopWorkspace(entry, visibleWorkspaceRoots, workspaceRootHints))
         .map((entry) => normalizeThreadSummary(entry, codexThreadProjectRoot(entry, visibleWorkspaceRoots, workspaceRootHints)))
+        .filter((entry) => params.activeOnly !== true || shouldShowActiveCodexThread(entry))
         .filter((entry) => !cwdFilter || (entry.cwd.trim() && isWithinBase(cwdFilter, entry.cwd))),
       nextCursor,
     };
@@ -1893,6 +2075,9 @@ export class SessionOrchestrator {
   }
 
   async readCodexThread(threadId: string): Promise<CodexThreadDetail> {
+    if (codexArchivedThreadIds().has(threadId.trim())) {
+      throw new Error('Thread is archived');
+    }
     let response = await this.sendOneOffRequest(codexThreadReadCall(threadId, false));
     if (response.error) throw new Error(response.error.message);
     const result = response.result as Record<string, unknown>;
@@ -1924,9 +2109,9 @@ export class SessionOrchestrator {
     const approvalPolicy = usableString(result?.approvalPolicy) || usableString(thread.approvalPolicy) || 'never';
     const serviceTier = normalizeServiceTier(usableString(result?.serviceTier) || usableString(thread.serviceTier));
     const reasoningEffort = usableString(result?.reasoningEffort) || usableString(thread.reasoningEffort) || 'medium';
-    const status = inferThreadStatus(summary.status, messages);
+    const status = summary.status;
     const queueLabel = summary.queuedFollowUpCount > 0 ? `已排队 ${summary.queuedFollowUpCount} 个后续任务` : null;
-    const activityLabel = queueLabel || (status === 'working' ? inferThreadActivity(messages) : null);
+    const activityLabel = queueLabel || (status === 'working' ? (summary.activityLabel || inferThreadActivity(messages)) : null);
     return {
       ...summary,
       status,

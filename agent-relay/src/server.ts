@@ -421,11 +421,15 @@ const wss = new WebSocketServer({ server });
 const clients = new Map<WebSocket, ClientSession>();
 const STREAM_HISTORY_LIMIT = Number(process.env.STREAM_HISTORY_LIMIT || 5000);
 const CODEX_WATCH_DEBOUNCE_MS = Number(process.env.CODEX_WATCH_DEBOUNCE_MS || 150);
+const CODEX_THREAD_POLL_INTERVAL_MS = Number(process.env.CODEX_THREAD_POLL_INTERVAL_MS || 5000);
 const MOBILE_STREAM_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_STREAM_TEXT_LIMIT || 12000);
 const MOBILE_STREAM_TRUNCATED_NOTICE = '\n\n[EasyCodex mobile truncated this long output. Use the desktop relay/Codex session for the full text.]';
 let nextStreamSeq = 1;
 const streamHistory: StreamHistoryEntry[] = [];
 let codexWatchTimer: ReturnType<typeof setTimeout> | null = null;
+let codexThreadPollTimer: ReturnType<typeof setInterval> | null = null;
+let codexThreadPollInFlight = false;
+let lastCodexThreadSignature: string | null = null;
 const codexWatchers: fs.FSWatcher[] = [];
 let lastUpdateCheck: UpdateInfo | null = null;
 
@@ -471,6 +475,11 @@ function compactStreamText(value: string, fallback = '详细内容已省略。')
   if (!value.trim()) return value;
   if (value.length <= MOBILE_STREAM_TEXT_LIMIT && !value.includes('\n')) return value;
   return fallback;
+}
+
+function capStreamDelta(value: string): string {
+  if (value.length <= MOBILE_STREAM_TEXT_LIMIT) return value;
+  return `${value.slice(0, MOBILE_STREAM_TEXT_LIMIT).trimEnd()}${MOBILE_STREAM_TRUNCATED_NOTICE}`;
 }
 
 function streamDiffSummary(text: string): { files: string[]; additions: number; deletions: number } {
@@ -523,7 +532,9 @@ function sanitizeStreamData(value: unknown, event = ''): unknown {
       'input',
       'arguments',
     ].includes(key);
-    if (typeof child === 'string' && heavyText) {
+    if (typeof child === 'string' && key === 'delta') {
+      result[key] = capStreamDelta(child);
+    } else if (typeof child === 'string' && heavyText) {
       if (key === 'command') {
         result[key] = '正在运行命令。';
       } else if (key === 'input' || key === 'arguments') {
@@ -615,6 +626,52 @@ function startCodexStateWatcher() {
       console.warn(`[relay] Failed to watch Codex state at ${root}:`, err);
     }
   }
+}
+
+function codexThreadSignature(threads: Array<{ id?: unknown; updatedAt?: unknown; status?: unknown }>): string {
+  return threads
+    .map((thread) => {
+      const id = typeof thread.id === 'string' ? thread.id : '';
+      const updatedAt = typeof thread.updatedAt === 'number' || typeof thread.updatedAt === 'string'
+        ? String(thread.updatedAt)
+        : '';
+      const status = typeof thread.status === 'string' ? thread.status : '';
+      return `${id}:${updatedAt}:${status}`;
+    })
+    .filter(Boolean)
+    .sort()
+    .join('|');
+}
+
+async function pollCodexThreadsForChanges(reason: string) {
+  if (codexThreadPollInFlight || getConnectedAuthenticatedCount() === 0) return;
+  codexThreadPollInFlight = true;
+  try {
+    const result = await manager.listCodexThreads({ limit: 100, all: true });
+    const threads = Array.isArray(result.data) ? result.data : [];
+    const signature = codexThreadSignature(threads);
+    if (lastCodexThreadSignature !== null && signature !== lastCodexThreadSignature) {
+      broadcastCodexThreadsChanged(reason, { source: 'poll' });
+    }
+    lastCodexThreadSignature = signature;
+  } catch (err) {
+    console.warn('[relay] Failed to poll Codex threads:', err);
+  } finally {
+    codexThreadPollInFlight = false;
+  }
+}
+
+function updateCodexThreadPoller() {
+  if (getConnectedAuthenticatedCount() === 0) {
+    if (codexThreadPollTimer) clearInterval(codexThreadPollTimer);
+    codexThreadPollTimer = null;
+    return;
+  }
+  if (codexThreadPollTimer) return;
+  void pollCodexThreadsForChanges('codex_thread_poll_started');
+  codexThreadPollTimer = setInterval(() => {
+    void pollCodexThreadsForChanges('codex_thread_poll_changed');
+  }, Math.max(1000, CODEX_THREAD_POLL_INTERVAL_MS));
 }
 
 const manager = new SessionOrchestrator(broadcast);
@@ -754,6 +811,7 @@ wss.on('connection', (ws, req) => {
       clearTimeout(authTimeout);
       console.log(`Authenticated client ${session.clientId} (${remoteAddress})`);
       emitClientState('authenticated');
+      updateCodexThreadPoller();
       reply({ ok: true, clientId: session.clientId });
       return;
     }
@@ -943,17 +1001,24 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'list_codex_threads': {
-          const { limit, cursor, cwd, includeGlobal, all } = params as {
+          const { limit, cursor, cwd, includeGlobal, all, activeOnly } = params as {
             limit?: number;
             cursor?: string;
             cwd?: string;
             includeGlobal?: boolean;
             all?: boolean;
+            activeOnly?: boolean;
           };
           const requestedCwd = typeof cwd === 'string' && cwd.trim() ? resolveWorkspaceCwd(cwd) : undefined;
           const resolvedCwd = requestedCwd
             || (includeGlobal === false ? resolveWorkspaceCwd(getPrimaryWorkspaceRoot()) : undefined);
-          const result = await manager.listCodexThreads({ limit, cursor, cwd: resolvedCwd, all: all === true });
+          const result = await manager.listCodexThreads({
+            limit,
+            cursor,
+            cwd: resolvedCwd,
+            all: all === true,
+            activeOnly: activeOnly === true,
+          });
           reply(result);
           break;
         }
@@ -1261,7 +1326,10 @@ wss.on('connection', (ws, req) => {
     clients.delete(ws);
     const reasonText = reason.length > 0 ? ` reason="${reason.toString('utf8')}"` : '';
     console.log(`Client disconnected (${session.clientId || 'unauthenticated'}) code=${code}${reasonText} remote=${remoteAddress}`);
-    if (session.authenticated) emitClientState('disconnected');
+    if (session.authenticated) {
+      emitClientState('disconnected');
+      updateCodexThreadPoller();
+    }
   });
 });
 

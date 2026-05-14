@@ -7,6 +7,7 @@ data class AgentMessage(
     val timestamp: Long,
     val itemId: String? = null,
     val streaming: Boolean = false,
+    val attachments: List<AttachmentDraft> = emptyList(),
 )
 
 data class Agent(
@@ -106,6 +107,8 @@ data class DirectoryListing(
 data class AttachmentDraft(
     val name: String,
     val path: String,
+    val mimeType: String? = null,
+    val previewUri: String? = null,
 )
 
 data class GitStatusSummary(
@@ -169,4 +172,15 @@ data class PendingStreamDelta(
     val itemId: String,
     var type: String,
     val text: StringBuilder = StringBuilder(),
+)
+
+data class FileChangeLiveStat(
+    var additions: Int = 0,
+    var deletions: Int = 0,
+)
+
+data class CommandOutputLiveStat(
+    var lines: Int = 0,
+    var chars: Int = 0,
+    var lastText: String = "",
 )

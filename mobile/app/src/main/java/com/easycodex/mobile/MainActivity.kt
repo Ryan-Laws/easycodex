@@ -413,6 +413,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                     drawerContent = {
                         AgentDrawer(
                             agents = controller.agents,
+                            alerts = controller.alerts,
                             projectOptions = controller.projectOptions(),
                             activeAgentId = controller.activeAgentId,
                             onHome = {
@@ -437,19 +438,23 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                             CenterAlignedTopAppBar(
                                 title = {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                        Text(
-                                            controller.draftAgent?.let { strings.homeQuestion }
-                                                ?: controller.activeAgent?.name
-                                                ?: "EasyCodex",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.SemiBold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        val activeAgent = controller.activeAgent
+                                        val titleText = when {
+                                            controller.draftAgent != null -> strings.homeQuestion
+                                            controller.activeAgent != null -> ""
+                                            else -> "EasyCodex"
+                                        }
+                                        if (titleText.isNotBlank()) {
+                                            Text(
+                                                titleText,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
                                         TopBarStatusPill(
                                             status = controller.connectionStatus,
-                                            text = activeAgent?.let(::agentStatusLabel) ?: controller.statusText,
+                                            text = controller.statusText,
                                         )
                                     }
                                 },
@@ -459,6 +464,9 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                     }
                                 },
                                 actions = {
+                                    IconButton(onClick = { showTroubleshooting = true }) {
+                                        Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = strings.connectionTroubleshooting)
+                                    }
                                     IconButton(onClick = { openSettings() }) {
                                         Icon(Icons.Default.Settings, contentDescription = strings.settingsContentDescription)
                                     }
@@ -509,6 +517,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                     runCatching { voiceInput.launch(intent) }
                                         .onFailure { controller.statusText = strings.startVoiceInput }
                                 },
+                                onInterrupt = { controller.interruptActiveAgent() },
                                 onSend = { controller.sendActiveMessage(planModeEnabled) },
                             )
                         },
@@ -518,16 +527,6 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                 .fillMaxSize()
                                 .padding(padding),
                         ) {
-                            ConnectionBanner(
-                                status = controller.connectionStatus,
-                                detail = controller.statusText,
-                                onHelp = { showTroubleshooting = true },
-                                onConfigure = if (controller.relayUrl.isBlank() || controller.apiKey.isBlank()) {
-                                    { openSettings() }
-                                } else {
-                                    null
-                                },
-                            )
                             val draftAgent = controller.draftAgent
                             if (draftAgent != null) {
                                 val projectOptions = controller.projectOptions()
@@ -551,12 +550,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                     agent = controller.activeAgent,
                                     layoutMode = controller.appLayout,
                                     emptyMessage = strings.emptyConversation,
-                                    notificationLevelState = controller.notificationLevelState,
-                                    onInterrupt = { controller.interruptActiveAgent() },
                                     onOpenDiffReview = { controller.openDiffReview() },
-                                    onNotificationLevelChange = { agentId, level ->
-                                        controller.updateNotificationLevel(agentId, level)
-                                    },
                                     onOpenPlan = { message ->
                                         controller.activeAgent?.let { controller.showPlanReview(it.id, message) }
                                     },
@@ -976,6 +970,7 @@ fun MessageComposer(
     onAttachImages: () -> Unit,
     onInsertEmoji: (String) -> Unit,
     onVoiceInput: () -> Unit,
+    onInterrupt: () -> Unit,
     onSend: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
@@ -997,6 +992,7 @@ fun MessageComposer(
             "继续上次任务",
         )
     }
+    val showInterruptButton = agent?.isBusy() == true && text.isBlank() && attachments.isEmpty()
 
     LaunchedEffect(sendAnimationKey) {
         if (sendAnimationKey == 0) return@LaunchedEffect
@@ -1129,26 +1125,34 @@ fun MessageComposer(
                         FilledTonalButton(
                             onClick = {
                                 activePanel = ComposerPanel.None
-                                sendAnimationKey += 1
-                                onSend()
+                                if (showInterruptButton) {
+                                    onInterrupt()
+                                } else {
+                                    sendAnimationKey += 1
+                                    onSend()
+                                }
                             },
-                            enabled = enabled && (text.isNotBlank() || attachments.isNotEmpty()),
+                            enabled = enabled && (showInterruptButton || text.isNotBlank() || attachments.isNotEmpty()),
                             shape = CircleShape,
                             modifier = Modifier
                                 .size(52.dp)
                                 .scale(sendButtonScale.value),
                             contentPadding = PaddingValues(0.dp),
                         ) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.Send,
-                                contentDescription = strings.send,
-                                modifier = Modifier.graphicsLayer(
-                                    translationX = sendIconTravel.value,
-                                    translationY = -sendIconTravel.value * 0.35f,
-                                    rotationZ = sendIconTravel.value * 1.4f,
-                                    alpha = (1f - sendIconTravel.value / 60f).coerceIn(0.72f, 1f),
-                                ),
-                            )
+                            if (showInterruptButton) {
+                                Icon(Icons.Default.Stop, contentDescription = strings.interrupt)
+                            } else {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = strings.send,
+                                    modifier = Modifier.graphicsLayer(
+                                        translationX = sendIconTravel.value,
+                                        translationY = -sendIconTravel.value * 0.35f,
+                                        rotationZ = sendIconTravel.value * 1.4f,
+                                        alpha = (1f - sendIconTravel.value / 60f).coerceIn(0.72f, 1f),
+                                    ),
+                                )
+                            }
                         }
                     }
                     AgentRuntimeBar(
@@ -1277,6 +1281,27 @@ private fun QueuedFollowUpsPanel(
     enabled: Boolean,
     onGuide: (QueuedFollowUp) -> Unit,
 ) {
+    var selectedItem by remember { mutableStateOf<QueuedFollowUp?>(null) }
+    val clipboard = LocalClipboard.current
+    val clipboardScope = rememberCoroutineScope()
+
+    selectedItem?.let { item ->
+        QueuedFollowUpDetailDialog(
+            item = item,
+            enabled = enabled,
+            onDismiss = { selectedItem = null },
+            onCopy = {
+                clipboardScope.launch {
+                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("EasyCodex queued task", item.text)))
+                }
+            },
+            onGuide = {
+                selectedItem = null
+                onGuide(item)
+            },
+        )
+    }
+
     AnimatedVisibility(
         visible = items.isNotEmpty(),
         enter = expandVertically(
@@ -1303,6 +1328,7 @@ private fun QueuedFollowUpsPanel(
                     QueuedFollowUpRow(
                         item = item,
                         enabled = enabled,
+                        onOpen = { selectedItem = item },
                         onGuide = { onGuide(item) },
                     )
                 }
@@ -1324,11 +1350,14 @@ private fun QueuedFollowUpsPanel(
 private fun QueuedFollowUpRow(
     item: QueuedFollowUp,
     enabled: Boolean,
+    onOpen: () -> Unit,
     onGuide: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onOpen)
             .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1359,6 +1388,56 @@ private fun QueuedFollowUpRow(
             )
         }
     }
+}
+
+@Composable
+private fun QueuedFollowUpDetailDialog(
+    item: QueuedFollowUp,
+    enabled: Boolean,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+    onGuide: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("排队任务详情") },
+        text = {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    item.text.ifBlank { "任务内容为空。" },
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onGuide,
+                enabled = enabled,
+            ) {
+                Text("引导")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onCopy, enabled = item.text.isNotBlank()) {
+                    Text("复制")
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("关闭")
+                }
+            }
+        },
+    )
 }
 
 @Composable

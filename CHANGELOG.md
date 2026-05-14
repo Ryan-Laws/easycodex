@@ -2,10 +2,22 @@
 
 ## Unreleased
 
-- Standardized desktop relay updates so packaged installs require a quit-and-update confirmation, stop the local relay first, and block the Windows installer if the relay app is still running.
-- Changed Android APK update checks to require user confirmation before downloading and to warn that Android may close the app during system installation.
+## 0.1.2-beta.2 - 2026-05-15
+
+### Fixed
+
+- Separated active mobile tasks from resumable Codex history so completed `notLoaded` threads no longer remain in project task counts.
+- Used Codex session lifecycle events and archived thread state when syncing tasks from the relay.
+- Refreshed Android task status merging so completed threads stop showing stale working indicators.
+
+### Improved
+
+- Tightened mobile conversation behavior around auto-scroll, file-change summaries, and queued task taps.
 
 ## 0.1.2-beta.1 - 2026-05-14
+
+- Standardized desktop relay updates so packaged installs require a quit-and-update confirmation, stop the local relay first, and block the Windows installer if the relay app is still running.
+- Changed Android APK update checks to require user confirmation before downloading and to warn that Android may close the app during system installation.
 
 ### Fixed
 

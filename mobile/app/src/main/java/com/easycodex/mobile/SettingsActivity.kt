@@ -153,7 +153,7 @@ const val DEFAULT_UPDATE_CHANNEL = "stable"
 private const val TEST_NOTIFICATION_CHANNEL_ID = "easycodex-test"
 private const val TEST_NOTIFICATION_ID = 71801
 private const val SETTINGS_RELAY_REQUEST_TIMEOUT_MS = 30_000L
-private const val EASY_CODEX_APP_VERSION = "0.1.1"
+private const val EASY_CODEX_APP_VERSION = "0.1.2-beta.2"
 private const val EASY_CODEX_RELEASE_API_BASE_URL = "https://api.github.com/repos/Ryan-Laws/easycodex"
 
 private fun normalizeDefaultServiceTier(value: String): String {

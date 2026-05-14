@@ -82,7 +82,7 @@ Codex metadata actions:
 | `runtime_capabilities` | Report official vs compatible runtime behavior. |
 | `check_update` | Check the configured EasyCodex update channel and report whether the relay is outdated. |
 | `apply_update` | Apply a fast git-based relay update when the relay is running from an EasyCodex repository checkout. |
-| `list_codex_threads` | List available Codex threads globally by default; pass `cwd` or `includeGlobal=false` to scope results to one workspace, and `all=true` to follow cursors across pages. |
+| `list_codex_threads` | List available Codex threads globally by default; pass `cwd` or `includeGlobal=false` to scope results to one workspace, `all=true` to follow cursors across pages, and `activeOnly=true` to return only threads that are still running or queued. |
 | `read_codex_thread` | Read a Codex thread and convert it to app messages. |
 
 Live sync events:

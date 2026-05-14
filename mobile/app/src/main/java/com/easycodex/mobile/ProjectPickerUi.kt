@@ -76,6 +76,7 @@ private data class DrawerAgentItem(
     val status: String,
     val activity: String?,
     val updatedAt: Long,
+    val hasAlert: Boolean,
 ) {
     fun isBusy(): Boolean {
         return status.trim().lowercase(Locale.ROOT) in setOf(
@@ -96,9 +97,14 @@ private data class DrawerAgentItem(
     }
 }
 
+private fun isDefaultRelativeProjectPath(path: String): Boolean {
+    return normalizePathKey(path) == normalizePathKey(DEFAULT_AGENT_CWD)
+}
+
 @Composable
 fun AgentDrawer(
     agents: List<Agent>,
+    alerts: List<AgentAlert>,
     projectOptions: List<String>,
     activeAgentId: String?,
     onHome: () -> Unit,
@@ -116,6 +122,7 @@ fun AgentDrawer(
     val normalizedQuery = debouncedQuery.trim().lowercase(Locale.ROOT)
     val drawerAgents by remember {
         derivedStateOf {
+            val alertAgentIds = alerts.mapTo(mutableSetOf()) { it.agentId }
             agents.map { agent ->
                 DrawerAgentItem(
                     id = agent.id,
@@ -124,6 +131,7 @@ fun AgentDrawer(
                     status = agent.status,
                     activity = agent.activity,
                     updatedAt = agent.updatedAt,
+                    hasAlert = agent.id in alertAgentIds,
                 )
             }
         }
@@ -141,6 +149,7 @@ fun AgentDrawer(
     val groupedAgents = remember(visibleAgents, projectOptions, normalizedQuery) {
         val visibleProjectOptions = projectOptions
             .mapNotNull(::cleanNullablePath)
+            .filterNot(::isDefaultRelativeProjectPath)
             .filter { projectPath ->
                 normalizedQuery.isBlank() || projectNameFromCwd(projectPath).lowercase(Locale.ROOT).contains(normalizedQuery) ||
                     projectPath.lowercase(Locale.ROOT).contains(normalizedQuery)
@@ -344,6 +353,7 @@ private fun DrawerAgentProjectRow(
                 color = when {
                     agent.isBusy() -> MaterialTheme.colorScheme.primary
                     agent.status.equals("error", ignoreCase = true) -> MaterialTheme.colorScheme.error
+                    agent.hasAlert -> MaterialTheme.colorScheme.primary
                     else -> MaterialTheme.colorScheme.outlineVariant
                 },
                 modifier = Modifier.size(8.dp),
@@ -371,7 +381,7 @@ private fun DrawerAgentProjectRow(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        agent.activity?.takeIf { it.isNotBlank() } ?: "加载中",
+                        agent.activity?.takeIf { it.isNotBlank() } ?: "工作中",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 1,
@@ -519,7 +529,7 @@ fun AgentProjectRow(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        agent.activity?.takeIf { it.isNotBlank() } ?: "加载中",
+                        agent.activity?.takeIf { it.isNotBlank() } ?: "工作中",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 1,
