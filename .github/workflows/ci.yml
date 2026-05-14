@@ -139,6 +139,4 @@ jobs:
             sleep 8
             adb shell pidof com.easycodex.mobile
             adb logcat -d -v time > "$RUNNER_TEMP/easycodex-logcat.txt"
-            if grep -E "FATAL EXCEPTION|AndroidRuntime|VerifyError|Force finishing activity com.easycodex.mobile" "$RUNNER_TEMP/easycodex-logcat.txt"; then
-              exit 1
-            fi
+            ! grep -E "FATAL EXCEPTION|AndroidRuntime|VerifyError|Force finishing activity com.easycodex.mobile" "$RUNNER_TEMP/easycodex-logcat.txt"
