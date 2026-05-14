@@ -9,7 +9,7 @@
     <a href="README.zh-TW.md">繁體中文</a>
   </p>
   <p>
-    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.0"><img alt="Release v0.1.0" src="https://img.shields.io/badge/release-v0.1.0-2f80ed?style=flat-square"></a>
+    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.1"><img alt="Release v0.1.1" src="https://img.shields.io/badge/release-v0.1.1-2f80ed?style=flat-square"></a>
     <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green?style=flat-square"></a>
     <img alt="Windows" src="https://img.shields.io/badge/Windows-relay%20app-0078D4?logo=windows&logoColor=white&style=flat-square">
     <img alt="Android" src="https://img.shields.io/badge/Android-mobile%20APK-3DDC84?logo=android&logoColor=white&style=flat-square">
@@ -19,7 +19,7 @@
     <a href="https://visitor-badge.laobi.icu/"><img alt="Visitors" src="https://visitor-badge.laobi.icu/badge?page_id=Ryan-Laws.easycodex"></a>
   </p>
   <p>
-    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.0"><strong>Download EasyCodex 0.1.0</strong></a>
+    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.1"><strong>Download EasyCodex 0.1.1</strong></a>
     ·
     <a href="https://github.com/Ryan-Laws/easycodex/releases">All releases</a>
   </p>
@@ -31,24 +31,24 @@ The public release now includes ready-to-use Windows, macOS, and Linux relay bui
 
 ## Install EasyCodex
 
-Download the current release from [EasyCodex 0.1.0](https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.0). On GitHub, you can also open the repository's **Releases** page from the right sidebar and choose the latest EasyCodex release.
+Download the current release from [EasyCodex 0.1.1](https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.1). On GitHub, you can also open the repository's **Releases** page from the right sidebar and choose the latest EasyCodex release.
 
 | Platform | Download | What it is for |
 | --- | --- | --- |
-| Windows | [`EasyCodex.Relay.Setup.0.1.0-x64.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.Setup.0.1.0-x64.exe) | Recommended Windows desktop relay installer |
-| Windows | [`EasyCodex.Relay.Portable.0.1.0-x64.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.Portable.0.1.0-x64.exe) | Portable Windows relay app |
-| Android | [`EasyCodex.Mobile.0.1.0.apk`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Mobile.0.1.0.apk) | Android phone app |
-| macOS Apple Silicon | [`EasyCodex.Relay.0.1.0.mac-arm64.dmg`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.0.1.0.mac-arm64.dmg) | Apple Silicon desktop relay |
-| macOS Intel | [`EasyCodex.Relay.0.1.0.mac-x64.dmg`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.0.1.0.mac-x64.dmg) | Intel desktop relay |
-| Linux | [`EasyCodex.Relay.0.1.0.linux-x64.AppImage`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.0.1.0.linux-x64.AppImage) | Portable Linux relay app |
-| Linux | [`EasyCodex.Relay.0.1.0.linux-x64.deb`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.0/EasyCodex.Relay.0.1.0.linux-x64.deb) | Debian/Ubuntu relay package |
+| Windows | [`EasyCodex.Relay.Setup.0.1.1-x64.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.Setup.0.1.1-x64.exe) | Recommended Windows desktop relay installer |
+| Windows | [`EasyCodex.Relay.Portable.0.1.1-x64.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.Portable.0.1.1-x64.exe) | Portable Windows relay app |
+| Android | [`EasyCodex.Mobile.0.1.1.apk`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Mobile.0.1.1.apk) | Android phone app |
+| macOS Apple Silicon | [`EasyCodex.Relay.0.1.1.mac-arm64.dmg`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.mac-arm64.dmg) | Apple Silicon desktop relay |
+| macOS Intel | [`EasyCodex.Relay.0.1.1.mac-x64.dmg`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.mac-x64.dmg) | Intel desktop relay |
+| Linux | [`EasyCodex.Relay.0.1.1.linux-x64.AppImage`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.linux-x64.AppImage) | Portable Linux relay app |
+| Linux | [`EasyCodex.Relay.0.1.1.linux-x64.deb`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.linux-x64.deb) | Debian/Ubuntu relay package |
 
 ## Quick Start
 
 1. Install the Codex CLI on your computer and make sure it is authenticated.
 2. Install and open **EasyCodex Relay** on Windows or macOS.
 3. Click the relay start button in the desktop app. It will show the relay status, connection URL, API key, and QR code.
-4. Install `EasyCodex.Mobile.0.1.0.apk` on your Android phone.
+4. Install `EasyCodex.Mobile.0.1.1.apk` on your Android phone.
 5. Scan the QR code with the phone or open the connection link from the app.
 6. Pick a workspace, create or resume a Codex session, and control the agent from your phone.
 

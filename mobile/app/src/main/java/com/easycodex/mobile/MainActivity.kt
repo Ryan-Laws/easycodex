@@ -275,6 +275,36 @@ private fun voiceRecognizerPriority(packageName: String): Int {
     }
 }
 
+@Composable
+private fun TopBarStatusPill(status: String, text: String) {
+    val connected = status == "connected"
+    val dotColor = when {
+        connected -> MaterialTheme.colorScheme.primary
+        status == "connecting" -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.outline
+    }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = RoundedCornerShape(999.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Surface(shape = CircleShape, color = dotColor, modifier = Modifier.size(7.dp)) {}
+            Text(
+                text,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = null) {
@@ -406,7 +436,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                         topBar = {
                             CenterAlignedTopAppBar(
                                 title = {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                         Text(
                                             controller.draftAgent?.let { strings.homeQuestion }
                                                 ?: controller.activeAgent?.name
@@ -416,16 +446,10 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                         )
-                                        Text(
-                                            if (controller.activeAgent != null) {
-                                                agentStatusLabel(controller.activeAgent!!)
-                                            } else {
-                                                controller.statusText
-                                            },
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
+                                        val activeAgent = controller.activeAgent
+                                        TopBarStatusPill(
+                                            status = controller.connectionStatus,
+                                            text = activeAgent?.let(::agentStatusLabel) ?: controller.statusText,
                                         )
                                     }
                                 },
@@ -767,33 +791,46 @@ private fun UsageGuideDialog(
     val strings = LocalAppStrings.current
     val darkGuide = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val guideContainerColor = if (darkGuide) Color(0xFF121212) else Color(0xFFFFFFFF)
-    val guideStepColor = if (darkGuide) Color(0xFF1B1B1B) else Color(0xFFF6F6F6)
-    val guideIconColor = if (darkGuide) Color(0xFF242424) else Color(0xFFEAEAEA)
-    val guideBorderColor = if (darkGuide) Color(0xFF343434) else Color(0xFFE1E1E1)
+    val guideIconColor = if (darkGuide) Color(0xFF242424) else Color(0xFFF1F1F1)
+    val guideBorderColor = if (darkGuide) Color(0xFF343434) else Color(0xFFE4E4E4)
     val guidePrimaryTextColor = if (darkGuide) Color(0xFFEDEDED) else Color(0xFF1F1F1F)
     val guideSecondaryTextColor = if (darkGuide) Color(0xFFB8B8B8) else Color(0xFF666666)
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier
+            .fillMaxWidth(0.92f)
+            .heightIn(max = 660.dp),
+        shape = RoundedCornerShape(28.dp),
         containerColor = guideContainerColor,
         titleContentColor = guidePrimaryTextColor,
         textContentColor = guideSecondaryTextColor,
         tonalElevation = 0.dp,
-        title = { Text(strings.usageGuideTitle) },
-        text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    strings.usageGuideTitle,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
                 Text(
                     strings.usageGuideIntro,
                     style = MaterialTheme.typography.bodyMedium,
                     color = guideSecondaryTextColor,
                 )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 430.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 UsageGuideStep(
                     icon = Icons.Default.Settings,
                     title = strings.usageGuideStepConnectionTitle,
                     body = strings.usageGuideStepConnectionBody,
-                    containerColor = guideStepColor,
                     iconContainerColor = guideIconColor,
                     borderColor = guideBorderColor,
                     primaryTextColor = guidePrimaryTextColor,
@@ -803,7 +840,6 @@ private fun UsageGuideDialog(
                     icon = Icons.Default.Folder,
                     title = strings.usageGuideStepProjectTitle,
                     body = strings.usageGuideStepProjectBody,
-                    containerColor = guideStepColor,
                     iconContainerColor = guideIconColor,
                     borderColor = guideBorderColor,
                     primaryTextColor = guidePrimaryTextColor,
@@ -813,7 +849,6 @@ private fun UsageGuideDialog(
                     icon = Icons.AutoMirrored.Filled.Send,
                     title = strings.usageGuideStepTaskTitle,
                     body = strings.usageGuideStepTaskBody,
-                    containerColor = guideStepColor,
                     iconContainerColor = guideIconColor,
                     borderColor = guideBorderColor,
                     primaryTextColor = guidePrimaryTextColor,
@@ -823,7 +858,6 @@ private fun UsageGuideDialog(
                     icon = Icons.Default.AttachFile,
                     title = strings.usageGuideStepContextTitle,
                     body = strings.usageGuideStepContextBody,
-                    containerColor = guideStepColor,
                     iconContainerColor = guideIconColor,
                     borderColor = guideBorderColor,
                     primaryTextColor = guidePrimaryTextColor,
@@ -833,7 +867,6 @@ private fun UsageGuideDialog(
                     icon = Icons.Default.TaskAlt,
                     title = strings.usageGuideStepFollowTitle,
                     body = strings.usageGuideStepFollowBody,
-                    containerColor = guideStepColor,
                     iconContainerColor = guideIconColor,
                     borderColor = guideBorderColor,
                     primaryTextColor = guidePrimaryTextColor,
@@ -870,48 +903,39 @@ private fun UsageGuideStep(
     icon: ImageVector,
     title: String,
     body: String,
-    containerColor: Color,
     iconContainerColor: Color,
     borderColor: Color,
     primaryTextColor: Color,
     secondaryTextColor: Color,
 ) {
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = containerColor,
-        border = BorderStroke(1.dp, borderColor),
+    Row(
         modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
     ) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.Top,
+        Surface(
+            shape = CircleShape,
+            color = iconContainerColor,
+            contentColor = secondaryTextColor,
+            border = BorderStroke(1.dp, borderColor),
+            modifier = Modifier.size(38.dp),
         ) {
-            Surface(
-                shape = CircleShape,
-                color = iconContainerColor,
-                contentColor = secondaryTextColor,
-                border = BorderStroke(1.dp, borderColor),
-            ) {
-                Icon(
-                    icon,
-                    contentDescription = null,
-                    modifier = Modifier.padding(8.dp).size(20.dp),
-                )
+            Box(contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = null, modifier = Modifier.size(19.dp))
             }
-            Spacer(Modifier.width(12.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = primaryTextColor,
-                )
-                Text(
-                    body,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = secondaryTextColor,
-                )
-            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = primaryTextColor,
+            )
+            Text(
+                body,
+                style = MaterialTheme.typography.bodySmall,
+                color = secondaryTextColor,
+            )
         }
     }
 }
@@ -1002,61 +1026,7 @@ fun MessageComposer(
             .navigationBarsPadding()
             .imePadding(),
     ) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                FilterChip(
-                    selected = !planModeEnabled,
-                    onClick = { onPlanModeChange(false) },
-                    enabled = enabled,
-                    label = { Text(strings.runDirectly) },
-                )
-                FilterChip(
-                    selected = planModeEnabled,
-                    onClick = { onPlanModeChange(true) },
-                    enabled = enabled,
-                    label = { Text(strings.planFirst) },
-                )
-                AssistChip(
-                    onClick = { quickRepliesExpanded = !quickRepliesExpanded },
-                    enabled = enabled,
-                    leadingIcon = {
-                        Icon(
-                            Icons.Default.KeyboardArrowDown,
-                            contentDescription = null,
-                            modifier = Modifier
-                                .size(18.dp)
-                                .graphicsLayer(rotationZ = quickReplyArrowRotation),
-                        )
-                    },
-                    label = { Text("快速回答") },
-                )
-                AnimatedVisibility(
-                    visible = quickRepliesExpanded,
-                    enter = expandVertically(
-                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                        expandFrom = Alignment.Top,
-                    ) + fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
-                    exit = shrinkVertically(
-                        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-                        shrinkTowards = Alignment.Top,
-                    ) + fadeOut(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
-                ) {
-                    quickReplyPrompts.forEach { prompt ->
-                        AssistChip(
-                            onClick = {
-                                onTextChange(if (text.isBlank()) prompt else "${text.trimEnd()}\n$prompt")
-                                quickRepliesExpanded = false
-                            },
-                            enabled = enabled,
-                            label = { Text(prompt) },
-                        )
-                    }
-                }
-            }
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
             AnimatedVisibility(
                 visible = attachments.isNotEmpty(),
                 enter = expandVertically(
@@ -1090,85 +1060,160 @@ fun MessageComposer(
                 }
             }
             Spacer(Modifier.height(6.dp))
-            AgentRuntimeBar(
-                agent = agent,
-                enabled = enabled,
-                projectOptions = projectOptions,
-                canChangeProject = false,
-                modelOptions = modelOptions,
-                reasoningOptions = reasoningOptions,
-                serviceTierOptions = serviceTierOptions,
-                runtimeCapabilities = runtimeCapabilities,
-                showProject = false,
-                showRuntime = true,
-                onProjectChange = onProjectChange,
-                onModelChange = onModelChange,
-                onReasoningEffortChange = onReasoningEffortChange,
-                onServiceTierChange = onServiceTierChange,
-                onBrowseDirectories = onBrowseDirectories,
-            )
-            Spacer(Modifier.height(6.dp))
-            Row(
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shape = EasyCodexDesign.ComposerPanelShape,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+                tonalElevation = 1.dp,
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                AnimatedComposerIconButton(
-                    selected = activePanel == ComposerPanel.Tools,
-                    onClick = { activePanel = activePanel.toggle(ComposerPanel.Tools) },
-                    enabled = enabled,
-                    rotationWhenSelected = 45f,
-                ) { iconModifier ->
-                    Icon(
-                        Icons.Default.Add,
-                        contentDescription = strings.openAttachmentPanel,
-                        modifier = iconModifier,
-                    )
-                }
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = onTextChange,
-                    enabled = enabled,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text(strings.sendToEasyCodex) },
-                    trailingIcon = {
+                Column(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
                         AnimatedComposerIconButton(
-                            selected = false,
-                            onClick = onVoiceInput,
+                            selected = activePanel == ComposerPanel.Tools,
+                            onClick = { activePanel = activePanel.toggle(ComposerPanel.Tools) },
                             enabled = enabled,
+                            rotationWhenSelected = 45f,
                         ) { iconModifier ->
                             Icon(
-                                Icons.Default.Mic,
-                                contentDescription = strings.openVoicePanel,
+                                Icons.Default.Add,
+                                contentDescription = strings.openAttachmentPanel,
                                 modifier = iconModifier,
                             )
                         }
-                    },
-                    minLines = 1,
-                    maxLines = 5,
-                    shape = RoundedCornerShape(26.dp),
-                )
-                FilledTonalButton(
-                    onClick = {
-                        activePanel = ComposerPanel.None
-                        sendAnimationKey += 1
-                        onSend()
-                    },
-                    enabled = enabled && (text.isNotBlank() || attachments.isNotEmpty()),
-                    shape = CircleShape,
-                    modifier = Modifier
-                        .size(56.dp)
-                        .scale(sendButtonScale.value),
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Send,
-                        contentDescription = strings.send,
-                        modifier = Modifier.graphicsLayer(
-                            translationX = sendIconTravel.value,
-                            translationY = -sendIconTravel.value * 0.35f,
-                            rotationZ = sendIconTravel.value * 1.4f,
-                            alpha = (1f - sendIconTravel.value / 60f).coerceIn(0.72f, 1f),
-                        ),
+                        OutlinedTextField(
+                            value = text,
+                            onValueChange = onTextChange,
+                            enabled = enabled,
+                            modifier = Modifier.weight(1f),
+                            placeholder = { Text(strings.sendToEasyCodex) },
+                            trailingIcon = {
+                                AnimatedComposerIconButton(
+                                    selected = false,
+                                    onClick = onVoiceInput,
+                                    enabled = enabled,
+                                ) { iconModifier ->
+                                    Icon(
+                                        Icons.Default.Mic,
+                                        contentDescription = strings.openVoicePanel,
+                                        modifier = iconModifier,
+                                    )
+                                }
+                            },
+                            minLines = 1,
+                            maxLines = 5,
+                            shape = RoundedCornerShape(24.dp),
+                        )
+                        FilledTonalButton(
+                            onClick = {
+                                activePanel = ComposerPanel.None
+                                sendAnimationKey += 1
+                                onSend()
+                            },
+                            enabled = enabled && (text.isNotBlank() || attachments.isNotEmpty()),
+                            shape = CircleShape,
+                            modifier = Modifier
+                                .size(52.dp)
+                                .scale(sendButtonScale.value),
+                            contentPadding = PaddingValues(0.dp),
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Send,
+                                contentDescription = strings.send,
+                                modifier = Modifier.graphicsLayer(
+                                    translationX = sendIconTravel.value,
+                                    translationY = -sendIconTravel.value * 0.35f,
+                                    rotationZ = sendIconTravel.value * 1.4f,
+                                    alpha = (1f - sendIconTravel.value / 60f).coerceIn(0.72f, 1f),
+                                ),
+                            )
+                        }
+                    }
+                    AgentRuntimeBar(
+                        agent = agent,
+                        enabled = enabled,
+                        projectOptions = projectOptions,
+                        canChangeProject = false,
+                        modelOptions = modelOptions,
+                        reasoningOptions = reasoningOptions,
+                        serviceTierOptions = serviceTierOptions,
+                        runtimeCapabilities = runtimeCapabilities,
+                        showProject = false,
+                        showRuntime = true,
+                        onProjectChange = onProjectChange,
+                        onModelChange = onModelChange,
+                        onReasoningEffortChange = onReasoningEffortChange,
+                        onServiceTierChange = onServiceTierChange,
+                        onBrowseDirectories = onBrowseDirectories,
                     )
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        FilterChip(
+                            selected = !planModeEnabled,
+                            onClick = { onPlanModeChange(false) },
+                            enabled = enabled,
+                            label = { Text(strings.runDirectly) },
+                        )
+                        FilterChip(
+                            selected = planModeEnabled,
+                            onClick = { onPlanModeChange(true) },
+                            enabled = enabled,
+                            label = { Text(strings.planFirst) },
+                        )
+                        AssistChip(
+                            onClick = { quickRepliesExpanded = !quickRepliesExpanded },
+                            enabled = enabled,
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.KeyboardArrowDown,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .graphicsLayer(rotationZ = quickReplyArrowRotation),
+                                )
+                            },
+                            label = { Text("快速回答") },
+                        )
+                    }
+                }
+            }
+            AnimatedVisibility(
+                visible = quickRepliesExpanded,
+                enter = expandVertically(
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                    expandFrom = Alignment.Top,
+                ) + fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
+                exit = shrinkVertically(
+                    animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                    shrinkTowards = Alignment.Top,
+                ) + fadeOut(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
+            ) {
+                FlowRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    quickReplyPrompts.forEach { prompt ->
+                        AssistChip(
+                            onClick = {
+                                onTextChange(if (text.isBlank()) prompt else "${text.trimEnd()}\n$prompt")
+                                quickRepliesExpanded = false
+                            },
+                            enabled = enabled,
+                            label = { Text(prompt) },
+                        )
+                    }
                 }
             }
             AnimatedVisibility(
@@ -1600,19 +1645,21 @@ private fun ComposerToolPanel(
     Spacer(Modifier.height(10.dp))
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         ComposerToolItem(
             icon = { Icon(Icons.Default.AttachFile, contentDescription = null) },
             label = strings.file,
             enabled = enabled,
             onClick = onAttachFiles,
+            modifier = Modifier.weight(1f),
         )
         ComposerToolItem(
             icon = { Icon(Icons.Default.Image, contentDescription = null) },
             label = strings.image,
             enabled = enabled,
             onClick = onAttachImages,
+            modifier = Modifier.weight(1f),
         )
     }
 }
@@ -1623,33 +1670,39 @@ private fun ComposerToolItem(
     label: String,
     enabled: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Column(
-        modifier = Modifier
-            .width(72.dp)
-            .clip(RoundedCornerShape(16.dp))
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f)),
+        modifier = modifier
+            .clip(RoundedCornerShape(18.dp))
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(vertical = 8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Surface(
-            shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-            modifier = Modifier.size(56.dp),
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                icon()
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(36.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    icon()
+                }
             }
+            Text(
+                label,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
-        Text(
-            label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 

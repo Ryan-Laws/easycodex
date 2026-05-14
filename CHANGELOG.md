@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.1 - 2026-05-14
+
+### Fixed
+
+- Hardened Android connection import and relay endpoint validation so QR/deep-link pairing rejects invalid relay URLs and public cleartext WebSocket hosts.
+- Removed a nullable active-agent crash risk from the Android top bar during fast agent state changes.
+- Added Android JVM tests for connection parsing and relay endpoint safety checks.
+
+### Improved
+
+- Refined the Android chat surface with a lighter status pill, more polished composer, cleaner message hierarchy, and a more compact first-run guide.
+- Polished Android home, project, attachment, and settings entry surfaces for a more cohesive mobile app feel.
+- Revalidated Android release signing, install, launch smoke, and fatal-log checks on an emulator.
+
 ## 0.1.0 - 2026-05-14
 
 Initial public release of EasyCodex.
