@@ -7,12 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing release tag to upload assets to"
+        description: "Release tag to publish, for example v0.1.1"
         required: true
-        default: "v0.1.0"
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-desktop-relay-${{ github.event.inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -63,6 +66,27 @@ jobs:
             agent-relay/package-lock.json
             desktop-relay/package-lock.json
 
+      - name: Resolve release version
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ github.event.inputs.release_tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          version="${tag#v}"
+          desktop_version="$(node -p "require('./desktop-relay/package.json').version")"
+          relay_version="$(node -p "require('./agent-relay/package.json').version")"
+          root_version="$(node -p "require('./package.json').version")"
+          if [[ "$version" != "$desktop_version" || "$version" != "$relay_version" || "$version" != "$root_version" ]]; then
+            echo "Tag version $version must match package versions: root=$root_version agent-relay=$relay_version desktop-relay=$desktop_version" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Install desktop dependencies
         run: npm ci
         working-directory: desktop-relay
@@ -85,7 +109,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
         run: |
-          gh release view "$TAG_NAME" >/dev/null 2>&1 || gh release create "$TAG_NAME" --title "EasyCodex ${TAG_NAME#v}" --notes-file CHANGELOG.md
-          find desktop-relay/release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.blockmap' \) -print0 | sort -z | xargs -0 gh release upload "$TAG_NAME" --clobber
+          tag="${{ steps.release.outputs.tag }}"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file CHANGELOG.md
+          find desktop-relay/release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.blockmap' \) -print0 | sort -z | xargs -0 gh release upload "$tag" --clobber

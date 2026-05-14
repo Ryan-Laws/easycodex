@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  relay:
+    name: Agent relay build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent-relay/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: agent-relay
+
+      - name: Build TypeScript
+        run: npm run build
+        working-directory: agent-relay
+
+  desktop-relay:
+    name: Desktop relay package smoke
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            agent-relay/package-lock.json
+            desktop-relay/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: desktop-relay
+
+      - name: Package unpacked desktop app
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run pack
+        working-directory: desktop-relay
+
+  android:
+    name: Android build and launch smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Allow Gradle wrapper execution
+        run: chmod +x gradlew
+        working-directory: mobile
+
+      - name: Build Android debug and release APKs
+        run: ./gradlew assembleDebug assembleRelease :app:lintVitalRelease
+        working-directory: mobile
+
+      - name: Sign release APK for CI smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)"
+          UNSIGNED="mobile/app/build/outputs/apk/release/app-release-unsigned.apk"
+          ALIGNED="mobile/app/build/outputs/apk/release/EasyCodex.Mobile.ci-aligned.apk"
+          SIGNED="mobile/app/build/outputs/apk/release/EasyCodex.Mobile.ci-smoke.apk"
+          "$ANDROID_HOME/build-tools/$BUILD_TOOLS/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
+          keytool -genkeypair \
+            -keystore "$RUNNER_TEMP/easycodex-ci-debug.keystore" \
+            -storepass android \
+            -keypass android \
+            -alias easycodex-ci \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 3650 \
+            -dname "CN=EasyCodex CI,O=EasyCodex,C=US"
+          "$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner" sign \
+            --ks "$RUNNER_TEMP/easycodex-ci-debug.keystore" \
+            --ks-key-alias easycodex-ci \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out "$SIGNED" \
+            "$ALIGNED"
+          "$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED"
+
+      - name: Launch release APK on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            set -euo pipefail
+            adb install -r mobile/app/build/outputs/apk/release/EasyCodex.Mobile.ci-smoke.apk
+            adb logcat -c
+            adb shell am start -W -n com.easycodex.mobile/.MainActivity
+            sleep 8
+            adb shell pidof com.easycodex.mobile
+            adb logcat -d -v time > "$RUNNER_TEMP/easycodex-logcat.txt"
+            if grep -E "FATAL EXCEPTION|AndroidRuntime|VerifyError|Force finishing activity com.easycodex.mobile" "$RUNNER_TEMP/easycodex-logcat.txt"; then
+              exit 1
+            fi

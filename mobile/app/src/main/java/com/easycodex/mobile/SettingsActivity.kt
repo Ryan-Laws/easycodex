@@ -370,12 +370,16 @@ fun SettingsApp(onClose: () -> Unit) {
             saveState = strings.scanUnavailable
             return
         }
-        val options = GmsBarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-            .enableAutoZoom()
-            .build()
-        GmsBarcodeScanning.getClient(activity, options)
-            .startScan()
+        val scanTask = runCatching {
+            val options = GmsBarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .build()
+            GmsBarcodeScanning.getClient(activity, options).startScan()
+        }.getOrElse { error ->
+            saveState = error.message ?: strings.scanUnavailable
+            return
+        }
+        scanTask
             .addOnSuccessListener { barcode ->
                 val rawValue = barcode.rawValue.orEmpty()
                 val config = parseEasyCodexConnectionUri(Uri.parse(rawValue))

@@ -129,6 +129,7 @@ EasyCodex/
 
 - [APP.md](APP.md) explains the app architecture and local runtime model.
 - [AGENT.md](AGENT.md) describes relay-managed Codex agents, WebSocket actions, and runtime behavior.
+- [RELEASE.md](RELEASE.md) documents the CI/CD release process, Android signing requirements, and launch smoke tests.
 - [desktop-relay/README.md](desktop-relay/README.md) covers packaging and release builds for the desktop relay.
 
 ## Community

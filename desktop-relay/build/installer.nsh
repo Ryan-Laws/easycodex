@@ -21,6 +21,9 @@ LangString EasyCodexShortcutIntro 1028 "選擇要為 EasyCodex 中繼建立的�
 LangString EasyCodexDesktopShortcut 1033 "Create a desktop shortcut"
 LangString EasyCodexDesktopShortcut 2052 "创建桌面快捷方式"
 LangString EasyCodexDesktopShortcut 1028 "建立桌面捷徑"
+LangString EasyCodexUnsafeInstallDir 1033 "The selected folder looks like a source code or project folder. Choose a dedicated install folder such as Program Files\EasyCodex Relay to avoid data loss when uninstalling."
+LangString EasyCodexUnsafeInstallDir 2052 "所选文件夹看起来像源码或项目目录。请选择专用安装目录，例如 Program Files\EasyCodex Relay，避免卸载时误删文件。"
+LangString EasyCodexUnsafeInstallDir 1028 "所選資料夾看起來像原始碼或專案目錄。請選擇專用安裝目錄，例如 Program Files\EasyCodex Relay，避免解除安裝時誤刪檔案。"
 LangString EasyCodexStartMenuShortcut 1033 "Create a Start Menu shortcut"
 LangString EasyCodexStartMenuShortcut 2052 "创建开始菜单快捷方式"
 LangString EasyCodexStartMenuShortcut 1028 "建立開始功能表捷徑"
@@ -41,6 +44,14 @@ LangString EasyCodexStartMenuShortcut 1028 "建立開始功能表捷徑"
 !macroend
 
 Function ShortcutOptionsPage
+  ${If} ${FileExists} "$INSTDIR\.git\*.*"
+  ${OrIf} ${FileExists} "$INSTDIR\AGENTS.md"
+  ${OrIf} ${FileExists} "$INSTDIR\mobile\settings.gradle.kts"
+  ${OrIf} ${FileExists} "$INSTDIR\agent-relay\package.json"
+    MessageBox MB_ICONSTOP|MB_OK "$(EasyCodexUnsafeInstallDir)"
+    Abort
+  ${EndIf}
+
   nsDialogs::Create 1018
   Pop $0
   ${If} $0 == error

@@ -103,3 +103,5 @@ For a real app smoke test, install the debug build or run it from Android Studio
 - connection status updates
 - a workspace/thread can be opened
 - messages stream from an agent when the relay is running
+
+Release builds are verified in CI by installing the signed release APK on an Android emulator and launching `MainActivity`. See [RELEASE.md](RELEASE.md) for the full CI/CD and signing process.
