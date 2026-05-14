@@ -1,8 +1,10 @@
 package com.easycodex.mobile
 
 import android.content.ClipData
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.util.Base64
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -12,7 +14,9 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,8 +32,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,14 +45,12 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -61,12 +65,22 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -75,7 +89,13 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.net.URL
+import java.net.URLEncoder
 
 private data class ConversationLayoutMetrics(
     val listPadding: PaddingValues,
@@ -84,19 +104,23 @@ private data class ConversationLayoutMetrics(
     val bubbleShape: androidx.compose.ui.unit.Dp,
     val userBubbleWidth: Float,
     val assistantBubbleWidth: Float,
+    val detailBubbleWidth: Float,
 )
-
-private enum class ConversationFilter {
-    All,
-    Results,
-    Changes,
-}
 
 private const val LONG_DETAIL_TEXT_LIMIT = 6_000
 private const val LONG_MESSAGE_TEXT_LIMIT = 1_600
 private const val MESSAGE_PREVIEW_TEXT_LIMIT = 900
 private const val MESSAGE_PREVIEW_LINE_LIMIT = 14
-private const val LONG_CODE_TEXT_LIMIT = 1_200
+
+private fun AttachmentDraft.isPreviewImage(): Boolean {
+    return !previewUri.isNullOrBlank() && mimeType?.startsWith("image/") == true
+}
+
+private suspend fun LazyListState.scrollToBottomAnchor(bottomIndex: Int) {
+    scrollToItem(bottomIndex)
+    withFrameNanos { }
+    if (canScrollForward) scrollToItem(bottomIndex)
+}
 
 private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMetrics {
     return when (layoutMode) {
@@ -105,8 +129,9 @@ private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMet
             itemSpacing = 6.dp,
             bubblePadding = 10.dp,
             bubbleShape = 14.dp,
-            userBubbleWidth = 0.92f,
+            userBubbleWidth = 0.98f,
             assistantBubbleWidth = 0.98f,
+            detailBubbleWidth = 0.98f,
         )
 
         "spacious" -> ConversationLayoutMetrics(
@@ -114,8 +139,9 @@ private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMet
             itemSpacing = 14.dp,
             bubblePadding = 16.dp,
             bubbleShape = 24.dp,
-            userBubbleWidth = 0.78f,
-            assistantBubbleWidth = 0.88f,
+            userBubbleWidth = 0.92f,
+            assistantBubbleWidth = 0.96f,
+            detailBubbleWidth = 0.92f,
         )
 
         else -> ConversationLayoutMetrics(
@@ -123,8 +149,9 @@ private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMet
             itemSpacing = 10.dp,
             bubblePadding = 14.dp,
             bubbleShape = 20.dp,
-            userBubbleWidth = 0.86f,
-            assistantBubbleWidth = 0.94f,
+            userBubbleWidth = 0.96f,
+            assistantBubbleWidth = 0.98f,
+            detailBubbleWidth = 0.96f,
         )
     }
 }
@@ -134,18 +161,17 @@ fun Conversation(
     agent: Agent?,
     layoutMode: String = DEFAULT_APP_LAYOUT,
     emptyMessage: String = "创建或选择一个智能体开始。",
-    notificationLevelState: NotificationLevelState? = null,
-    onInterrupt: () -> Unit = {},
+    relayUrl: String = "",
+    apiKey: String = "",
     onOpenDiffReview: () -> Unit = {},
-    onNotificationLevelChange: (String, String) -> Unit = { _, _ -> },
     onOpenPlan: (AgentMessage) -> Unit = {},
 ) {
     val metrics = conversationLayoutMetrics(layoutMode)
     val strings = LocalAppStrings.current
     val listState = rememberLazyListState()
     val scrollScope = rememberCoroutineScope()
-    var filter by remember(agent?.id) { mutableStateOf(ConversationFilter.All) }
-    var initializedAtBottom by remember(agent?.id, filter) { mutableStateOf(false) }
+    var initializedAtBottom by remember(agent?.id) { mutableStateOf(false) }
+    var followOutput by remember(agent?.id) { mutableStateOf(true) }
 
     if (agent == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -153,100 +179,88 @@ fun Conversation(
         }
         return
     }
-    val filteredMessages by remember(agent.messages, filter) {
+    val visibleMessages by remember(agent.messages) {
         derivedStateOf {
-        when (filter) {
-            ConversationFilter.All -> agent.messages
-            ConversationFilter.Results -> agent.messages.filter { message ->
-                message.role == "user" || message.type in setOf("agent", "plan", "status")
+            agent.messages.filter { it.isPrimaryConversationVisible() }
+        }
+    }
+    val conversationItems = remember(visibleMessages) { visibleMessages.toConversationListItems() }
+    val visibleMessageKeys = remember(conversationItems) { conversationItems.uniqueLazyKeys() }
+    val bottomIndex = conversationItems.size
+    val bottomAnchorCount = conversationItems.size + 1
+    val lastMessage = visibleMessages.lastOrNull()
+    val outputRevision = "${agent.updatedAt}:${visibleMessages.size}:${lastMessage?.stableKey().orEmpty()}:${lastMessage?.text?.length ?: 0}:${lastMessage?.text?.hashCode() ?: 0}:${lastMessage?.streaming == true}"
+    val isAtBottom by remember(listState, bottomAnchorCount) {
+        derivedStateOf {
+            !listState.canScrollForward
+        }
+    }
+    val userScrollConnection = remember(agent.id) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y > 0f) followOutput = false
+                return Offset.Zero
             }
-            ConversationFilter.Changes -> agent.messages.filter { it.type == "file_change" }
-        }
         }
     }
-    val filteredMessageKeys = remember(filteredMessages) { filteredMessages.uniqueLazyKeys() }
-    val lastListIndex = filteredMessages.size
-    val lastMessage = filteredMessages.lastOrNull()
-    val lastMessageStreamMarker = lastMessage?.let { "${it.stableKey()}:${it.text.length}:${it.streaming}" }
-    val isAtBottom by remember(listState, lastListIndex) {
-        derivedStateOf {
-            val visibleItems = listState.layoutInfo.visibleItemsInfo
-            visibleItems.isEmpty() || (visibleItems.lastOrNull()?.index ?: 0) >= lastListIndex
-        }
-    }
-    val shouldFollowOutput by remember(listState, lastListIndex) {
-        derivedStateOf {
-            val visibleItems = listState.layoutInfo.visibleItemsInfo
-            visibleItems.isEmpty() || (visibleItems.lastOrNull()?.index ?: 0) >= (lastListIndex - 1).coerceAtLeast(0)
-        }
-    }
-    LaunchedEffect(agent.id, filter, lastListIndex) {
-        if (lastListIndex > 0 && !initializedAtBottom) {
-            listState.animateScrollToItem(lastListIndex)
+    LaunchedEffect(agent.id, bottomAnchorCount) {
+        if (visibleMessages.isNotEmpty() && !initializedAtBottom) {
+            listState.scrollToBottomAnchor(bottomIndex)
             initializedAtBottom = true
         }
     }
-    LaunchedEffect(agent.id, filter, lastListIndex, lastMessageStreamMarker) {
-        if (lastListIndex > 0 && shouldFollowOutput) listState.animateScrollToItem(lastListIndex)
+    LaunchedEffect(agent.id) {
+        snapshotFlow { !listState.canScrollForward }
+            .distinctUntilChanged()
+            .collect { atBottom ->
+                if (atBottom) followOutput = true
+            }
+    }
+    LaunchedEffect(agent.id, outputRevision, followOutput) {
+        if (visibleMessages.isNotEmpty() && followOutput) listState.scrollToBottomAnchor(bottomIndex)
     }
 
     Box(Modifier.fillMaxSize()) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(metrics.itemSpacing),
-            contentPadding = metrics.listPadding,
-        ) {
-            item {
-                ConversationStatusHeader(
-                    agent = agent,
-                    filter = filter,
-                    notificationLevelState = notificationLevelState,
-                    onFilterChange = { filter = it },
-                    onInterrupt = onInterrupt,
-                    onOpenDiffReview = onOpenDiffReview,
-                    onNotificationLevelChange = onNotificationLevelChange,
-                )
-                AnimatedVisibility(
-                    visible = !agent.activity.isNullOrBlank(),
-                    enter = expandVertically(
-                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                        expandFrom = Alignment.Top,
-                    ) + fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
-                    exit = shrinkVertically(
-                        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-                        shrinkTowards = Alignment.Top,
-                    ) + fadeOut(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
-                ) {
-                    Column {
-                        Spacer(Modifier.height(8.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(8.dp))
-                            Text(agent.activity.orEmpty(), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
+        Column(Modifier.fillMaxSize()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .nestedScroll(userScrollConnection),
+                verticalArrangement = Arrangement.spacedBy(metrics.itemSpacing),
+                contentPadding = metrics.listPadding,
+            ) {
+                itemsIndexed(
+                    conversationItems,
+                    key = { index, item -> visibleMessageKeys.getOrNull(index) ?: "${item.stableKey()}#$index" },
+                ) { _, item ->
+                    when (item) {
+                        is ConversationListItem.Message -> MessageBubble(
+                            message = item.message,
+                            metrics = metrics,
+                            relayUrl = relayUrl,
+                            apiKey = apiKey,
+                            onOpenPlan = { onOpenPlan(item.message) },
+                            onOpenDiffReview = onOpenDiffReview,
+                        )
+
+                        is ConversationListItem.DetailGroup -> DetailGroupBubble(
+                            messages = item.messages,
+                            kind = item.kind,
+                            metrics = metrics,
+                            onOpenDiffReview = onOpenDiffReview,
+                        )
                     }
                 }
-                if (filter != ConversationFilter.All && filteredMessages.isEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(strings.noMessagesForFilter, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                item(key = "conversation-bottom-anchor") {
+                    Spacer(Modifier.height(1.dp))
                 }
-            }
-            itemsIndexed(
-                filteredMessages,
-                key = { index, message -> filteredMessageKeys.getOrNull(index) ?: "${message.stableKey()}#$index" },
-            ) { _, message ->
-                MessageBubble(
-                    message = message,
-                    metrics = metrics,
-                    onOpenPlan = { onOpenPlan(message) },
-                    onOpenDiffReview = onOpenDiffReview,
-                )
             }
         }
 
         AnimatedVisibility(
-            visible = lastListIndex > 0 && !isAtBottom,
+            visible = visibleMessages.isNotEmpty() && !isAtBottom,
             enter = fadeIn() + scaleIn(),
             exit = fadeOut() + scaleOut(),
             modifier = Modifier
@@ -255,8 +269,9 @@ fun Conversation(
         ) {
             FloatingActionButton(
                 onClick = {
+                    followOutput = true
                     scrollScope.launch {
-                        listState.animateScrollToItem(lastListIndex)
+                        listState.scrollToBottomAnchor(bottomIndex)
                     }
                 },
                 shape = CircleShape,
@@ -268,138 +283,6 @@ fun Conversation(
             }
         }
     }
-}
-
-@Composable
-private fun ConversationStatusHeader(
-    agent: Agent,
-    filter: ConversationFilter,
-    notificationLevelState: NotificationLevelState?,
-    onFilterChange: (ConversationFilter) -> Unit,
-    onInterrupt: () -> Unit,
-    onOpenDiffReview: () -> Unit,
-    onNotificationLevelChange: (String, String) -> Unit,
-) {
-    val strings = LocalAppStrings.current
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = when {
-                        agent.isBusy() -> MaterialTheme.colorScheme.primary
-                        agent.status.equals("error", ignoreCase = true) -> MaterialTheme.colorScheme.error
-                        else -> MaterialTheme.colorScheme.outlineVariant
-                    },
-                    modifier = Modifier.size(10.dp),
-                ) {}
-                Column(Modifier.weight(1f)) {
-                    Text(agent.name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(agent.model, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                Surface(
-                    shape = RoundedCornerShape(999.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainer,
-                ) {
-                    Text(
-                        agentStatusLabel(agent),
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                }
-            }
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                ConversationFilterChip(strings.filterAllMessages, ConversationFilter.All, filter, onFilterChange)
-                ConversationFilterChip(strings.filterResults, ConversationFilter.Results, filter, onFilterChange)
-                ConversationFilterChip(strings.filterChanges, ConversationFilter.Changes, filter, onFilterChange)
-                if (agent.messages.any { it.type == "file_change" }) {
-                    AssistChip(
-                        onClick = onOpenDiffReview,
-                        leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                        label = { Text(strings.reviewChanges) },
-                    )
-                }
-                if (agent.isBusy()) {
-                    AssistChip(
-                        onClick = onInterrupt,
-                        leadingIcon = { Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                        label = { Text(strings.interrupt) },
-                    )
-                }
-            }
-            NotificationLevelRow(
-                agentId = agent.id,
-                state = notificationLevelState,
-                onLevelChange = onNotificationLevelChange,
-            )
-        }
-    }
-}
-
-@Composable
-private fun NotificationLevelRow(
-    agentId: String,
-    state: NotificationLevelState?,
-    onLevelChange: (String, String) -> Unit,
-) {
-    val strings = LocalAppStrings.current
-    val activeLevel = state?.takeIf { it.agentId == agentId }?.level ?: "all"
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            strings.notificationLevel,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        listOf(
-            "all" to strings.all,
-            "errors" to strings.errorsOnly,
-            "muted" to strings.muted,
-        ).forEach { (level, label) ->
-            FilterChip(
-                selected = activeLevel == level,
-                enabled = state?.loading != true,
-                onClick = { onLevelChange(agentId, level) },
-                label = { Text(label) },
-            )
-        }
-        if (state?.loading == true) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-        }
-    }
-    state?.error?.takeIf { it.isNotBlank() }?.let { error ->
-        Text(
-            error,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error,
-        )
-    }
-}
-
-@Composable
-private fun ConversationFilterChip(
-    label: String,
-    value: ConversationFilter,
-    selected: ConversationFilter,
-    onSelect: (ConversationFilter) -> Unit,
-) {
-    FilterChip(
-        selected = value == selected,
-        onClick = { onSelect(value) },
-        label = { Text(label) },
-    )
 }
 
 fun agentStatusLabel(agent: Agent): String {
@@ -419,11 +302,29 @@ fun AgentMessage.stableKey(): String {
     return itemId ?: "${timestamp}_${role}_${type}"
 }
 
-private fun List<AgentMessage>.uniqueLazyKeys(): List<String> {
+private sealed class ConversationListItem {
+    data class Message(val message: AgentMessage) : ConversationListItem()
+    data class DetailGroup(val messages: List<AgentMessage>, val kind: DetailGroupKind) : ConversationListItem()
+
+    fun stableKey(): String {
+        return when (this) {
+            is Message -> message.stableKey()
+            is DetailGroup -> "${kind.name.lowercase()}_group_${messages.first().stableKey()}_${messages.last().stableKey()}_${messages.size}"
+        }
+    }
+}
+
+private enum class DetailGroupKind {
+    Command,
+    FileChange,
+    Mixed,
+}
+
+private fun List<ConversationListItem>.uniqueLazyKeys(): List<String> {
     val totals = groupingBy { it.stableKey() }.eachCount()
     val seen = mutableMapOf<String, Int>()
-    return map { message ->
-        val baseKey = message.stableKey()
+    return map { item ->
+        val baseKey = item.stableKey()
         if ((totals[baseKey] ?: 0) <= 1) {
             baseKey
         } else {
@@ -431,6 +332,45 @@ private fun List<AgentMessage>.uniqueLazyKeys(): List<String> {
             seen[baseKey] = occurrence + 1
             "$baseKey#$occurrence"
         }
+    }
+}
+
+private fun List<AgentMessage>.toConversationListItems(): List<ConversationListItem> {
+    val items = mutableListOf<ConversationListItem>()
+    var index = 0
+    while (index < size) {
+        val message = this[index]
+        if (!message.isDetailGroupCandidate()) {
+            items.add(ConversationListItem.Message(message))
+            index += 1
+            continue
+        }
+
+        val group = mutableListOf<AgentMessage>()
+        while (index < size && this[index].isDetailGroupCandidate()) {
+            group.add(this[index])
+            index += 1
+        }
+        if (group.size >= 2) {
+            items.add(ConversationListItem.DetailGroup(group, group.detailGroupKind()))
+        } else {
+            items.add(ConversationListItem.Message(group.first()))
+        }
+    }
+    return items
+}
+
+private fun AgentMessage.isDetailGroupCandidate(): Boolean {
+    return role == "agent" && type in setOf("command", "command_output", "file_change")
+}
+
+private fun List<AgentMessage>.detailGroupKind(): DetailGroupKind {
+    val hasCommand = any { it.type == "command" || it.type == "command_output" }
+    val hasFileChange = any { it.type == "file_change" }
+    return when {
+        hasCommand && hasFileChange -> DetailGroupKind.Mixed
+        hasFileChange -> DetailGroupKind.FileChange
+        else -> DetailGroupKind.Command
     }
 }
 
@@ -448,12 +388,20 @@ private data class DetailDisplay(
     val additions: Int = 0,
     val deletions: Int = 0,
     val files: List<String> = emptyList(),
+    val fileEntries: List<FileChangeEntry> = emptyList(),
 )
 
 private data class FileChangeStats(
     val files: List<String>,
     val additions: Int,
     val deletions: Int,
+    val entries: List<FileChangeEntry>,
+)
+
+private data class FileChangeEntry(
+    val path: String,
+    val additions: Int = 0,
+    val deletions: Int = 0,
 )
 
 private fun AgentMessage.isDetailMessage(): Boolean {
@@ -463,6 +411,23 @@ private fun AgentMessage.isDetailMessage(): Boolean {
         type == "sub_agent" ||
         type == "tool" ||
         type == "tool_call"
+}
+
+private fun AgentMessage.isInternalStatusMessage(): Boolean {
+    if (type != "status") return false
+    val normalizedText = text.trimStart()
+    return itemId?.startsWith("tokens_") == true ||
+        itemId?.startsWith("queued_followups_") == true ||
+        normalizedText.startsWith("Token usage") ||
+        normalizedText == "Token usage updated." ||
+        normalizedText.startsWith("已排队 ") && normalizedText.contains("个后续任务")
+}
+
+private fun AgentMessage.isPrimaryConversationVisible(): Boolean {
+    if (text.isBlank()) return false
+    if (text.trim() == "已加载项目上下文。") return false
+    if (isInternalStatusMessage()) return false
+    return true
 }
 
 private fun messageTypeLabel(type: String): String {
@@ -510,6 +475,7 @@ private fun commandDisplay(raw: String, isOutput: Boolean): DetailDisplay {
 
             command.isBlank() &&
                 trimmed.isNotBlank() &&
+                trimmed !in setOf("运行命令", "命令已完成", "正在运行命令。", "命令执行完成。", "命令已完成，输出已省略。") &&
                 !trimmed.startsWith("cwd:", ignoreCase = true) &&
                 !trimmed.startsWith("status:", ignoreCase = true) &&
                 !trimmed.startsWith("exit:", ignoreCase = true) &&
@@ -521,9 +487,9 @@ private fun commandDisplay(raw: String, isOutput: Boolean): DetailDisplay {
     val title = when {
         isOutput && duration.isNotBlank() -> "已处理 $duration"
         isOutput -> status.ifBlank { "已处理" }
-        command.isNotBlank() -> command
+        command.isNotBlank() -> "已运行 $command"
         else -> "命令"
-    }
+    }.compactDetailTitle()
     val subtitleParts = if (isOutput) {
         listOf(command, exit.takeIf { it.isNotBlank() }?.let { "exit $it" }.orEmpty(), status)
     } else {
@@ -545,30 +511,70 @@ private fun fileChangeDisplay(raw: String): DetailDisplay {
         paths.size == 1 -> paths.first().substringAfterLast('\\').substringAfterLast('/')
         paths.size > 1 -> "${paths.size} 个文件改动"
         else -> "文件改动"
-    }
+    }.compactDetailTitle()
     val subtitle = listOf(
         status.ifBlank { "已处理" },
         if (stats.additions + stats.deletions > 0) "+${stats.additions} -${stats.deletions}" else "",
         paths.firstOrNull().orEmpty(),
     ).filter { it.isNotBlank() }.joinToString(" · ")
-    return DetailDisplay("文件改动", title, subtitle, raw, stats.additions, stats.deletions, paths)
+    return DetailDisplay("文件改动", title, subtitle, raw, stats.additions, stats.deletions, paths, stats.entries)
+}
+
+private fun cleanFileChangeBody(raw: String): String {
+    val noiseLine = Regex(
+        pattern = "^(success\\s+)?(update|updated|modify|modified|edit|edited)\\b.*\\b(following\\s+files?|files?)\\b.*$",
+        option = RegexOption.IGNORE_CASE,
+    )
+    return raw.lineSequence()
+        .filterNot { line ->
+            val trimmed = line.trim()
+            trimmed.equals("Files:", ignoreCase = true) || noiseLine.matches(trimmed)
+        }
+        .joinToString("\n")
+        .trim()
 }
 
 private fun fileChangeStats(raw: String): FileChangeStats {
     val paths = linkedSetOf<String>()
+    val entryStats = linkedMapOf<String, FileChangeEntry>()
     var additions = 0
     var deletions = 0
+    val rawLooksLikeDiff = raw.lineSequence().any { line ->
+        line.startsWith("diff --git ") || line.startsWith("@@")
+    }
     raw.lineSequence().forEach { line ->
         val trimmed = line.trim()
+        val summaryEntry = parseFileSummaryLine(trimmed)
+        if (summaryEntry != null) {
+            paths.add(summaryEntry.path)
+            val existing = entryStats[summaryEntry.path]
+            entryStats[summaryEntry.path] = if (existing == null) {
+                summaryEntry
+            } else {
+                existing.copy(
+                    additions = existing.additions + summaryEntry.additions,
+                    deletions = existing.deletions + summaryEntry.deletions,
+                )
+            }
+            return@forEach
+        }
+        val inlineStats = parseInlineFileChangeStats(trimmed)
+        if (inlineStats != null) {
+            additions += inlineStats.first
+            deletions += inlineStats.second
+        }
         when {
-            line.startsWith("+") && !line.startsWith("+++") -> additions += 1
-            line.startsWith("-") && !line.startsWith("---") -> deletions += 1
+            rawLooksLikeDiff && line.startsWith("+") && !line.startsWith("+++") -> additions += 1
+            rawLooksLikeDiff && line.startsWith("-") && !line.startsWith("---") -> deletions += 1
         }
         val diffPath = Regex("^diff --git a/(.+?) b/(.+)$").find(trimmed)?.groupValues?.getOrNull(2)
         val newPath = Regex("^\\+\\+\\+ b/(.+)$").find(trimmed)?.groupValues?.getOrNull(1)
         val oldPath = Regex("^--- a/(.+)$").find(trimmed)?.groupValues?.getOrNull(1)
         val plainPath = trimmed.takeIf { value ->
             value.isNotBlank() &&
+                value != "文件改动" &&
+                value != "Files:" &&
+                !value.startsWith("Files:", ignoreCase = true) &&
                 !value.startsWith("@@") &&
                 !value.startsWith("+") &&
                 !value.startsWith("-") &&
@@ -581,7 +587,99 @@ private fun fileChangeStats(raw: String): FileChangeStats {
             .filter { it.isNotBlank() && it != "/dev/null" }
             .forEach { paths.add(it) }
     }
-    return FileChangeStats(paths.toList(), additions, deletions)
+    val entries = if (entryStats.isNotEmpty()) {
+        entryStats.values.toList()
+    } else {
+        paths.map { FileChangeEntry(it) }
+    }
+    val summaryAdditions = entries.sumOf { it.additions }
+    val summaryDeletions = entries.sumOf { it.deletions }
+    return FileChangeStats(
+        files = paths.toList(),
+        additions = if (summaryAdditions > 0 || summaryDeletions > 0) summaryAdditions else additions,
+        deletions = if (summaryAdditions > 0 || summaryDeletions > 0) summaryDeletions else deletions,
+        entries = entries,
+    )
+}
+
+private fun parseFileSummaryLine(trimmed: String): FileChangeEntry? {
+    val bullet = Regex(
+        "^[-•]\\s+(.+?)(?:\\s+\\(?\\+(\\d+)\\s+-(\\d+)\\)?)?$",
+    ).find(trimmed)
+    val edited = Regex(
+        "^(?:已编辑|已修改|修改|edited|modified|updated)\\s+(.+?)(?:\\s+\\(?\\+(\\d+)\\s+-(\\d+)\\)?)?$",
+        RegexOption.IGNORE_CASE,
+    ).find(trimmed)
+    val match = bullet ?: edited ?: return null
+    val path = match.groupValues.getOrNull(1)?.trim().orEmpty()
+    if (path.isBlank() || (!path.contains("/") && !path.contains("\\") && !path.contains("."))) return null
+    return FileChangeEntry(
+        path = path.removePrefix("a/").removePrefix("b/"),
+        additions = match.groupValues.getOrNull(2)?.toIntOrNull() ?: 0,
+        deletions = match.groupValues.getOrNull(3)?.toIntOrNull() ?: 0,
+    )
+}
+
+private fun parseInlineFileChangeStats(trimmed: String): Pair<Int, Int>? {
+    val match = Regex("\\+\\s*(\\d+)\\s+-\\s*(\\d+)").find(trimmed) ?: return null
+    return (match.groupValues.getOrNull(1)?.toIntOrNull() ?: 0) to
+        (match.groupValues.getOrNull(2)?.toIntOrNull() ?: 0)
+}
+
+private fun String.compactDetailTitle(limit: Int = 96): String {
+    val singleLine = trim().replace(Regex("\\s+"), " ")
+    if (singleLine.length <= limit) return singleLine
+    return singleLine.take(limit).trimEnd() + "..."
+}
+
+@Composable
+private fun LightweightDetailHeader(
+    title: String,
+    subtitle: String,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onToggleExpanded() }
+            .padding(horizontal = 2.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(
+            Icons.Default.Description,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.66f),
+            modifier = Modifier.size(15.dp),
+        )
+        Text(
+            title,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (subtitle.isNotBlank()) {
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(0.72f, fill = false),
+            )
+        }
+        Icon(
+            if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+            contentDescription = if (expanded) "收起细节" else "展开细节",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f),
+            modifier = Modifier.size(18.dp),
+        )
+    }
 }
 
 private fun formatDurationToken(raw: String): String {
@@ -630,41 +728,244 @@ private fun markdownBlocks(text: String): List<MarkdownBlock> {
 }
 
 @Composable
+private fun DetailGroupBubble(
+    messages: List<AgentMessage>,
+    kind: DetailGroupKind,
+    metrics: ConversationLayoutMetrics,
+    onOpenDiffReview: () -> Unit = {},
+) {
+    var expanded by remember(messages.firstOrNull()?.stableKey(), messages.lastOrNull()?.stableKey(), messages.size) { mutableStateOf(false) }
+    val running = messages.any { it.streaming }
+    val commandCount = messages.count { it.type == "command" }.takeIf { it > 0 } ?: messages.size
+    val fileCount = remember(messages) {
+        messages.sumOf { message ->
+            message.detailDisplay().files.size.coerceAtLeast(
+                if (message.type == "file_change") 1 else 0,
+            )
+        }.coerceAtLeast(messages.size)
+    }
+    val latestTitle = remember(messages) {
+        messages.lastOrNull()
+            ?.detailDisplay()
+            ?.title
+            .orEmpty()
+    }
+    val commandTitle = if (running) "正在运行 $commandCount 条命令" else "已运行 $commandCount 条命令"
+    val fileTitle = "$fileCount 个文件已更改"
+    val title = when (kind) {
+        DetailGroupKind.Command -> commandTitle
+        DetailGroupKind.FileChange -> fileTitle
+        DetailGroupKind.Mixed -> "$commandTitle · $fileTitle"
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start,
+    ) {
+        Box(Modifier.fillMaxWidth(metrics.detailBubbleWidth)) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                LightweightDetailHeader(
+                    title = title,
+                    subtitle = latestTitle,
+                    expanded = expanded,
+                    onToggleExpanded = { expanded = !expanded },
+                )
+                AnimatedVisibility(
+                    visible = expanded,
+                    enter = expandVertically(
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        expandFrom = Alignment.Top,
+                    ) + fadeIn(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
+                    exit = shrinkVertically(
+                        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                        shrinkTowards = Alignment.Top,
+                    ) + fadeOut(animationSpec = tween(durationMillis = 100, easing = FastOutSlowInEasing)),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 18.dp, end = 4.dp, bottom = 2.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        messages.forEachIndexed { index, message ->
+                            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.48f))
+                            DetailMessageCard(message, onOpenDiffReview)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun MessageBubble(
     message: AgentMessage,
     metrics: ConversationLayoutMetrics = conversationLayoutMetrics(DEFAULT_APP_LAYOUT),
+    relayUrl: String = "",
+    apiKey: String = "",
     onOpenPlan: () -> Unit = {},
     onOpenDiffReview: () -> Unit = {},
 ) {
     val isUser = message.role == "user"
     val isPlainAssistant = !isUser && message.type != "plan" && !message.isDetailMessage()
+    val isDetail = message.isDetailMessage()
+    if (isDetail) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Start,
+        ) {
+            Box(Modifier.fillMaxWidth(metrics.detailBubbleWidth)) {
+                DetailMessageCard(message, onOpenDiffReview)
+            }
+        }
+        return
+    }
     val container = when {
-        isUser -> MaterialTheme.colorScheme.surfaceContainerHigh
+        isUser -> MaterialTheme.colorScheme.surfaceContainerHighest
         message.type == "thinking" -> MaterialTheme.colorScheme.surfaceContainer
         message.type == "plan" -> MaterialTheme.colorScheme.surfaceContainer
-        message.isDetailMessage() -> MaterialTheme.colorScheme.surface
         else -> Color.Transparent
+    }
+    val contentPadding = when {
+        isPlainAssistant -> PaddingValues(horizontal = 2.dp, vertical = 2.dp)
+        isUser -> PaddingValues(horizontal = metrics.bubblePadding, vertical = metrics.bubblePadding)
+        else -> PaddingValues(metrics.bubblePadding)
     }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
     ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(if (isUser) metrics.userBubbleWidth else metrics.assistantBubbleWidth),
-            color = container,
-            border = if (isUser || message.isDetailMessage() || message.type == "plan") {
-                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
-            } else {
-                null
-            },
-            shape = RoundedCornerShape(if (isPlainAssistant) 12.dp else metrics.bubbleShape),
-        ) {
-            Column(Modifier.padding(metrics.bubblePadding)) {
-                when {
-                    message.type == "plan" -> PlanMessageCard(message, onOpenPlan)
-                    message.isDetailMessage() -> DetailMessageCard(message, onOpenDiffReview)
-                    else -> MarkdownMessageContent(message.text.ifBlank { "..." }, previewLongContent = true)
+        val clipboard = LocalClipboard.current
+        val clipboardScope = rememberCoroutineScope()
+        val strings = LocalAppStrings.current
+        var copyMenuExpanded by remember(message.stableKey(), message.text) { mutableStateOf(false) }
+        val bubbleWidth = when {
+            isUser -> metrics.userBubbleWidth
+            else -> metrics.assistantBubbleWidth
+        }
+        Box(Modifier.fillMaxWidth(bubbleWidth)) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (message.text.isBlank()) {
+                            Modifier
+                        } else {
+                            Modifier.pointerInput(message.text) {
+                                detectTapGestures(
+                                    onLongPress = { copyMenuExpanded = true },
+                                )
+                            }
+                        },
+                    ),
+                color = container,
+                border = if (isUser || message.type == "plan") {
+                    BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (isUser) 0.28f else 0.72f))
+                } else {
+                    null
+                },
+                shape = RoundedCornerShape(if (isPlainAssistant) 12.dp else metrics.bubbleShape),
+            ) {
+                Column(
+                    modifier = Modifier.padding(contentPadding),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (message.attachments.any { it.isPreviewImage() }) {
+                        AttachmentPreviewRow(message.attachments)
+                    }
+                    when {
+                        message.type == "plan" -> PlanMessageCard(message, onOpenPlan)
+                        else -> MarkdownMessageContent(
+                            text = message.text.ifBlank { "..." },
+                            previewLongContent = isPlainAssistant,
+                            relayUrl = relayUrl,
+                            apiKey = apiKey,
+                        )
+                    }
                 }
+            }
+            DropdownMenu(
+                expanded = copyMenuExpanded,
+                onDismissRequest = { copyMenuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text(strings.copyContent) },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    },
+                    onClick = {
+                        copyMenuExpanded = false
+                        clipboardScope.launch {
+                            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("EasyCodex", message.text)))
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AttachmentPreviewRow(attachments: List<AttachmentDraft>) {
+    val images = attachments.filter { it.isPreviewImage() }
+    if (images.isEmpty()) return
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        images.forEach { attachment ->
+            AttachmentImagePreview(attachment, wide = images.size == 1)
+        }
+    }
+}
+
+@Composable
+private fun AttachmentImagePreview(attachment: AttachmentDraft, wide: Boolean) {
+    val context = LocalContext.current
+    var image by remember(attachment.previewUri) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    LaunchedEffect(attachment.previewUri) {
+        image = attachment.previewUri
+            ?.let { uri -> runCatching { Uri.parse(uri) }.getOrNull() }
+            ?.let { uri ->
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { stream ->
+                        BitmapFactory.decodeStream(stream)?.asImageBitmap()
+                    }
+                }.getOrNull()
+            }
+    }
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.56f)),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = if (wide) {
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 132.dp, max = 220.dp)
+        } else {
+            Modifier
+                .width(148.dp)
+                .height(112.dp)
+        },
+    ) {
+        if (image != null) {
+            Image(
+                bitmap = image!!,
+                contentDescription = attachment.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Description, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -704,7 +1005,9 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
     var expanded by remember(message.stableKey()) { mutableStateOf(false) }
     var textExpanded by remember(message.stableKey()) { mutableStateOf(false) }
     val detail = remember(message.text, message.type) { message.detailDisplay() }
-    val body = detail.body.ifBlank { "..." }
+    val body = remember(detail.body, message.type) {
+        if (message.type == "file_change") cleanFileChangeBody(detail.body) else detail.body
+    }.ifBlank { "..." }
     val bodyIsLong = body.length > LONG_DETAIL_TEXT_LIMIT
     val visibleBody = if (bodyIsLong && !textExpanded) body.take(LONG_DETAIL_TEXT_LIMIT) else body
     val clipboard = LocalClipboard.current
@@ -714,48 +1017,29 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
             clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("EasyCodex", text)))
         }
     }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .clickable { expanded = !expanded },
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                if (message.type == "file_change") {
-                    FileChangeSummary(detail)
-                    Spacer(Modifier.height(6.dp))
-                } else {
-                    Text(
-                        detail.label,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Text(
-                    detail.title,
-                    style = if (message.type == "file_change") MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = if (message.type == "file_change") 2 else 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (detail.subtitle.isNotBlank()) {
-                    Text(
-                        detail.subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            Icon(
-                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                contentDescription = if (expanded) "收起细节" else "展开细节",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+    if (message.type == "file_change") {
+        FileChangeCard(
+            detail = detail,
+            expanded = expanded,
+            onToggleExpanded = { expanded = !expanded },
+            onCopyText = { copyText(body.ifBlank { message.text }) },
+            onOpenDiffReview = onOpenDiffReview,
+        )
+        return
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        LightweightDetailHeader(
+            title = detail.title,
+            subtitle = detail.subtitle,
+            expanded = expanded,
+            onToggleExpanded = { expanded = !expanded },
+        )
         AnimatedVisibility(
             visible = expanded,
             enter = expandVertically(
@@ -768,9 +1052,7 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
             ) + fadeOut(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
         ) {
             Column(
-                modifier = Modifier.animateContentSize(
-                    animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
-                ),
+                modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -823,47 +1105,153 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
 }
 
 @Composable
-private fun FileChangeSummary(detail: DetailDisplay) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+private fun FileChangeCard(
+    detail: DetailDisplay,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    onCopyText: () -> Unit,
+    onOpenDiffReview: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    val entries = detail.fileEntries.ifEmpty { detail.files.map { FileChangeEntry(it) } }
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text(
-            detail.label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (detail.additions + detail.deletions > 0) {
-            Surface(
-                color = MaterialTheme.colorScheme.primaryContainer,
-                shape = RoundedCornerShape(999.dp),
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .clickable { onToggleExpanded() }
+                .padding(horizontal = 2.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                Icons.Default.Description,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.66f),
+                modifier = Modifier.size(15.dp),
+            )
+            Text(
+                "${detail.files.size.coerceAtLeast(1)} 个文件已更改",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            FileChangeStatText(detail.additions, detail.deletions)
+            Icon(
+                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                contentDescription = if (expanded) "收起细节" else "展开细节",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f),
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                expandFrom = Alignment.Top,
+            ) + fadeIn(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
+            exit = shrinkVertically(
+                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                shrinkTowards = Alignment.Top,
+            ) + fadeOut(animationSpec = tween(durationMillis = 100, easing = FastOutSlowInEasing)),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 18.dp, end = 4.dp, bottom = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Text(
-                    "+${detail.additions}",
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            Surface(
-                color = MaterialTheme.colorScheme.errorContainer,
-                shape = RoundedCornerShape(999.dp),
-            ) {
-                Text(
-                    "-${detail.deletions}",
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    AssistChip(
+                        onClick = onOpenDiffReview,
+                        leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        label = { Text(strings.viewFullDiff) },
+                    )
+                    AssistChip(
+                        onClick = onCopyText,
+                        leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        label = { Text(strings.copyContent) },
+                    )
+                }
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.56f)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column {
+                        entries.take(4).forEachIndexed { index, entry ->
+                            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.56f))
+                            FileChangeRow(entry)
+                        }
+                        if (entries.size > 4) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.56f))
+                            Text(
+                                "另有 ${entries.size - 4} 个文件",
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-fun MarkdownMessageContent(text: String, previewLongContent: Boolean = false) {
+private fun FileChangeRow(entry: FileChangeEntry) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 9.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            entry.path,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        FileChangeStatText(entry.additions, entry.deletions)
+    }
+}
+
+@Composable
+private fun FileChangeStatText(additions: Int, deletions: Int) {
+    if (additions <= 0 && deletions <= 0) return
+    Text(
+        buildAnnotatedString {
+            withStyle(SpanStyle(color = Color(0xFF159447))) {
+                append("+$additions")
+            }
+            append(" ")
+            withStyle(SpanStyle(color = Color(0xFFE11D2E))) {
+                append("-$deletions")
+            }
+        },
+        style = MaterialTheme.typography.bodySmall,
+        fontWeight = FontWeight.Medium,
+        maxLines = 1,
+    )
+}
+
+@Composable
+fun MarkdownMessageContent(
+    text: String,
+    previewLongContent: Boolean = false,
+    relayUrl: String = "",
+    apiKey: String = "",
+) {
     var expanded by remember(text) { mutableStateOf(false) }
     val isLong = previewLongContent && textNeedsPreview(text)
     val visibleText = remember(text, expanded, previewLongContent) {
@@ -871,9 +1259,7 @@ fun MarkdownMessageContent(text: String, previewLongContent: Boolean = false) {
     }
     val blocks = remember(visibleText) { markdownBlocks(visibleText) }
     Column(
-        modifier = Modifier.animateContentSize(
-            animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
-        ),
+        modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         blocks.forEach { block ->
@@ -881,7 +1267,12 @@ fun MarkdownMessageContent(text: String, previewLongContent: Boolean = false) {
                 MarkdownCodeBlock(block)
             } else {
                 block.text.lines().forEach { line ->
-                    MarkdownTextLine(line)
+                    val image = markdownImage(line)
+                    if (image != null) {
+                        MarkdownImage(image, relayUrl, apiKey)
+                    } else {
+                        MarkdownTextLine(line)
+                    }
                 }
             }
         }
@@ -912,12 +1303,105 @@ private fun messagePreviewText(text: String): String {
     return "$charLimited\n..."
 }
 
+private data class MarkdownImageRef(
+    val alt: String,
+    val source: String,
+)
+
+private fun markdownImage(line: String): MarkdownImageRef? {
+    val match = Regex("^\\s*!\\[([^\\]]*)]\\(([^)]+)\\)\\s*$").find(line) ?: return null
+    val source = match.groupValues[2].trim().trim('"')
+    if (source.isBlank()) return null
+    return MarkdownImageRef(match.groupValues[1].trim(), source)
+}
+
+private fun String.isHttpImageSource(): Boolean {
+    return startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
+}
+
+private fun String.isDataImageSource(): Boolean {
+    return startsWith("data:image/", ignoreCase = true)
+}
+
+private fun String.isLocalImagePath(): Boolean {
+    return startsWith("file://", ignoreCase = true) ||
+        Regex("^[A-Za-z]:[\\\\/].+").containsMatchIn(this) ||
+        startsWith("\\\\") ||
+        startsWith("/")
+}
+
+private fun relayHttpBase(relayUrl: String): String {
+    return relayUrl.trim()
+        .replace(Regex("^ws://", RegexOption.IGNORE_CASE), "http://")
+        .replace(Regex("^wss://", RegexOption.IGNORE_CASE), "https://")
+        .trimEnd('/')
+}
+
+private fun imageLoadSource(source: String, relayUrl: String, apiKey: String): String {
+    val clean = source.trim()
+    if (!clean.isLocalImagePath() || relayUrl.isBlank() || apiKey.isBlank()) return clean
+    val localPath = if (clean.startsWith("file://", ignoreCase = true)) {
+        runCatching { Uri.parse(clean).path }.getOrNull().orEmpty().ifBlank { clean.removePrefix("file://") }
+    } else {
+        clean
+    }
+    return "${relayHttpBase(relayUrl)}/media/image?key=${URLEncoder.encode(apiKey, "UTF-8")}&path=${URLEncoder.encode(localPath, "UTF-8")}"
+}
+
+@Composable
+private fun MarkdownImage(image: MarkdownImageRef, relayUrl: String, apiKey: String) {
+    var bitmap by remember(image.source, relayUrl, apiKey) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    var failed by remember(image.source, relayUrl, apiKey) { mutableStateOf(false) }
+    val loadSource = remember(image.source, relayUrl, apiKey) { imageLoadSource(image.source, relayUrl, apiKey) }
+    LaunchedEffect(loadSource) {
+        failed = false
+        bitmap = withContext(Dispatchers.IO) {
+            runCatching {
+                when {
+                    loadSource.isDataImageSource() -> {
+                        val encoded = loadSource.substringAfter(',', "")
+                        val bytes = Base64.decode(encoded, Base64.DEFAULT)
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    }
+                    loadSource.isHttpImageSource() -> {
+                        URL(loadSource).openStream().use { stream -> BitmapFactory.decodeStream(stream) }
+                    }
+                    else -> null
+                }?.asImageBitmap()
+            }.getOrNull()
+        }
+        failed = bitmap == null
+    }
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 120.dp, max = 360.dp),
+    ) {
+        when {
+            bitmap != null -> Image(
+                bitmap = bitmap!!,
+                contentDescription = image.alt.ifBlank { "image" },
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            failed -> Text(
+                image.source,
+                modifier = Modifier.padding(12.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            else -> Box(Modifier.fillMaxWidth().height(160.dp), contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Description, contentDescription = image.alt.ifBlank { "image" }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
 @Composable
 private fun MarkdownCodeBlock(block: MarkdownBlock) {
-    val strings = LocalAppStrings.current
-    var expanded by remember(block.text) { mutableStateOf(false) }
-    val isLong = block.text.length > LONG_CODE_TEXT_LIMIT
-    val visibleText = if (isLong && !expanded) block.text.take(LONG_CODE_TEXT_LIMIT) else block.text
     val clipboard = LocalClipboard.current
     val clipboardScope = rememberCoroutineScope()
     fun copyText(text: String) {
@@ -925,37 +1409,52 @@ private fun MarkdownCodeBlock(block: MarkdownBlock) {
             clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("EasyCodex", text)))
         }
     }
+    val codeScroll = rememberScrollState()
+    val codeBlockShape = RoundedCornerShape(10.dp)
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = codeBlockShape,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
         modifier = Modifier
             .fillMaxWidth()
-            .animateContentSize(animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing)),
+            .clip(codeBlockShape),
     ) {
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, top = 6.dp, end = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
                     block.language ?: "code",
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 IconButton(onClick = { copyText(block.text) }, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.ContentCopy, contentDescription = "复制代码", modifier = Modifier.size(18.dp))
                 }
             }
-            Text(
-                visibleText.ifBlank { "..." },
-                style = MaterialTheme.typography.bodyMedium,
-                fontFamily = FontFamily.Monospace,
-            )
-            if (isLong) {
-                OutlinedButton(
-                    onClick = { expanded = !expanded },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(if (expanded) strings.collapse else strings.expandMore)
-                }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.56f))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(codeScroll)
+                    .padding(horizontal = 12.dp, vertical = 12.dp),
+            ) {
+                Text(
+                    block.text.ifBlank { "..." },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    softWrap = false,
+                )
             }
         }
     }

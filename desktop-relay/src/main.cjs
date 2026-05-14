@@ -18,6 +18,10 @@ const configPath = path.join(configDir, 'config.json');
 const desktopConfigPath = path.join(configDir, 'desktop-relay.json');
 const runtimeRelayDir = path.join(configDir, 'desktop-relay-runtime');
 const supportedLanguages = ['system', 'zh', 'zh-Hant', 'en', 'ja', 'ko', 'es', 'fr', 'de'];
+const supportedUpdateChannels = ['stable', 'beta'];
+const UPDATE_REQUEST_TIMEOUT_MS = 15000;
+const UPDATE_DOWNLOAD_TIMEOUT_MS = 30000;
+const UPDATE_NETWORK_RETRIES = 3;
 const iconPath = app.isPackaged ? path.join(process.resourcesPath, 'icon.png') : path.join(__dirname, 'assets', 'icon.png');
 const windowIconPath = process.platform === 'win32'
   ? (app.isPackaged ? path.join(process.resourcesPath, 'icon.ico') : path.join(__dirname, '..', 'build', 'icon.ico'))
@@ -374,6 +378,7 @@ function loadDesktopConfig() {
     codexPath: typeof config.codexPath === 'string' && config.codexPath.trim() ? config.codexPath.trim() : '',
     languageMode: config.languageMode === 'manual' ? 'manual' : 'follow-phone',
     language: supportedLanguages.includes(config.language) ? config.language : 'system',
+    updateChannel: supportedUpdateChannels.includes(config.updateChannel) ? config.updateChannel : 'stable',
     guideSeen: config.guideSeen === true,
   };
 }
@@ -390,19 +395,39 @@ function normalizeVersion(value) {
   return String(value || '').trim().replace(/^v/i, '');
 }
 
-function versionParts(value) {
-  return normalizeVersion(value)
-    .split(/[.+-]/)
-    .map((part) => Number.parseInt(part, 10))
-    .map((part) => (Number.isFinite(part) ? part : 0));
+function splitVersion(value) {
+  const [main, prerelease = ''] = normalizeVersion(value).split('-', 2);
+  return {
+    numbers: main.split('.').map((part) => Number.parseInt(part, 10)).map((part) => (Number.isFinite(part) ? part : 0)),
+    prerelease: prerelease.split(/[.+]/).filter(Boolean),
+  };
 }
 
 function compareVersions(a, b) {
-  const left = versionParts(a);
-  const right = versionParts(b);
-  const length = Math.max(left.length, right.length, 3);
+  const left = splitVersion(a);
+  const right = splitVersion(b);
+  const length = Math.max(left.numbers.length, right.numbers.length, 3);
   for (let i = 0; i < length; i += 1) {
-    const diff = (left[i] || 0) - (right[i] || 0);
+    const diff = (left.numbers[i] || 0) - (right.numbers[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  if (left.prerelease.length === 0 && right.prerelease.length > 0) return 1;
+  if (left.prerelease.length > 0 && right.prerelease.length === 0) return -1;
+  const prereleaseLength = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let i = 0; i < prereleaseLength; i += 1) {
+    const leftPart = left.prerelease[i];
+    const rightPart = right.prerelease[i];
+    if (leftPart === rightPart) continue;
+    if (leftPart == null) return -1;
+    if (rightPart == null) return 1;
+    const leftNumber = Number.parseInt(leftPart, 10);
+    const rightNumber = Number.parseInt(rightPart, 10);
+    const leftNumeric = String(leftNumber) === leftPart;
+    const rightNumeric = String(rightNumber) === rightPart;
+    if (leftNumeric && rightNumeric) return leftNumber - rightNumber;
+    if (leftNumeric) return -1;
+    if (rightNumeric) return 1;
+    const diff = leftPart.localeCompare(rightPart);
     if (diff !== 0) return diff;
   }
   return 0;
@@ -415,7 +440,7 @@ function requestJson(url, redirects = 0) {
         accept: 'application/vnd.github+json',
         'user-agent': `EasyCodex-Desktop-Relay/${app.getVersion()}`,
       },
-      timeout: 10000,
+      timeout: UPDATE_REQUEST_TIMEOUT_MS,
     }, (res) => {
       const location = res.headers.location;
       if (res.statusCode >= 300 && res.statusCode < 400 && location && redirects < 5) {
@@ -445,7 +470,27 @@ function requestJson(url, redirects = 0) {
   });
 }
 
-function serializeRelease(release) {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withNetworkRetry(label, task, attempts = UPDATE_NETWORK_RETRIES) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await task();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts) break;
+      const waitMs = 700 * attempt;
+      appendLog(`${label} failed (${error.message || error}); retrying in ${waitMs}ms...`);
+      await delay(waitMs);
+    }
+  }
+  throw lastError;
+}
+
+function serializeRelease(release, channel) {
   const currentVersion = app.getVersion();
   const latestVersion = normalizeVersion(release?.tag_name || '');
   const assets = Array.isArray(release?.assets)
@@ -458,6 +503,7 @@ function serializeRelease(release) {
       }))
     : [];
   return {
+    channel,
     currentVersion,
     latestVersion: latestVersion || null,
     updateAvailable: Boolean(latestVersion && compareVersions(latestVersion, currentVersion) > 0),
@@ -469,15 +515,27 @@ function serializeRelease(release) {
   };
 }
 
+function selectReleaseForChannel(payload, channel) {
+  if (!Array.isArray(payload)) return payload;
+  if (channel === 'beta') return payload.find((release) => release?.prerelease === true) || null;
+  return payload.find((release) => release?.prerelease !== true) || null;
+}
+
 async function checkForUpdates(reason = 'manual') {
   updateState = { ...updateState, checking: true, error: '' };
   await broadcastState();
   try {
-    const release = await requestJson(`https://api.github.com/repos/${updateRepository()}/releases/latest`);
-    updateState = { checking: false, applying: false, info: serializeRelease(release), error: '' };
+    const channel = loadDesktopConfig().updateChannel;
+    const endpoint = channel === 'beta' ? 'releases?per_page=30' : 'releases/latest';
+    const release = selectReleaseForChannel(
+      await withNetworkRetry('Update check', () => requestJson(`https://api.github.com/repos/${updateRepository()}/${endpoint}`)),
+      channel,
+    );
+    if (!release) throw new Error(channel === 'beta' ? 'No beta release is available.' : 'No stable release is available.');
+    updateState = { checking: false, applying: false, info: serializeRelease(release, channel), error: '' };
     appendLog(updateState.info.updateAvailable
-      ? `Update available: ${updateState.info.currentVersion} -> ${updateState.info.latestVersion}`
-      : `EasyCodex Relay is up to date (${updateState.info.currentVersion}).`);
+      ? `Update available (${channel}): ${updateState.info.currentVersion} -> ${updateState.info.latestVersion}`
+      : `EasyCodex Relay is up to date on ${channel} (${updateState.info.currentVersion}).`);
   } catch (error) {
     updateState = { checking: false, applying: false, info: updateState.info, error: error.message || String(error) };
     appendLog(`Update check failed: ${updateState.error}`);
@@ -512,14 +570,18 @@ function selectUpdateAsset(info) {
     .sort((a, b) => b.score - a.score)[0]?.asset || null;
 }
 
-function downloadFile(url, targetPath, redirects = 0) {
+function downloadFileOnce(url, targetPath, redirects = 0) {
   return new Promise((resolve, reject) => {
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-    const req = https.get(url, { headers: { 'user-agent': `EasyCodex-Desktop-Relay/${app.getVersion()}` } }, (res) => {
+    const tempPath = `${targetPath}.download`;
+    const req = https.get(url, {
+      headers: { 'user-agent': `EasyCodex-Desktop-Relay/${app.getVersion()}` },
+      timeout: UPDATE_DOWNLOAD_TIMEOUT_MS,
+    }, (res) => {
       const location = res.headers.location;
       if (res.statusCode >= 300 && res.statusCode < 400 && location && redirects < 5) {
         res.resume();
-        downloadFile(location, targetPath, redirects + 1).then(resolve, reject);
+        downloadFileOnce(location, targetPath, redirects + 1).then(resolve, reject);
         return;
       }
       if (res.statusCode !== 200) {
@@ -527,13 +589,25 @@ function downloadFile(url, targetPath, redirects = 0) {
         reject(new Error(`Download failed with HTTP ${res.statusCode}`));
         return;
       }
-      const stream = fs.createWriteStream(targetPath);
+      const stream = fs.createWriteStream(tempPath);
       res.pipe(stream);
-      stream.on('finish', () => stream.close(() => resolve(targetPath)));
+      stream.on('finish', () => stream.close(() => {
+        fs.rename(tempPath, targetPath, (error) => {
+          if (error) reject(error);
+          else resolve(targetPath);
+        });
+      }));
       stream.on('error', reject);
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error('Download timed out.'));
     });
     req.on('error', reject);
   });
+}
+
+async function downloadFile(url, targetPath) {
+  return withNetworkRetry('Update download', () => downloadFileOnce(url, targetPath));
 }
 
 function runSimpleCommand(args, cwd, onDone) {
@@ -557,9 +631,11 @@ async function applyDesktopUpdate() {
   if (!updateState.info) await checkForUpdates('apply');
   const info = updateState.info;
   if (!info?.updateAvailable) throw new Error('No update is available.');
+  if (!(await confirmDesktopUpdate(info))) return appState();
   updateState = { ...updateState, applying: true, error: '' };
   await broadcastState();
   try {
+    if (relayProcess) await stopRelay();
     if (isDev) {
       appendLog('Applying update from git...');
       await updateFromGit();
@@ -571,8 +647,8 @@ async function applyDesktopUpdate() {
       const targetPath = path.join(updatesDir, asset.name);
       appendLog(`Downloading update: ${asset.name}`);
       await downloadFile(asset.url, targetPath);
-      appendLog(`Opening update installer: ${targetPath}`);
-      await shell.openPath(targetPath);
+      appendLog(`Opening update installer after EasyCodex Relay exits: ${targetPath}`);
+      launchInstallerAfterQuit(targetPath);
     }
     updateState = { ...updateState, applying: false, error: '' };
   } catch (error) {
@@ -583,6 +659,25 @@ async function applyDesktopUpdate() {
     await broadcastState();
   }
   return appState();
+}
+
+function launchInstallerAfterQuit(targetPath) {
+  const resolvedTarget = path.resolve(targetPath);
+  if (process.platform === 'win32') {
+    const cmd = cleanExecutablePath(process.env.ComSpec) || windowsSystemCommand('cmd.exe') || 'cmd.exe';
+    const escaped = resolvedTarget.replace(/"/g, '""');
+    const child = spawn(cmd, ['/d', '/s', '/c', `timeout /t 2 /nobreak >nul & start "" "${escaped}"`], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    });
+    child.unref();
+  } else {
+    shell.openPath(resolvedTarget).catch((error) => appendLog(`Failed to open installer: ${error.message || error}`));
+  }
+  allowQuit = true;
+  setTimeout(() => app.quit(), 100);
 }
 
 function localIPv4() {
@@ -663,11 +758,13 @@ function relayReady() {
 }
 
 function checkPortAvailable(input) {
-  const port = validatePort(input);
-  const currentPort = loadDesktopConfig().port;
-  if (relayRunning && port === currentPort) return Promise.resolve(true);
-
   return new Promise((resolve) => {
+    const port = validatePort(input);
+    const currentPort = loadDesktopConfig().port;
+    if (relayRunning && port === currentPort) {
+      resolve(true);
+      return;
+    }
     const server = net.createServer();
     server.once('error', () => resolve(false));
     server.once('listening', () => {
@@ -675,6 +772,105 @@ function checkPortAvailable(input) {
     });
     server.listen(port, '0.0.0.0');
   });
+}
+
+function looksLikeEasyCodexRelayHealth(health) {
+  const data = health?.data;
+  return Boolean(
+    health?.online &&
+    data?.status === 'ok' &&
+    typeof data.sessionId === 'string' &&
+    Array.isArray(data.allowedWorkspaceRoots) &&
+    data.system?.hostname &&
+    data.runtime,
+  );
+}
+
+async function checkPortStatus(input) {
+  const port = validatePort(input);
+  const available = await checkPortAvailable(port);
+  if (available) {
+    return { available: true, reclaimable: false, occupiedByRelay: false };
+  }
+
+  const health = await healthRequestHost('127.0.0.1', port, loadApiKey());
+  const occupiedByRelay = looksLikeEasyCodexRelayHealth(health);
+  return {
+    available: false,
+    reclaimable: occupiedByRelay,
+    occupiedByRelay,
+    pid: null,
+  };
+}
+
+function powershellCommand() {
+  if (process.platform !== 'win32') return null;
+  return firstExistingFile([
+    windowsSystemCommand('powershell.exe'),
+    windowsSystemCommand('pwsh.exe'),
+    'powershell.exe',
+  ]);
+}
+
+function listeningPidsForPort(port) {
+  if (process.platform === 'win32') {
+    const powershell = powershellCommand();
+    if (!powershell) return [];
+    const script = `Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique`;
+    const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+    });
+    if (result.error || result.status !== 0) return [];
+    return String(result.stdout || '')
+      .split(/\r?\n/)
+      .map((line) => Number.parseInt(line.trim(), 10))
+      .filter((pid) => Number.isInteger(pid) && pid > 0);
+  }
+
+  const result = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  if (result.error || result.status !== 0) return [];
+  return String(result.stdout || '')
+    .split(/\r?\n/)
+    .map((line) => Number.parseInt(line.trim(), 10))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+}
+
+async function waitForPortAvailable(port, timeoutMs = 5000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await checkPortAvailable(port)) return true;
+    await delay(150);
+  }
+  return false;
+}
+
+async function stopExternalRelayOnPort(port) {
+  const status = await checkPortStatus(port);
+  if (!status.reclaimable) return false;
+
+  const pids = listeningPidsForPort(port).filter((pid) => pid !== process.pid);
+  if (pids.length === 0) {
+    appendLog(`Port ${port} is used by EasyCodex Relay, but its process id could not be found.`);
+    return false;
+  }
+
+  appendLog(`Stopping existing EasyCodex Relay on port ${port} (PID ${pids.join(', ')}).`);
+  for (const pid of pids) {
+    try {
+      process.kill(pid);
+    } catch (error) {
+      appendLog(`Failed to stop PID ${pid}: ${error.message || error}`);
+    }
+  }
+
+  return waitForPortAvailable(port);
 }
 
 function normalizeLanguage(value) {
@@ -723,11 +919,52 @@ function closeDialogText() {
   };
 }
 
+function updateConfirmText(version) {
+  const language = effectiveLanguage(loadDesktopConfig(), lastHealth);
+  if (language === 'zh') {
+    return {
+      buttons: ['退出并更新', '取消'],
+      message: `安装 EasyCodex Relay ${version} 前需要退出当前程序。`,
+      detail: '继续后会先停止本机中继，退出桌面端，然后打开安装包。安装过程中手机将暂时无法连接这台电脑。',
+    };
+  }
+  if (language === 'zh-Hant') {
+    return {
+      buttons: ['退出並更新', '取消'],
+      message: `安裝 EasyCodex Relay ${version} 前需要退出目前程式。`,
+      detail: '繼續後會先停止本機中繼，退出桌面端，然後開啟安裝包。安裝期間手機將暫時無法連接這台電腦。',
+    };
+  }
+  return {
+    buttons: ['Quit and update', 'Cancel'],
+    message: `EasyCodex Relay must quit before installing ${version}.`,
+    detail: 'Continuing will stop the local relay, quit the desktop app, and then open the installer. Your phone will be disconnected during the update.',
+  };
+}
+
+async function confirmDesktopUpdate(info) {
+  const confirmText = updateConfirmText(info?.latestVersion || '');
+  const choice = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: confirmText.buttons,
+    defaultId: 0,
+    cancelId: 1,
+    title: 'EasyCodex Relay',
+    message: confirmText.message,
+    detail: confirmText.detail,
+  });
+  return choice.response === 0;
+}
+
 async function appState() {
   const config = loadDesktopConfig();
   const apiKey = loadApiKey();
   const details = connectionDetails(config.port, apiKey);
-  const portAvailable = await checkPortAvailable(config.port).catch(() => false);
+  const portStatus = await checkPortStatus(config.port).catch(() => ({
+    available: false,
+    reclaimable: false,
+    occupiedByRelay: false,
+  }));
   const isRelayReady = relayReady();
   const codex = detectCodex(config.codexPath);
   return {
@@ -745,11 +982,15 @@ async function appState() {
     relayReady: isRelayReady,
     installRunning: Boolean(installProcess),
     update: updateState,
-    portAvailable,
+    portAvailable: portStatus.available,
+    portReclaimable: portStatus.reclaimable,
+    portOccupiedByRelay: portStatus.occupiedByRelay,
     guideVisible: !config.guideSeen,
     health: mergeRelayEventHealth(lastHealth),
     languageMode: config.languageMode,
     language: config.language,
+    updateChannel: config.updateChannel,
+    supportedUpdateChannels,
     effectiveLanguage: effectiveLanguage(config, mergeRelayEventHealth(lastHealth)),
     supportedLanguages,
     qrDataUrl: await QRCode.toDataURL(details.connectUrl, {
@@ -936,6 +1177,7 @@ function startHealthPolling() {
 
 async function installAndBuild() {
   if (installProcess) throw new Error('Install/build is already running.');
+  if (relayProcess) throw new Error('Stop the relay before installing or rebuilding it.');
   const cwd = relayDir();
   if (!isDev && relayReady()) {
     appendLog('Packaged relay is already bundled with dependencies and build output.');
@@ -979,8 +1221,13 @@ async function startRelay(input) {
     appendLog(`Codex detection failed: ${codex.error}`);
     throw new Error(codex.error || 'Codex CLI was not found. Choose the Codex executable path.');
   }
-  const portAvailable = await checkPortAvailable(port);
-  if (!portAvailable) throw new Error('Port is in use. Choose another port.');
+  const portStatus = await checkPortStatus(port);
+  if (!portStatus.available) {
+    if (!portStatus.reclaimable || !(await stopExternalRelayOnPort(port))) {
+      throw new Error('Port is in use. Choose another port.');
+    }
+    appendLog(`Port ${port} is free after stopping the existing relay.`);
+  }
   saveDesktopConfig({ port, workspace, codexPath });
   const cwd = relayDir();
   const builtServer = path.join(cwd, 'dist', 'server.js');
@@ -1003,6 +1250,7 @@ async function startRelay(input) {
     CODEX_CWD: workspace,
     CODEX_EXECUTABLE: codex.path,
     EASYCODEX_NO_TERMINAL_QR: '1',
+    EASYCODEX_UPDATE_CHANNEL: loadDesktopConfig().updateChannel,
   };
   try {
     relayProcess = spawn(command, args, {
@@ -1067,15 +1315,15 @@ async function stopRelay() {
 async function createWindow() {
   Menu.setApplicationMenu(null);
   mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 760,
+    width: 1280,
+    height: 820,
     minWidth: 940,
     minHeight: 660,
     show: !isSmokeTest,
     frame: false,
     icon: windowIconPath,
     title: 'EasyCodex Relay',
-    backgroundColor: '#f7f4ec',
+    backgroundColor: '#10120f',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -1190,7 +1438,8 @@ ipcMain.handle('save-config', async (_event, input) => {
   const next = {};
   if (Object.prototype.hasOwnProperty.call(input || {}, 'port')) {
     const port = validatePort(input.port);
-    if (!(await checkPortAvailable(port))) throw new Error('Port is in use. Choose another port.');
+    const portStatus = await checkPortStatus(port);
+    if (!portStatus.available && !portStatus.reclaimable) throw new Error('Port is in use. Choose another port.');
     next.port = port;
   }
   if (Object.prototype.hasOwnProperty.call(input || {}, 'workspace')) next.workspace = validateWorkspace(input.workspace);
@@ -1202,6 +1451,10 @@ ipcMain.handle('save-config', async (_event, input) => {
   }
   if (input?.languageMode === 'manual' || input?.languageMode === 'follow-phone') next.languageMode = input.languageMode;
   if (supportedLanguages.includes(input?.language)) next.language = input.language;
+  if (supportedUpdateChannels.includes(input?.updateChannel)) {
+    next.updateChannel = input.updateChannel;
+    updateState = { checking: false, applying: false, info: null, error: '' };
+  }
   saveDesktopConfig(next);
   return appState();
 });
@@ -1209,9 +1462,12 @@ ipcMain.handle('preview-port', async (_event, input) => {
   const port = validatePort(input?.port);
   const apiKey = loadApiKey();
   const details = connectionDetails(port, apiKey);
+  const portStatus = await checkPortStatus(port);
   return {
     port,
-    portAvailable: await checkPortAvailable(port),
+    portAvailable: portStatus.available,
+    portReclaimable: portStatus.reclaimable,
+    portOccupiedByRelay: portStatus.occupiedByRelay,
     qrDataUrl: await QRCode.toDataURL(details.connectUrl, {
       margin: 1,
       width: 360,

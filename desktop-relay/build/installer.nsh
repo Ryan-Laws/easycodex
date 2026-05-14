@@ -1,5 +1,6 @@
 !include LogicLib.nsh
 !include nsDialogs.nsh
+!include nsProcess.nsh
 
 ManifestDPIAware true
 
@@ -27,10 +28,18 @@ LangString EasyCodexUnsafeInstallDir 1028 "所選資料夾看起來像原始碼�
 LangString EasyCodexStartMenuShortcut 1033 "Create a Start Menu shortcut"
 LangString EasyCodexStartMenuShortcut 2052 "创建开始菜单快捷方式"
 LangString EasyCodexStartMenuShortcut 1028 "建立開始功能表捷徑"
+LangString EasyCodexCloseBeforeInstall 1033 "EasyCodex Relay is still running. Quit EasyCodex Relay before installing this update, then run the installer again."
+LangString EasyCodexCloseBeforeInstall 2052 "EasyCodex 中继仍在运行。请先退出 EasyCodex 中继，再重新运行安装包。"
+LangString EasyCodexCloseBeforeInstall 1028 "EasyCodex 中繼仍在執行。請先退出 EasyCodex 中繼，再重新執行安裝程式。"
 
 !macro customInit
   StrCpy $ShouldCreateDesktopShortcut ${BST_CHECKED}
   StrCpy $ShouldCreateStartMenuShortcut ${BST_CHECKED}
+  ${nsProcess::FindProcess} "${APP_EXECUTABLE_FILENAME}" $0
+  ${If} $0 == 0
+    MessageBox MB_ICONSTOP|MB_OK "$(EasyCodexCloseBeforeInstall)"
+    Abort
+  ${EndIf}
 !macroend
 
 !macro customWelcomePage

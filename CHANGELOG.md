@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased
+
+## 0.1.2 - 2026-05-15
+
+### Added
+
+- Added phone-accessible Codex CLI consoles for launching separate one-shot `codex exec` prompts in selected workspaces.
+
+### Fixed
+
+- Separated active mobile tasks from resumable Codex history so completed `notLoaded` threads no longer remain in project task counts.
+- Used Codex session lifecycle events and archived thread state when syncing tasks from the relay.
+- Refreshed Android task status merging so completed threads stop showing stale working indicators.
+
+### Improved
+
+- Expanded the desktop relay workbench with richer task history, live conversation controls, file-change context, and update handling.
+- Tightened mobile conversation behavior around auto-scroll, file-change summaries, queued task taps, and connection reliability.
+
+## 0.1.2-beta.2 - 2026-05-15
+
+### Fixed
+
+- Separated active mobile tasks from resumable Codex history so completed `notLoaded` threads no longer remain in project task counts.
+- Used Codex session lifecycle events and archived thread state when syncing tasks from the relay.
+- Refreshed Android task status merging so completed threads stop showing stale working indicators.
+
+### Improved
+
+- Tightened mobile conversation behavior around auto-scroll, file-change summaries, and queued task taps.
+
+## 0.1.2-beta.1 - 2026-05-14
+
+- Standardized desktop relay updates so packaged installs require a quit-and-update confirmation, stop the local relay first, and block the Windows installer if the relay app is still running.
+- Changed Android APK update checks to require user confirmation before downloading and to warn that Android may close the app during system installation.
+
+### Fixed
+
+- Reused an already-running relay agent when resuming the same Codex thread, preventing duplicate `codex app-server` processes for one thread.
+- Forwarded token-usage updates as live relay events instead of adding noisy status messages to mobile conversations.
+- Added timeout and retry handling around GitHub update checks and desktop relay update downloads so unstable network links recover more reliably.
+
+### Improved
+
+- Added beta update channels to Android, the desktop relay, and the relay update API so prerelease builds can be tested without replacing stable release assets.
+- Expanded desktop relay workspace discovery to include Codex Desktop visible workspace roots.
+- Improved mobile relay summaries for plans, command activity, file changes, and pending agent requests.
+- Added an Android foreground connection service to keep relay sessions alive more reliably while testing from a phone.
+- Refined the desktop relay workbench with task history, live conversation controls, file-change context, and a larger desktop shell.
+
 ## 0.1.1 - 2026-05-14
 
 ### Fixed

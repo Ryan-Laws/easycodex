@@ -5,11 +5,11 @@ import os from 'os';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import { promises as fsPromises } from 'fs';
 import simpleGit from 'simple-git';
 import qrcode from 'qrcode-terminal';
-import { SessionOrchestrator } from './session-orchestrator';
+import { SessionOrchestrator, codexDesktopVisibleWorkspaceRoots } from './session-orchestrator';
 import { applyUpdate, checkForUpdates, type UpdateInfo } from './updater';
 import {
   registerNotificationToken,
@@ -46,6 +46,14 @@ interface StreamHistoryEntry {
   agentId: string;
   event: string;
   data: unknown;
+}
+
+interface CliRun {
+  id: string;
+  windowId: string;
+  cwd: string;
+  process: ChildProcess;
+  startedAt: number;
 }
 
 function generateApiKey(): string {
@@ -125,6 +133,28 @@ function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function cleanExecutablePath(value: unknown): string {
+  return String(value || '').trim().replace(/^"+|"+$/g, '');
+}
+
+function commandForCmd(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function codexCliInvocation(args: string[]): { command: string; args: string[]; options: SpawnOptions } {
+  const configured = cleanExecutablePath(process.env.CODEX_EXECUTABLE || process.env.EASY_CODEX_CODEX_PATH);
+  const command = configured || 'codex';
+  if (process.platform === 'win32') {
+    const executable = configured ? commandForCmd(command) : command;
+    return {
+      command: process.env.ComSpec || 'cmd.exe',
+      args: ['/d', '/s', '/c', `call ${executable} ${args.map(commandForCmd).join(' ')}`],
+      options: { windowsVerbatimArguments: true },
+    };
+  }
+  return { command, args, options: {} };
 }
 
 function resolveWithinCwd(cwd: string, relativePath?: string): string {
@@ -265,6 +295,7 @@ function getAllowedWorkspaceRoots(): string[] {
   return uniqueResolvedPaths([
     getPrimaryWorkspaceRoot(),
     getReposRoot(),
+    ...codexDesktopVisibleWorkspaceRoots(),
     ...discoverRelayGitWorktrees(),
   ]);
 }
@@ -411,6 +442,123 @@ function gitForCwd(cwd: string) {
   });
 }
 
+function codexCliVersion(): string {
+  try {
+    const invocation = codexCliInvocation(['--version']);
+    return execFileSync(invocation.command, invocation.args, {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5000,
+      ...invocation.options,
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function startCliRun(windowId: string, cwd: string, prompt: string, model?: string, reasoningEffort?: string): CliRun {
+  const safeWindowId = windowId.trim() || crypto.randomUUID();
+  if (activeCliRuns.has(safeWindowId)) {
+    throw new Error('This Codex CLI window is already running. Stop it or wait for it to finish.');
+  }
+  const trimmedPrompt = prompt.trim();
+  if (!trimmedPrompt) throw new Error('prompt is required');
+  const safeCwd = resolveWorkspaceCwd(cwd || getPrimaryWorkspaceRoot());
+  const runId = crypto.randomUUID();
+  const cleanModel = typeof model === 'string' ? model.trim() : '';
+  const cleanReasoning = typeof reasoningEffort === 'string' ? reasoningEffort.trim() : '';
+  const args = [
+    'exec',
+    '--cd',
+    safeCwd,
+    '--sandbox',
+    'workspace-write',
+    '--ask-for-approval',
+    'never',
+    '--skip-git-repo-check',
+    '--color',
+    'never',
+  ];
+  if (cleanModel) args.push('--model', cleanModel);
+  if (cleanReasoning) args.push('-c', `model_reasoning_effort=${JSON.stringify(cleanReasoning)}`);
+  args.push(trimmedPrompt);
+  const invocation = codexCliInvocation(args);
+  const child = spawn(invocation.command, invocation.args, {
+    cwd: safeCwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env },
+    windowsHide: true,
+    ...invocation.options,
+  });
+  const run: CliRun = {
+    id: runId,
+    windowId: safeWindowId,
+    cwd: safeCwd,
+    process: child,
+    startedAt: Date.now(),
+  };
+  activeCliRuns.set(safeWindowId, run);
+  broadcast('cli', 'cli/started', {
+    windowId: safeWindowId,
+    runId,
+    cwd: safeCwd,
+    command: 'codex exec',
+    model: cleanModel,
+    reasoningEffort: cleanReasoning,
+    timestamp: run.startedAt,
+  });
+  child.stdout?.on('data', (chunk: Buffer) => {
+    broadcast('cli', 'cli/output', {
+      windowId: safeWindowId,
+      runId,
+      stream: 'stdout',
+      chunk: chunk.toString('utf8'),
+      timestamp: Date.now(),
+    });
+  });
+  child.stderr?.on('data', (chunk: Buffer) => {
+    broadcast('cli', 'cli/output', {
+      windowId: safeWindowId,
+      runId,
+      stream: 'stderr',
+      chunk: chunk.toString('utf8'),
+      timestamp: Date.now(),
+    });
+  });
+  child.on('error', (err) => {
+    if (activeCliRuns.get(safeWindowId)?.id === runId) activeCliRuns.delete(safeWindowId);
+    broadcast('cli', 'cli/failed', {
+      windowId: safeWindowId,
+      runId,
+      cwd: safeCwd,
+      error: err.message,
+      timestamp: Date.now(),
+    });
+  });
+  child.on('close', (code, signal) => {
+    if (activeCliRuns.get(safeWindowId)?.id === runId) activeCliRuns.delete(safeWindowId);
+    broadcast('cli', 'cli/exited', {
+      windowId: safeWindowId,
+      runId,
+      cwd: safeCwd,
+      code,
+      signal,
+      durationMs: Date.now() - run.startedAt,
+      timestamp: Date.now(),
+    });
+  });
+  return run;
+}
+
+function stopCliRun(windowId?: string): boolean {
+  const run = windowId?.trim()
+    ? activeCliRuns.get(windowId.trim())
+    : activeCliRuns.values().next().value;
+  if (!run) return false;
+  run.process.kill();
+  return true;
+}
+
 const config = loadOrCreateConfig();
 const relaySessionId = crypto.randomUUID();
 
@@ -420,13 +568,18 @@ const wss = new WebSocketServer({ server });
 const clients = new Map<WebSocket, ClientSession>();
 const STREAM_HISTORY_LIMIT = Number(process.env.STREAM_HISTORY_LIMIT || 5000);
 const CODEX_WATCH_DEBOUNCE_MS = Number(process.env.CODEX_WATCH_DEBOUNCE_MS || 150);
+const CODEX_THREAD_POLL_INTERVAL_MS = Number(process.env.CODEX_THREAD_POLL_INTERVAL_MS || 5000);
 const MOBILE_STREAM_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_STREAM_TEXT_LIMIT || 12000);
 const MOBILE_STREAM_TRUNCATED_NOTICE = '\n\n[EasyCodex mobile truncated this long output. Use the desktop relay/Codex session for the full text.]';
 let nextStreamSeq = 1;
 const streamHistory: StreamHistoryEntry[] = [];
 let codexWatchTimer: ReturnType<typeof setTimeout> | null = null;
+let codexThreadPollTimer: ReturnType<typeof setInterval> | null = null;
+let codexThreadPollInFlight = false;
+let lastCodexThreadSignature: string | null = null;
 const codexWatchers: fs.FSWatcher[] = [];
 let lastUpdateCheck: UpdateInfo | null = null;
+const activeCliRuns = new Map<string, CliRun>();
 
 function getConnectedAuthenticatedCount(): number {
   let count = 0;
@@ -470,6 +623,11 @@ function compactStreamText(value: string, fallback = '详细内容已省略。')
   if (!value.trim()) return value;
   if (value.length <= MOBILE_STREAM_TEXT_LIMIT && !value.includes('\n')) return value;
   return fallback;
+}
+
+function capStreamDelta(value: string): string {
+  if (value.length <= MOBILE_STREAM_TEXT_LIMIT) return value;
+  return `${value.slice(0, MOBILE_STREAM_TEXT_LIMIT).trimEnd()}${MOBILE_STREAM_TRUNCATED_NOTICE}`;
 }
 
 function streamDiffSummary(text: string): { files: string[]; additions: number; deletions: number } {
@@ -522,7 +680,9 @@ function sanitizeStreamData(value: unknown, event = ''): unknown {
       'input',
       'arguments',
     ].includes(key);
-    if (typeof child === 'string' && heavyText) {
+    if (typeof child === 'string' && key === 'delta') {
+      result[key] = capStreamDelta(child);
+    } else if (typeof child === 'string' && heavyText) {
       if (key === 'command') {
         result[key] = '正在运行命令。';
       } else if (key === 'input' || key === 'arguments') {
@@ -616,6 +776,55 @@ function startCodexStateWatcher() {
   }
 }
 
+function codexThreadSignature(threads: Array<{ id?: unknown; name?: unknown; preview?: unknown; updatedAt?: unknown; status?: unknown; pinned?: unknown }>): string {
+  return threads
+    .map((thread) => {
+      const id = typeof thread.id === 'string' ? thread.id : '';
+      const name = typeof thread.name === 'string' ? thread.name : '';
+      const preview = typeof thread.preview === 'string' ? thread.preview : '';
+      const updatedAt = typeof thread.updatedAt === 'number' || typeof thread.updatedAt === 'string'
+        ? String(thread.updatedAt)
+        : '';
+      const status = typeof thread.status === 'string' ? thread.status : '';
+      const pinned = thread.pinned === true ? 'pinned' : '';
+      return `${id}:${name}:${preview}:${updatedAt}:${status}:${pinned}`;
+    })
+    .filter(Boolean)
+    .sort()
+    .join('|');
+}
+
+async function pollCodexThreadsForChanges(reason: string) {
+  if (codexThreadPollInFlight || getConnectedAuthenticatedCount() === 0) return;
+  codexThreadPollInFlight = true;
+  try {
+    const result = await manager.listCodexThreads({ limit: 100, all: true });
+    const threads = Array.isArray(result.data) ? result.data : [];
+    const signature = codexThreadSignature(threads);
+    if (lastCodexThreadSignature !== null && signature !== lastCodexThreadSignature) {
+      broadcastCodexThreadsChanged(reason, { source: 'poll' });
+    }
+    lastCodexThreadSignature = signature;
+  } catch (err) {
+    console.warn('[relay] Failed to poll Codex threads:', err);
+  } finally {
+    codexThreadPollInFlight = false;
+  }
+}
+
+function updateCodexThreadPoller() {
+  if (getConnectedAuthenticatedCount() === 0) {
+    if (codexThreadPollTimer) clearInterval(codexThreadPollTimer);
+    codexThreadPollTimer = null;
+    return;
+  }
+  if (codexThreadPollTimer) return;
+  void pollCodexThreadsForChanges('codex_thread_poll_started');
+  codexThreadPollTimer = setInterval(() => {
+    void pollCodexThreadsForChanges('codex_thread_poll_changed');
+  }, Math.max(1000, CODEX_THREAD_POLL_INTERVAL_MS));
+}
+
 const manager = new SessionOrchestrator(broadcast);
 const startedAt = Date.now();
 let lastClientLanguage: string | null = null;
@@ -651,6 +860,61 @@ app.get('/health', (req, res) => {
       freeMemory: os.freemem(),
     },
   });
+});
+
+function imageContentType(filePath: string): string | null {
+  switch (path.extname(filePath).toLowerCase()) {
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.gif':
+      return 'image/gif';
+    case '.webp':
+      return 'image/webp';
+    case '.bmp':
+      return 'image/bmp';
+    default:
+      return null;
+  }
+}
+
+app.get('/media/image', async (req, res) => {
+  const key = extractAuthKey(req);
+  if (!key || key !== config.apiKey) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const rawPath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
+  if (!rawPath) {
+    res.status(400).json({ error: 'path is required' });
+    return;
+  }
+
+  try {
+    const target = path.resolve(rawPath);
+    if (!getAllowedWorkspaceRoots().some((root) => isWithinBase(root, target))) {
+      res.status(403).json({ error: 'Path is outside the allowed EasyCodex workspace roots.' });
+      return;
+    }
+    const stat = await fsPromises.stat(target);
+    if (!stat.isFile()) {
+      res.status(404).json({ error: 'Image not found' });
+      return;
+    }
+    const contentType = imageContentType(target);
+    if (!contentType) {
+      res.status(415).json({ error: 'Unsupported image type' });
+      return;
+    }
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'private, max-age=60');
+    fs.createReadStream(target).pipe(res);
+  } catch (err) {
+    res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 function handleConnectPage(req: express.Request, res: express.Response) {
@@ -753,12 +1017,57 @@ wss.on('connection', (ws, req) => {
       clearTimeout(authTimeout);
       console.log(`Authenticated client ${session.clientId} (${remoteAddress})`);
       emitClientState('authenticated');
+      updateCodexThreadPoller();
       reply({ ok: true, clientId: session.clientId });
       return;
     }
 
     try {
       switch (action) {
+        case 'cli_start': {
+          const { windowId, cwd, model, reasoningEffort } = params as {
+            windowId?: string;
+            cwd?: string;
+            model?: string;
+            reasoningEffort?: string;
+          };
+          const safeCwd = resolveWorkspaceCwd(cwd || getPrimaryWorkspaceRoot());
+          const running = typeof windowId === 'string' && windowId.trim()
+            ? activeCliRuns.get(windowId.trim()) || null
+            : null;
+          reply({
+            ok: true,
+            windowId: windowId || null,
+            cwd: safeCwd,
+            model: typeof model === 'string' ? model.trim() : '',
+            reasoningEffort: typeof reasoningEffort === 'string' ? reasoningEffort.trim() : '',
+            version: codexCliVersion(),
+            running: running != null,
+            runId: running?.id || null,
+          });
+          break;
+        }
+
+        case 'cli_run': {
+          const { windowId, cwd, prompt, model, reasoningEffort } = params as {
+            windowId?: string;
+            cwd?: string;
+            prompt?: string;
+            model?: string;
+            reasoningEffort?: string;
+          };
+          const run = startCliRun(windowId || '', cwd || getPrimaryWorkspaceRoot(), prompt || '', model, reasoningEffort);
+          reply({ ok: true, windowId: run.windowId, runId: run.id, cwd: run.cwd });
+          break;
+        }
+
+        case 'cli_stop': {
+          const { windowId } = params as { windowId?: string };
+          const stopped = stopCliRun(windowId);
+          reply({ ok: true, stopped });
+          break;
+        }
+
         case 'create_agent': {
           const {
             name,
@@ -895,12 +1204,35 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'respond_agent_user_input': {
+          const { agentId, requestId, answers } = params as {
+            agentId: string;
+            requestId: string;
+            answers?: Record<string, unknown>;
+          };
+          manager.respondAgentUserInput(agentId, requestId, answers || {});
+          reply({ ok: true });
+          break;
+        }
+
         case 'stop_agent': {
           const { agentId } = params as { agentId: string };
           manager.stopAgent(agentId);
           reply({ ok: true });
           broadcast(agentId, 'agents/changed', { reason: 'stopped', agentId, timestamp: Date.now() });
           broadcastCodexThreadsChanged('agent_stopped', { agentId });
+          break;
+        }
+
+        case 'archive_codex_thread': {
+          const { threadId, agentId } = params as { threadId?: string; agentId?: string };
+          if (!threadId?.trim()) throw new Error('threadId is required');
+          await manager.archiveCodexThread(threadId.trim(), agentId);
+          reply({ ok: true });
+          if (agentId?.trim()) {
+            broadcast(agentId.trim(), 'agents/changed', { reason: 'archived', agentId: agentId.trim(), timestamp: Date.now() });
+          }
+          broadcastCodexThreadsChanged('thread_archived', { threadId: threadId.trim(), agentId });
           break;
         }
 
@@ -942,17 +1274,24 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'list_codex_threads': {
-          const { limit, cursor, cwd, includeGlobal, all } = params as {
+          const { limit, cursor, cwd, includeGlobal, all, activeOnly } = params as {
             limit?: number;
             cursor?: string;
             cwd?: string;
             includeGlobal?: boolean;
             all?: boolean;
+            activeOnly?: boolean;
           };
           const requestedCwd = typeof cwd === 'string' && cwd.trim() ? resolveWorkspaceCwd(cwd) : undefined;
           const resolvedCwd = requestedCwd
             || (includeGlobal === false ? resolveWorkspaceCwd(getPrimaryWorkspaceRoot()) : undefined);
-          const result = await manager.listCodexThreads({ limit, cursor, cwd: resolvedCwd, all: all === true });
+          const result = await manager.listCodexThreads({
+            limit,
+            cursor,
+            cwd: resolvedCwd,
+            all: all === true,
+            activeOnly: activeOnly === true,
+          });
           reply(result);
           break;
         }
@@ -1260,7 +1599,10 @@ wss.on('connection', (ws, req) => {
     clients.delete(ws);
     const reasonText = reason.length > 0 ? ` reason="${reason.toString('utf8')}"` : '';
     console.log(`Client disconnected (${session.clientId || 'unauthenticated'}) code=${code}${reasonText} remote=${remoteAddress}`);
-    if (session.authenticated) emitClientState('disconnected');
+    if (session.authenticated) {
+      emitClientState('disconnected');
+      updateCodexThreadPoller();
+    }
   });
 });
 

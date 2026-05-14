@@ -40,6 +40,10 @@ Use `.github/workflows/release-android.yml`.
    - `EasyCodex.Mobile.<version>.apk`
    - `EasyCodex.Mobile.<version>.apk.sha256`
 
+Each public release tag keeps its own assets and changelog notes. The workflow extracts only the matching `CHANGELOG.md` section for the tag, and release uploads fail if an asset with the same name already exists. Do not overwrite old release assets; publish fixes under a new version tag.
+
+Beta builds should be published from the `beta` branch with prerelease tags such as `v0.1.2-beta.1`. Mark the GitHub release as a pre-release so stable clients continue to use the latest public release, while beta-channel clients can detect and download the prerelease APK.
+
 For manual dry runs, start `Release Android` with `upload=false`. It will still build, sign, verify, smoke-test, and keep artifacts in the workflow run without changing the public release.
 
 ## Desktop Relay Release
@@ -53,6 +57,8 @@ The workflow checks that the tag version matches:
 - `desktop-relay/package.json`
 
 Then it builds and uploads Windows, macOS, and Linux relay assets to the matching release.
+
+Desktop release uploads follow the same rule: each tag has separate release notes and assets, and existing assets are not clobbered.
 
 ## Local Signing
 

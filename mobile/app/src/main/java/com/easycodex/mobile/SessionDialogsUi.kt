@@ -14,8 +14,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -42,7 +40,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.font.FontFamily
@@ -140,6 +137,89 @@ fun ApprovalRequestDialog(
 }
 
 @Composable
+fun UserInputRequestDialog(
+    request: AgentUserInputRequest,
+    onSubmit: (Map<String, String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var answers by remember(request.id) { mutableStateOf(emptyMap<String, String>()) }
+    val canSubmit = request.questions.all { question ->
+        answers[question.id].orEmpty().isNotBlank()
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(request.title) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (request.detail.isNotBlank()) {
+                    Text(
+                        request.detail,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                request.questions.forEach { question ->
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val label = question.header.ifBlank { question.question.ifBlank { "你的回答" } }
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        if (question.header.isNotBlank() && question.question.isNotBlank()) {
+                            Text(
+                                question.question,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (question.options.isNotEmpty()) {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                question.options.forEach { option ->
+                                    val selected = answers[question.id] == option.label
+                                    FilterChip(
+                                        selected = selected,
+                                        onClick = { answers = answers + (question.id to option.label) },
+                                        label = { Text(option.label) },
+                                    )
+                                }
+                            }
+                        }
+                        if (question.isOther || question.options.isEmpty()) {
+                            OutlinedTextField(
+                                value = answers[question.id].orEmpty(),
+                                onValueChange = { answers = answers + (question.id to it) },
+                                modifier = Modifier.fillMaxWidth(),
+                                minLines = 2,
+                                label = { Text("输入回答") },
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = canSubmit,
+                onClick = { onSubmit(answers.mapValues { it.value.trim() }.filterValues { it.isNotBlank() }) },
+            ) {
+                Text("发送回答")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("稍后")
+            }
+        },
+    )
+}
+
+@Composable
 fun PlanReviewDialog(
     review: PlanReview,
     onDismiss: () -> Unit,
@@ -166,6 +246,7 @@ fun PlanReviewDialog(
                         text = review.message.text.ifBlank { "计划内容为空。" },
                         modifier = Modifier
                             .heightIn(max = 360.dp)
+                            .verticalScroll(rememberScrollState())
                             .padding(12.dp),
                     )
                 }
@@ -191,37 +272,30 @@ fun PlanReviewDialog(
 
 @Composable
 private fun PlanReviewPreview(text: String, modifier: Modifier = Modifier) {
-    val preview = remember(text) { planPreviewLines(text) }
-    LazyColumn(
+    val preview = remember(text) { planPreviewMarkdown(text) }
+    Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        items(preview.lines) { line ->
-            Text(
-                line,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-        }
+        MarkdownMessageContent(preview.text, previewLongContent = false)
         if (preview.truncated) {
-            item {
-                Text(
-                    "计划内容较长，移动端仅显示前 ${preview.lines.size} 行摘要。",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
+            Text(
+                "计划内容较长，移动端仅显示前 ${preview.lineCount} 行摘要。",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.SemiBold,
+            )
         }
     }
 }
 
-private data class PlanPreviewLines(
-    val lines: List<String>,
+private data class PlanPreviewMarkdown(
+    val text: String,
+    val lineCount: Int,
     val truncated: Boolean,
 )
 
-private fun planPreviewLines(text: String): PlanPreviewLines {
+private fun planPreviewMarkdown(text: String): PlanPreviewMarkdown {
     var totalChars = 0
     var truncated = false
     val lines = mutableListOf<String>()
@@ -230,11 +304,12 @@ private fun planPreviewLines(text: String): PlanPreviewLines {
             truncated = true
             break
         }
-        val normalized = line.trimEnd().take(220)
+        val normalized = line.trimEnd()
         totalChars += normalized.length
-        if (normalized.isNotBlank()) lines.add(normalized)
+        lines.add(normalized)
     }
-    return PlanPreviewLines(lines.ifEmpty { listOf("计划内容为空。") }, truncated)
+    val previewText = lines.joinToString("\n").trim().ifBlank { "计划内容为空。" }
+    return PlanPreviewMarkdown(previewText, lines.count { it.isNotBlank() }, truncated)
 }
 
 @Composable

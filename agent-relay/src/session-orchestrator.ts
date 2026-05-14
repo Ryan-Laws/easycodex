@@ -10,6 +10,7 @@ import {
   codexThreadResumeCall,
   codexThreadListCall,
   codexThreadReadCall,
+  codexThreadArchiveCall,
   codexThreadTurnsListCall,
   codexModelListCall,
   codexTurnStartCall,
@@ -31,6 +32,8 @@ interface AgentInfo {
   reasoningEffort: string;
   systemPrompt: string;
   status: 'initializing' | 'ready' | 'working' | 'error' | 'stopped';
+  createdAt: number;
+  updatedAt: number;
   threadId: string | null;
   currentTurnId: string | null;
   codexThreadId: string | null;
@@ -64,17 +67,29 @@ const BG_BLUE = '\x1b[44m';
 const WHITE = '\x1b[37m';
 const AGENTS_STATE_PATH = path.join(os.homedir(), '.easycodex', 'agents.json');
 const CODEX_GLOBAL_STATE_PATH = path.join(os.homedir(), '.codex', '.codex-global-state.json');
+const CODEX_STATE_DB_PATH = path.join(os.homedir(), '.codex', 'state_5.sqlite');
 const FILE_SNAPSHOT_LIMIT_BYTES = 512 * 1024;
 const FILE_DIFF_LIMIT_CHARS = 16000;
 const MOBILE_MESSAGE_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_MESSAGE_TEXT_LIMIT || 20000);
 const MOBILE_DETAIL_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_DETAIL_TEXT_LIMIT || 12000);
 const MOBILE_THREAD_TURN_PAGE_LIMIT = Number(process.env.EASY_CODEX_MOBILE_THREAD_TURN_PAGE_LIMIT || 50);
 const MOBILE_THREAD_TURN_MAX_PAGES = Number(process.env.EASY_CODEX_MOBILE_THREAD_TURN_MAX_PAGES || 5);
+const STOPPED_THREAD_OVERRIDE_TTL_MS = 6 * 60 * 60 * 1000;
+const CODEX_SESSION_ACTIVE_GRACE_MS = Number(process.env.EASY_CODEX_SESSION_ACTIVE_GRACE_MS || 20000);
 const MOBILE_TRUNCATED_NOTICE = '\n\n[EasyCodex mobile truncated this long output. Use the desktop relay/Codex session for the full text.]';
 const PLAN_MODE_PREFIX = '请先进入计划模式处理下面的需求。';
 const PLAN_MODE_DEMAND_MARKER = '需求：';
 const CONTEXT_PLACEHOLDER = '已加载项目上下文。';
 const DEFAULT_SERVICE_TIER = 'default';
+const USER_INPUT_REQUEST_METHOD = 'item/tool/requestUserInput';
+
+interface CodexSessionRuntimeState {
+  running: boolean;
+  updatedAt: number;
+  activityLabel: string | null;
+}
+
+const sessionRuntimeCache = new Map<string, { size: number; mtimeMs: number; state: CodexSessionRuntimeState | null }>();
 
 function cleanExecutablePath(value: unknown): string {
   return String(value || '').trim().replace(/^"+|"+$/g, '');
@@ -125,11 +140,14 @@ export interface CodexThreadSummary {
   preview: string;
   cwd: string;
   projectRoot: string | null;
+  projectless: boolean;
   path: string;
   source: string | null;
   createdAt: number;
   updatedAt: number;
   status: string;
+  pinned: boolean;
+  activityLabel?: string | null;
   queuedFollowUpCount: number;
   queuedFollowUps: QueuedFollowUpSummary[];
 }
@@ -170,6 +188,17 @@ export interface CodexThreadDetail extends CodexThreadSummary {
   reasoningEffort: string;
   activityLabel?: string | null;
   messages: { role: string; type: string; text: string; timestamp: number; _itemId?: string }[];
+}
+
+export interface CodexSidebarSnapshot {
+  projectRoots: string[];
+  pinnedThreadIds: string[];
+  projectThreadIds: string[];
+  visibleThreadIds: string[];
+  pinnedThreads: CodexThreadSummary[];
+  projectThreads: CodexThreadSummary[];
+  data: CodexThreadSummary[];
+  nextCursor: string | null;
 }
 
 function mobileTextLimit(type: string): number {
@@ -219,15 +248,33 @@ function summarizeFileChangeForMobile(text: string): string {
   return `文件改动\n${lines.join('\n')}`;
 }
 
+function summarizeCommandForMobile(text: string, completed = false): string {
+  const command = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) =>
+      line &&
+      !line.toLowerCase().startsWith('cwd:') &&
+      !line.toLowerCase().startsWith('status:') &&
+      !line.toLowerCase().startsWith('exit:') &&
+      !line.toLowerCase().startsWith('duration:') &&
+      !['正在运行命令。', '命令执行完成。', '命令已完成，输出已省略。'].includes(line)
+    );
+  if (!command) return completed ? '命令已完成，输出已省略。' : '运行命令';
+  const compact = compactSingleLine(command);
+  const visible = compact.length > 160 ? `${compact.slice(0, 160).trimEnd()}...` : compact;
+  return `${completed ? '命令已完成' : '运行命令'}\n${visible}`;
+}
+
 function summarizeMessageForMobile<T extends { type: string; text: string }>(message: T): T {
   if ((message as T & { role?: string }).role === 'user' || message.type === 'user') {
     return { ...message, text: truncateForMobile(simplifyUserMessageForMobile(message.text), 'user') };
   }
   switch (message.type) {
     case 'command':
-      return { ...message, text: '正在运行命令。' };
+      return { ...message, text: summarizeCommandForMobile(message.text) };
     case 'command_output':
-      return { ...message, text: '命令已完成，输出已省略。' };
+      return { ...message, text: summarizeCommandForMobile(message.text, true) };
     case 'file_change':
       return { ...message, text: summarizeFileChangeForMobile(message.text) };
     case 'sub_agent':
@@ -255,9 +302,9 @@ function stripInjectedContextForMobile(text: string): string {
     const index = text.lastIndexOf(marker);
     if (index >= 0) cursor = Math.max(cursor, index + marker.length);
   }
-  if (cursor < 0) return CONTEXT_PLACEHOLDER;
+  if (cursor < 0) return '';
   const rest = text.slice(cursor).trim();
-  if (!rest || looksLikeInjectedContext(rest)) return CONTEXT_PLACEHOLDER;
+  if (!rest || looksLikeInjectedContext(rest)) return '';
   return rest;
 }
 
@@ -304,15 +351,77 @@ const HIDDEN_THREAD_STATUSES = new Set([
   'trashed',
 ]);
 
+const ACTIVE_THREAD_STATUSES = new Set([
+  'initializing',
+  'resuming',
+  'working',
+  'running',
+  'active',
+  'in_progress',
+  'inprogress',
+  'in-progress',
+  'pending',
+  'processing',
+  'queued',
+  'starting',
+  'streaming',
+]);
+
 function isHiddenThreadStatus(status: string): boolean {
   return HIDDEN_THREAD_STATUSES.has(status.trim().toLowerCase());
+}
+
+function isActiveThreadStatus(status: string): boolean {
+  return ACTIVE_THREAD_STATUSES.has(status.trim().toLowerCase());
+}
+
+type SqliteRow = Record<string, unknown>;
+type SqliteStatement = { all: () => SqliteRow[] };
+type SqliteDatabase = { prepare: (sql: string) => SqliteStatement; close: () => void };
+type SqliteDatabaseConstructor = new (filename: string, options?: { readOnly?: boolean }) => SqliteDatabase;
+
+let warnedCodexStateDbReadFailure = false;
+
+function nodeSqliteDatabase(): SqliteDatabaseConstructor | null {
+  try {
+    const nodeRequire = eval('require') as (moduleName: string) => unknown;
+    const sqlite = nodeRequire('node:sqlite') as { DatabaseSync?: SqliteDatabaseConstructor };
+    return typeof sqlite?.DatabaseSync === 'function' ? sqlite.DatabaseSync : null;
+  } catch {
+    return null;
+  }
+}
+
+function codexArchivedThreadIds(): Set<string> {
+  if (!fs.existsSync(CODEX_STATE_DB_PATH)) return new Set();
+  const DatabaseSync = nodeSqliteDatabase();
+  if (!DatabaseSync) return new Set();
+
+  let db: SqliteDatabase | null = null;
+  try {
+    db = new DatabaseSync(CODEX_STATE_DB_PATH, { readOnly: true });
+    const rows = db.prepare('select id from threads where archived = 1 or archived_at is not null').all();
+    return new Set(rows.map((row) => usableString(row.id)).filter(Boolean));
+  } catch (err) {
+    if (!warnedCodexStateDbReadFailure) {
+      warnedCodexStateDbReadFailure = true;
+      console.warn('[threads] Failed to read Codex archived thread state:', err);
+    }
+    return new Set();
+  } finally {
+    try { db?.close(); } catch {}
+  }
 }
 
 function booleanField(value: Record<string, unknown>, keys: string[]): boolean {
   return keys.some((key) => value[key] === true);
 }
 
-function shouldShowCodexThread(thread: Record<string, unknown>): boolean {
+function shouldShowCodexThread(thread: Record<string, unknown>, archivedThreadIds: Set<string> = new Set()): boolean {
+  const id = usableString(thread.id);
+  if (id && archivedThreadIds.has(id)) {
+    return false;
+  }
   if (booleanField(thread, ['archived', 'deleted', 'removed', 'trashed', 'isArchived', 'isDeleted'])) {
     return false;
   }
@@ -393,6 +502,15 @@ function codexQueuedFollowUpsForThread(threadId: string): QueuedFollowUpSummary[
     .filter((item) => item.text.trim());
 }
 
+function codexPinnedThreadIds(): Set<string> {
+  const state = readCodexDesktopState();
+  const atomState = codexDesktopAtomState();
+  return new Set(
+    stringArray(state?.['pinned-thread-ids'])
+      .concat(stringArray(atomState?.['pinned-thread-ids'])),
+  );
+}
+
 function uniqueResolvedPaths(values: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -406,7 +524,7 @@ function uniqueResolvedPaths(values: string[]): string[] {
   return result;
 }
 
-function codexDesktopVisibleWorkspaceRoots(): string[] {
+export function codexDesktopVisibleWorkspaceRoots(): string[] {
   const state = readCodexDesktopState();
   const atomState = codexDesktopAtomState();
   if (!state && !atomState) return [];
@@ -429,8 +547,25 @@ function codexThreadWorkspaceRootHints(): Map<string, string> {
   return hints;
 }
 
+function codexProjectlessThreadIds(): Set<string> {
+  const state = readCodexDesktopState();
+  const atomState = codexDesktopAtomState();
+  return new Set(
+    stringArray(state?.['projectless-thread-ids'])
+      .concat(stringArray(atomState?.['projectless-thread-ids'])),
+  );
+}
+
 function isWithinAnyBase(bases: string[], targetPath: string): boolean {
   return bases.some((base) => isWithinBase(base, targetPath));
+}
+
+function isNestedCodexWorktree(cwd: string, projectRoot: string | null): boolean {
+  if (!projectRoot) return false;
+  const relative = path.relative(projectRoot, cwd);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false;
+  const parts = relative.split(/[\\/]+/).map((part) => part.toLowerCase());
+  return parts[0] === '.claude' && parts[1] === 'worktrees';
 }
 
 function shouldShowCodexThreadInDesktopWorkspace(
@@ -451,8 +586,10 @@ function codexThreadProjectRoot(
   thread: Record<string, unknown>,
   visibleWorkspaceRoots: string[],
   workspaceRootHints: Map<string, string>,
+  projectlessThreadIds: Set<string> = new Set(),
 ): string | null {
   const id = typeof thread.id === 'string' ? thread.id : '';
+  if (id && projectlessThreadIds.has(id)) return null;
   const hintedRoot = id ? workspaceRootHints.get(id) : undefined;
   if (hintedRoot && (visibleWorkspaceRoots.length === 0 || isWithinAnyBase(visibleWorkspaceRoots, hintedRoot))) {
     return hintedRoot;
@@ -461,6 +598,17 @@ function codexThreadProjectRoot(
   const cwd = cleanCwd ? path.resolve(cleanCwd) : '';
   if (!cwd) return null;
   return visibleWorkspaceRoots.find((root) => isWithinBase(root, cwd)) || cwd;
+}
+
+function isCodexConversationThread(
+  thread: Record<string, unknown>,
+  workspaceRootHints: Map<string, string>,
+  projectlessThreadIds: Set<string> = new Set(),
+): boolean {
+  const id = typeof thread.id === 'string' ? thread.id : '';
+  if (id && projectlessThreadIds.has(id)) return true;
+  if (id && workspaceRootHints.has(id)) return false;
+  return !usablePathString(thread.cwd);
 }
 
 function codexDesktopProjectRootForCwd(cwd: string): string | null {
@@ -507,6 +655,21 @@ function valueToText(value: unknown): string {
     return valueToText(record.text ?? record.message ?? record.content);
   }
   return '';
+}
+
+function userInputRequestText(params: Record<string, unknown>): string {
+  const questions = Array.isArray(params.questions) ? params.questions : [];
+  const text = questions
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return '';
+      const question = entry as Record<string, unknown>;
+      const header = typeof question.header === 'string' ? question.header.trim() : '';
+      const prompt = typeof question.question === 'string' ? question.question.trim() : '';
+      return [header, prompt].filter(Boolean).join('：');
+    })
+    .filter(Boolean)
+    .join('\n');
+  return text || valueToText(params.message) || 'Codex 需要你回答一个问题';
 }
 
 function turnsToMessages(thread: Record<string, unknown> | undefined) {
@@ -827,8 +990,6 @@ function inferThreadActivity(messages: AgentInfo['messages']): string | null {
       return '正在思考中，推理内容持续返回';
     case 'command':
       return '正在运行命令，等待执行结果';
-    case 'command_output':
-      return '正在读取命令输出';
     case 'file_change':
       return '正在修改文件，改动内容持续更新';
     case 'plan':
@@ -838,12 +999,128 @@ function inferThreadActivity(messages: AgentInfo['messages']): string | null {
   }
 }
 
-function inferThreadStatus(status: string, messages: AgentInfo['messages']): string {
-  const normalized = status.trim().toLowerCase();
-  if (['working', 'running', 'active', 'in_progress', 'inprogress', 'streaming'].includes(normalized)) return status;
-  const lastAgentMessage = [...messages].reverse().find((message) => message.role === 'agent');
-  const recentActivity = lastAgentMessage && Date.now() - lastAgentMessage.timestamp < 10 * 60 * 1000;
-  return recentActivity && inferThreadActivity(messages) ? 'working' : status;
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function sessionEventPayload(record: Record<string, unknown>): Record<string, unknown> {
+  const direct = objectRecord(record.payload);
+  if (direct) return direct;
+  const msg = objectRecord(record.msg);
+  return objectRecord(msg?.payload) || {};
+}
+
+function sessionActivityLabel(topType: string, payload: Record<string, unknown>): string | null {
+  const payloadType = usableString(payload.type);
+  if (topType === 'response_item') {
+    switch (payloadType) {
+      case 'reasoning':
+        return '正在思考中，推理内容持续返回';
+      case 'function_call':
+        return '正在运行命令，等待执行结果';
+      case 'function_call_output':
+        return '正在读取命令输出';
+      case 'message':
+        return '正在生成回复';
+      default:
+        return null;
+    }
+  }
+  if (topType === 'event_msg') {
+    switch (payloadType) {
+      case 'agent_message':
+        return '正在生成回复';
+      case 'exec_command_begin':
+      case 'mcp_tool_call_begin':
+        return '正在运行命令，等待执行结果';
+      case 'exec_command_end':
+      case 'mcp_tool_call_end':
+        return '正在读取命令输出';
+      case 'patch_apply_begin':
+        return '正在修改文件，改动内容持续更新';
+      case 'patch_apply_end':
+        return '正在整理文件改动';
+      default:
+        return null;
+    }
+  }
+  return null;
+}
+
+function readCodexSessionRuntimeState(sessionPath: unknown): CodexSessionRuntimeState | null {
+  const cleanPath = usablePathString(sessionPath);
+  if (!cleanPath) return null;
+  try {
+    const stat = fs.statSync(cleanPath);
+    if (!stat.isFile()) return null;
+    const cached = sessionRuntimeCache.get(cleanPath);
+    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.state;
+
+    const lines = fs.readFileSync(cleanPath, 'utf8').split(/\r?\n/);
+    let lifecycle: 'started' | 'terminal' | null = null;
+    let updatedAt = 0;
+    let activityLabel: string | null = null;
+    let sawActiveEvent = false;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const record = objectRecord(parsed);
+      if (!record) continue;
+      const topType = usableString(record.type);
+      const payload = sessionEventPayload(record);
+      const payloadType = usableString(payload.type);
+      const timestamp = toTimestampMs(record.timestamp, updatedAt);
+      if (timestamp > 0) updatedAt = Math.max(updatedAt, timestamp);
+
+      const activeLabel = sessionActivityLabel(topType, payload);
+      if (activeLabel) {
+        sawActiveEvent = true;
+        if (lifecycle !== 'terminal') activityLabel = activeLabel;
+      }
+      if (topType === 'event_msg' && payloadType === 'task_started') {
+        lifecycle = 'started';
+        activityLabel = '正在运行中，AI 正在接手任务';
+        continue;
+      }
+      if (
+        topType === 'event_msg'
+        && ['task_complete', 'task_failed', 'turn_aborted', 'error'].includes(payloadType)
+      ) {
+        lifecycle = 'terminal';
+        activityLabel = null;
+        continue;
+      }
+      if (lifecycle === 'started') {
+        activityLabel = activeLabel || activityLabel;
+      }
+    }
+
+    const recentlyActive = sawActiveEvent && lifecycle !== 'terminal' && Date.now() - stat.mtimeMs <= CODEX_SESSION_ACTIVE_GRACE_MS;
+    const state = lifecycle
+      ? {
+          running: lifecycle === 'started',
+          updatedAt,
+          activityLabel: lifecycle === 'started' ? activityLabel : null,
+        }
+      : sawActiveEvent
+        ? {
+            running: recentlyActive,
+            updatedAt,
+            activityLabel: recentlyActive ? activityLabel : null,
+          }
+        : null;
+    sessionRuntimeCache.set(cleanPath, { size: stat.size, mtimeMs: stat.mtimeMs, state });
+    return state;
+  } catch {
+    return null;
+  }
 }
 
 function isWithinBase(base: string, targetPath: string): boolean {
@@ -1224,7 +1501,11 @@ function formatPlanSteps(plan: unknown): string {
       const record = step as Record<string, unknown>;
       const text = valueToText(record.step ?? record.text);
       const status = valueToText(record.status);
-      return [status ? `[${status}]` : '', text].filter(Boolean).join(' ');
+      if (!text) return '';
+      const normalizedStatus = status.trim().toLowerCase();
+      const checkbox = ['completed', 'complete', 'done', 'finished'].includes(normalizedStatus) ? '[x]' : '[ ]';
+      const statusLabel = status ? ` **${status}**` : '';
+      return `- ${checkbox} ${text}${statusLabel}`;
     })
     .filter(Boolean)
     .join('\n');
@@ -1270,7 +1551,10 @@ function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Re
   }
 
   if (type === 'plan') {
-    return { ...item, type: 'plan', text: valueToText(item.text) || 'Plan updated.' };
+    const planText = [valueToText(item.explanation), formatPlanSteps(item.plan ?? item.steps)]
+      .filter(Boolean)
+      .join('\n\n');
+    return { ...item, type: 'plan', text: planText || valueToText(item.text) || 'Plan updated.' };
   }
 
   if (type === 'reasoning') {
@@ -1339,31 +1623,69 @@ function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Re
   return null;
 }
 
-function normalizeThreadSummary(thread: Record<string, unknown>, projectRoot: string | null = null): CodexThreadSummary {
+function normalizeThreadSummary(
+  thread: Record<string, unknown>,
+  projectRoot: string | null = null,
+  pinnedThreadIds: Set<string> = codexPinnedThreadIds(),
+  stoppedThreadIds: Set<string> = new Set(),
+  projectlessThreadIds: Set<string> = new Set(),
+): CodexThreadSummary {
   const id = typeof thread.id === 'string' ? thread.id : '';
   const cwd = usablePathString(thread.cwd);
+  const projectless = Boolean(id && projectlessThreadIds.has(id));
   const createdAt = toTimestampMs(thread.createdAt);
+  const runtime = readCodexSessionRuntimeState(thread.path);
+  const stoppedOverride = Boolean(id && stoppedThreadIds.has(id));
+  const updatedAt = toTimestampMs(thread.updatedAt, createdAt);
   const queuedFollowUps = codexQueuedFollowUpsForThread(id);
+  const pinned = Boolean(id && pinnedThreadIds.has(id));
   return {
     id,
     name: typeof thread.name === 'string' ? thread.name : null,
     preview: typeof thread.preview === 'string' ? thread.preview : '',
     cwd,
-    projectRoot: projectRoot || codexDesktopProjectRootForCwd(cwd),
+    projectRoot: projectless ? null : (projectRoot || codexDesktopProjectRootForCwd(cwd)),
+    projectless,
     path: typeof thread.path === 'string' ? thread.path : '',
     source: typeof thread.source === 'string' ? thread.source : null,
     createdAt,
-    updatedAt: toTimestampMs(thread.updatedAt, createdAt),
-    status: extractThreadStatus(thread.status),
+    updatedAt: Math.max(updatedAt, runtime?.updatedAt || 0),
+    status: stoppedOverride
+      ? '可恢复'
+      : runtime
+        ? (runtime.running ? 'working' : '可恢复')
+        : extractThreadStatus(thread.status),
+    pinned,
+    activityLabel: stoppedOverride ? null : (runtime?.running ? runtime.activityLabel : null),
     queuedFollowUpCount: queuedFollowUps.length,
     queuedFollowUps,
   };
+}
+
+function shouldShowActiveCodexThread(summary: CodexThreadSummary): boolean {
+  return summary.pinned || isActiveThreadStatus(summary.status) || summary.queuedFollowUpCount > 0;
+}
+
+function byUpdatedDesc(left: CodexThreadSummary, right: CodexThreadSummary): number {
+  return right.updatedAt - left.updatedAt;
+}
+
+function uniqueSummariesById(items: CodexThreadSummary[]): CodexThreadSummary[] {
+  const seen = new Set<string>();
+  const result: CodexThreadSummary[] = [];
+  for (const item of items) {
+    if (!item.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push(item);
+  }
+  return result;
 }
 
 export class SessionOrchestrator {
   private agents = new Map<string, AgentInfo>();
   private broadcast: BroadcastFn;
   private capabilities: RuntimeCapabilities;
+  private stoppedCodexThreads = new Map<string, number>();
 
   constructor(broadcast: BroadcastFn) {
     this.broadcast = broadcast;
@@ -1425,6 +1747,16 @@ export class SessionOrchestrator {
     return message.toLowerCase().includes('effort');
   }
 
+  private findAgentByCodexThreadId(threadId: string, exceptAgentId?: string): AgentInfo | null {
+    const normalized = threadId.trim();
+    if (!normalized) return null;
+    for (const agent of this.agents.values()) {
+      if (agent.id === exceptAgentId) continue;
+      if (agent.codexThreadId === normalized || agent.threadId === normalized) return agent;
+    }
+    return null;
+  }
+
   async createAgent(
     name: string,
     model: string,
@@ -1439,6 +1771,12 @@ export class SessionOrchestrator {
     },
   ): Promise<Omit<AgentInfo, 'process' | 'buffer' | 'pendingResponses' | 'pendingAgentRequests' | 'messageItemIds' | 'fileSnapshots' | 'toolCalls' | 'turnQueue' | 'queueDraining'>> {
     const id = agentId || uuid();
+    const requestedCodexThreadId = options?.codexThreadId?.trim() || undefined;
+    const existingThreadAgent = requestedCodexThreadId ? this.findAgentByCodexThreadId(requestedCodexThreadId) : null;
+    if (existingThreadAgent) {
+      console.log(`[agents] Reusing running agent ${existingThreadAgent.id} for Codex thread ${requestedCodexThreadId}`);
+      return this.serialize(existingThreadAgent);
+    }
     if (this.agents.has(id)) {
       throw new Error(`Agent ${id} is already running`);
     }
@@ -1457,9 +1795,11 @@ export class SessionOrchestrator {
       reasoningEffort: options?.reasoningEffort || 'medium',
       systemPrompt,
       status: 'initializing',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
       threadId: null,
       currentTurnId: null,
-      codexThreadId: options?.codexThreadId || null,
+      codexThreadId: requestedCodexThreadId || null,
       codexPath: null,
       source: null,
       messages: [],
@@ -1509,10 +1849,11 @@ export class SessionOrchestrator {
     proc.on('exit', (code) => {
       console.log(`  ${YELLOW}[${name}] Process exited with code ${code}${RESET}`);
       agent.status = 'stopped';
+      this.markCodexThreadStopped(agent);
       this.rejectPending(agent, `codex app-server exited with code ${code}`);
       this.agents.delete(id);
       this.persistAgentsToDisk();
-      this.broadcast(id, 'agent/stopped', { code });
+      this.broadcast(id, 'agent/stopped', { code, codexThreadId: agent.codexThreadId || agent.threadId });
       if (code !== 0 && code !== null) {
         notifyMobileClients({
           title: `${name} — Error`,
@@ -1585,6 +1926,13 @@ export class SessionOrchestrator {
       const thread = threadData.thread as Record<string, unknown> | undefined;
       agent.threadId = (thread?.id as string) || (threadData.threadId as string) || null;
       agent.codexThreadId = agent.threadId;
+      this.clearCodexThreadStopped(agent.threadId);
+      if (agent.threadId) {
+        const duplicate = this.findAgentByCodexThreadId(agent.threadId, agent.id);
+        if (duplicate) {
+          throw new Error(`Codex thread ${agent.threadId} is already attached to running agent ${duplicate.id}`);
+        }
+      }
       agent.codexPath = typeof thread?.path === 'string' ? thread.path : null;
       agent.source = typeof thread?.source === 'string' ? thread.source : null;
       agent.cwd = (typeof threadData.cwd === 'string' ? threadData.cwd : cwd) || cwd;
@@ -1734,15 +2082,64 @@ export class SessionOrchestrator {
     });
   }
 
+  respondAgentUserInput(agentId: string, requestId: string, answers: Record<string, unknown>): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) throw new Error('Agent not found');
+    const request = agent.pendingAgentRequests.get(requestId);
+    if (!request) throw new Error('Agent request not found or already handled');
+    agent.pendingAgentRequests.delete(requestId);
+
+    const formattedAnswers: Record<string, { answers: string[] }> = {};
+    for (const [questionId, value] of Object.entries(answers || {})) {
+      const values = Array.isArray(value) ? value : [value];
+      const cleanAnswers = values
+        .map((entry) => String(entry || '').trim())
+        .filter(Boolean);
+      if (cleanAnswers.length > 0) formattedAnswers[questionId] = { answers: cleanAnswers };
+    }
+
+    this.write(agent, JSON.stringify({
+      id: request.id,
+      result: {
+        answers: formattedAnswers,
+      },
+    }));
+    this.broadcast(agent.id, 'agent/request_resolved', {
+      requestId,
+      approved: true,
+      reason: 'Answered from EasyCodex mobile',
+      timestamp: Date.now(),
+    });
+  }
+
   stopAgent(agentId: string): void {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error('Agent not found');
 
     console.log(`  ${RED}[${agent.name}] Stopping...${RESET}`);
+    this.markCodexThreadStopped(agent);
     agent.process.kill();
     agent.status = 'stopped';
     this.agents.delete(agentId);
     this.persistAgentsToDisk();
+  }
+
+  async archiveCodexThread(threadId: string, agentId?: string): Promise<void> {
+    const normalizedThreadId = threadId.trim();
+    if (!normalizedThreadId) throw new Error('threadId is required');
+
+    const agent = (agentId && this.agents.get(agentId))
+      || Array.from(this.agents.values()).find((entry) => entry.codexThreadId === normalizedThreadId || entry.threadId === normalizedThreadId);
+    if (agent) {
+      try { agent.process.kill(); } catch {}
+      agent.status = 'stopped';
+      this.agents.delete(agent.id);
+      this.clearCodexThreadStopped(normalizedThreadId);
+      this.persistAgentsToDisk();
+    }
+
+    const response = await this.sendOneOffRequest(codexThreadArchiveCall(normalizedThreadId));
+    if (response.error) throw new Error(response.error.message);
   }
 
   updateModel(agentId: string, model: string): void {
@@ -1787,10 +2184,42 @@ export class SessionOrchestrator {
     this.persistAgentsToDisk();
   }
 
-  async listCodexThreads(params: { limit?: number; cursor?: string; cwd?: string; all?: boolean } = {}) {
+  private async readPinnedCodexThreadSummary(threadId: string): Promise<Record<string, unknown> | null> {
+    const response = await this.sendOneOffRequest(codexThreadReadCall(threadId, false));
+    if (response.error) return null;
+    const result = response.result as Record<string, unknown>;
+    const thread = result?.thread as Record<string, unknown> | undefined;
+    return thread && typeof thread === 'object' && !Array.isArray(thread) ? thread : null;
+  }
+
+  private markCodexThreadStopped(agent: AgentInfo): void {
+    const threadId = (agent.codexThreadId || agent.threadId || '').trim();
+    if (threadId) this.stoppedCodexThreads.set(threadId, Date.now());
+  }
+
+  private clearCodexThreadStopped(threadId: string | null | undefined): void {
+    const normalized = (threadId || '').trim();
+    if (normalized) this.stoppedCodexThreads.delete(normalized);
+  }
+
+  private stoppedCodexThreadIds(): Set<string> {
+    const now = Date.now();
+    for (const [threadId, stoppedAt] of this.stoppedCodexThreads) {
+      if (now - stoppedAt > STOPPED_THREAD_OVERRIDE_TTL_MS) {
+        this.stoppedCodexThreads.delete(threadId);
+      }
+    }
+    return new Set(this.stoppedCodexThreads.keys());
+  }
+
+  async listCodexThreads(params: { limit?: number; cursor?: string; cwd?: string; all?: boolean; activeOnly?: boolean } = {}) {
     const cwdFilter = params.cwd ? path.resolve(params.cwd) : null;
     const visibleWorkspaceRoots = cwdFilter ? [] : codexDesktopVisibleWorkspaceRoots();
     const workspaceRootHints = cwdFilter ? new Map<string, string>() : codexThreadWorkspaceRootHints();
+    const projectlessThreadIds = cwdFilter ? new Set<string>() : codexProjectlessThreadIds();
+    const archivedThreadIds = codexArchivedThreadIds();
+    const pinnedThreadIds = codexPinnedThreadIds();
+    const stoppedThreadIds = this.stoppedCodexThreadIds();
     const allData: Record<string, unknown>[] = [];
     let nextCursor: string | null = typeof params.cursor === 'string' && params.cursor.trim() ? params.cursor : null;
     let page = 0;
@@ -1810,14 +2239,56 @@ export class SessionOrchestrator {
       page += 1;
     } while (params.all === true && nextCursor && page < 25);
 
+    const threadById = new Map<string, Record<string, unknown>>();
+    for (const entry of allData) {
+      const id = usableString(entry.id);
+      if (id && !threadById.has(id)) threadById.set(id, entry);
+    }
+
+    const pinnedThreads: CodexThreadSummary[] = [];
+    for (const pinnedThreadId of pinnedThreadIds) {
+      const thread = threadById.get(pinnedThreadId) || await this.readPinnedCodexThreadSummary(pinnedThreadId);
+      if (!thread) continue;
+      pinnedThreads.push(normalizeThreadSummary(
+        thread,
+        codexThreadProjectRoot(thread, visibleWorkspaceRoots, workspaceRootHints, projectlessThreadIds),
+        pinnedThreadIds,
+        stoppedThreadIds,
+        projectlessThreadIds,
+      ));
+    }
+
+    const projectThreads = allData
+      .filter((entry) => shouldShowCodexThread(entry, archivedThreadIds))
+      .filter((entry) => {
+        const id = usableString(entry.id);
+        if (id && pinnedThreadIds.has(id)) return false;
+        return shouldShowCodexThreadInDesktopWorkspace(entry, visibleWorkspaceRoots, workspaceRootHints)
+          || isCodexConversationThread(entry, workspaceRootHints, projectlessThreadIds);
+      })
+      .map((entry) => normalizeThreadSummary(
+        entry,
+        codexThreadProjectRoot(entry, visibleWorkspaceRoots, workspaceRootHints, projectlessThreadIds),
+        pinnedThreadIds,
+        stoppedThreadIds,
+        projectlessThreadIds,
+      ))
+      .filter((entry) => !entry.projectRoot || !isNestedCodexWorktree(entry.cwd, entry.projectRoot))
+      .filter((entry) => params.activeOnly !== true || shouldShowActiveCodexThread(entry))
+      .filter((entry) => !cwdFilter || (entry.cwd.trim() && isWithinBase(cwdFilter, entry.cwd)))
+      .sort(byUpdatedDesc);
+
+    const data = uniqueSummariesById([...pinnedThreads, ...projectThreads]);
     return {
-      data: allData
-        .filter((entry) => shouldShowCodexThread(entry))
-        .filter((entry) => shouldShowCodexThreadInDesktopWorkspace(entry, visibleWorkspaceRoots, workspaceRootHints))
-        .map((entry) => normalizeThreadSummary(entry, codexThreadProjectRoot(entry, visibleWorkspaceRoots, workspaceRootHints)))
-        .filter((entry) => !cwdFilter || (entry.cwd.trim() && isWithinBase(cwdFilter, entry.cwd))),
+      projectRoots: visibleWorkspaceRoots,
+      pinnedThreadIds: pinnedThreads.map((entry) => entry.id),
+      projectThreadIds: projectThreads.map((entry) => entry.id),
+      visibleThreadIds: data.map((entry) => entry.id),
+      pinnedThreads,
+      projectThreads,
+      data,
       nextCursor,
-    };
+    } satisfies CodexSidebarSnapshot;
   }
 
   private async readCodexThreadTurns(threadId: string): Promise<Record<string, unknown>[] | null> {
@@ -1845,6 +2316,10 @@ export class SessionOrchestrator {
   }
 
   async readCodexThread(threadId: string): Promise<CodexThreadDetail> {
+    const pinnedThreadIds = codexPinnedThreadIds();
+    if (codexArchivedThreadIds().has(threadId.trim()) && !pinnedThreadIds.has(threadId.trim())) {
+      throw new Error('Thread is archived');
+    }
     let response = await this.sendOneOffRequest(codexThreadReadCall(threadId, false));
     if (response.error) throw new Error(response.error.message);
     const result = response.result as Record<string, unknown>;
@@ -1871,14 +2346,21 @@ export class SessionOrchestrator {
     const messages = mergeMessageHistory(turnsToMessages(messageSource), readSessionMessages(thread.path))
       .sort((a, b) => a.timestamp - b.timestamp)
       .map(summarizeMessageForMobile);
-    const summary = normalizeThreadSummary(thread);
+    const projectlessThreadIds = codexProjectlessThreadIds();
+    const summary = normalizeThreadSummary(
+      thread,
+      codexThreadProjectRoot(thread, codexDesktopVisibleWorkspaceRoots(), codexThreadWorkspaceRootHints(), projectlessThreadIds),
+      pinnedThreadIds,
+      this.stoppedCodexThreadIds(),
+      projectlessThreadIds,
+    );
     const model = usableString(result?.model) || usableString(thread.model);
     const approvalPolicy = usableString(result?.approvalPolicy) || usableString(thread.approvalPolicy) || 'never';
     const serviceTier = normalizeServiceTier(usableString(result?.serviceTier) || usableString(thread.serviceTier));
     const reasoningEffort = usableString(result?.reasoningEffort) || usableString(thread.reasoningEffort) || 'medium';
-    const status = inferThreadStatus(summary.status, messages);
+    const status = summary.status;
     const queueLabel = summary.queuedFollowUpCount > 0 ? `已排队 ${summary.queuedFollowUpCount} 个后续任务` : null;
-    const activityLabel = queueLabel || (status === 'working' ? inferThreadActivity(messages) : null);
+    const activityLabel = queueLabel || (status === 'working' ? (summary.activityLabel || inferThreadActivity(messages)) : null);
     return {
       ...summary,
       status,
@@ -1970,6 +2452,9 @@ export class SessionOrchestrator {
   }
 
   private serialize(agent: AgentInfo) {
+    const messageUpdatedAt = Math.max(0, ...agent.messages.map((message) => message.timestamp || 0));
+    const pendingUpdatedAt = Math.max(0, ...Array.from(agent.pendingAgentRequests.values()).map((request) => request.timestamp || 0));
+    const updatedAt = Math.max(agent.updatedAt, messageUpdatedAt, pendingUpdatedAt);
     return {
       id: agent.id,
       name: agent.name,
@@ -1981,6 +2466,8 @@ export class SessionOrchestrator {
       reasoningEffort: agent.reasoningEffort,
       systemPrompt: agent.systemPrompt,
       status: agent.status,
+      createdAt: agent.createdAt,
+      updatedAt,
       threadId: agent.threadId,
       currentTurnId: agent.currentTurnId,
       activity: this.activityLabel(agent),
@@ -1988,6 +2475,13 @@ export class SessionOrchestrator {
       codexThreadId: agent.codexThreadId,
       codexPath: agent.codexPath,
       source: agent.source,
+      pendingRequests: Array.from(agent.pendingAgentRequests.values()).map((request) => ({
+        requestId: String(request.id),
+        method: request.method,
+        params: request.params,
+        text: valueToText(request.params.message ?? request.params.reason ?? request.params.command ?? request.params.tool ?? request.params.item) || request.method,
+        timestamp: request.timestamp,
+      })),
       messages: agent.messages.map(summarizeMessageForMobile),
     };
   }
@@ -2306,7 +2800,9 @@ export class SessionOrchestrator {
       params,
       timestamp: Date.now(),
     });
-    const text = valueToText(params.message ?? params.reason ?? params.command ?? params.tool ?? params.item) || method;
+    const text = method === USER_INPUT_REQUEST_METHOD
+      ? userInputRequestText(params)
+      : valueToText(params.message ?? params.reason ?? params.command ?? params.tool ?? params.item) || method;
     this.finalizeItemMessage(agent, `request_${requestId}`, text, 'status');
     this.broadcast(agent.id, 'agent/requested', {
       requestId,
@@ -2315,6 +2811,17 @@ export class SessionOrchestrator {
       text,
       timestamp: Date.now(),
     });
+    notifyMobileClients({
+      title: method === USER_INPUT_REQUEST_METHOD ? `${agent.name} has a question` : `${agent.name} needs confirmation`,
+      body: text,
+      subtitle: 'Tap to open',
+      kind: method === USER_INPUT_REQUEST_METHOD ? 'agent_question' : 'agent_request',
+      agentName: agent.name,
+      agentId: agent.id,
+      categoryId: 'agent-alert',
+      priority: 'high',
+      severity: 'info',
+    }).catch(() => {});
   }
 
   private handleNotification(agent: AgentInfo, method: string, params: Record<string, unknown>) {
@@ -2604,21 +3111,7 @@ export class SessionOrchestrator {
         }
 
         case 'thread/tokenUsage/updated': {
-          const turnId = (p.turnId as string) || agent.currentTurnId || '';
-          const usage = p.tokenUsage as Record<string, unknown> | undefined;
-          const total = usage?.total as Record<string, unknown> | undefined;
-          const last = usage?.last as Record<string, unknown> | undefined;
-          const text = [
-            'Token usage',
-            total ? `total: ${formatJsonDetail(total)}` : '',
-            last ? `last: ${formatJsonDetail(last)}` : '',
-            usage?.modelContextWindow ? `context window: ${usage.modelContextWindow}` : '',
-          ].filter(Boolean).join('\n');
-          const itemId = turnId ? `tokens_${turnId}` : `tokens_${Date.now()}`;
-          this.finalizeItemMessage(agent, itemId, text, 'status');
-          this.broadcast(agent.id, 'item/completed', {
-            item: { id: itemId, type: 'status', text },
-          });
+          this.broadcast(agent.id, 'thread/tokenUsage/updated', p);
           break;
         }
 

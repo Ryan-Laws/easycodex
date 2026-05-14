@@ -135,8 +135,11 @@ const val PREF_THEME_MODE = "theme_mode"
 const val PREF_THEME_COLOR = "theme_color"
 const val PREF_APP_LAYOUT = "app_layout"
 const val PREF_OLED_MODE = "oled_mode"
+const val PREF_UPDATE_CHANNEL = "update_channel"
 const val PREF_USAGE_GUIDE_SEEN = "usage_guide_seen"
 const val PREF_DAYLIGHT_THEME_DEFAULT_APPLIED = "daylight_theme_default_applied"
+const val PREF_HIDDEN_TASK_IDS = "hidden_task_ids"
+const val PREF_READ_TASK_KEYS = "read_task_keys"
 
 const val DEFAULT_RELAY_URL = "ws://10.0.2.2:3001"
 const val DEFAULT_AGENT_MODEL = "gpt-5.5"
@@ -146,11 +149,12 @@ const val DEFAULT_SERVICE_TIER = "default"
 const val DEFAULT_THEME_MODE = "light"
 const val DEFAULT_THEME_COLOR = "codex"
 const val DEFAULT_APP_LAYOUT = "standard"
+const val DEFAULT_UPDATE_CHANNEL = "stable"
 private const val TEST_NOTIFICATION_CHANNEL_ID = "easycodex-test"
 private const val TEST_NOTIFICATION_ID = 71801
 private const val SETTINGS_RELAY_REQUEST_TIMEOUT_MS = 30_000L
-private const val EASY_CODEX_APP_VERSION = "0.1.1"
-private const val EASY_CODEX_RELEASE_API_URL = "https://api.github.com/repos/Ryan-Laws/easycodex/releases/latest"
+private const val EASY_CODEX_APP_VERSION = "0.1.2-beta.2"
+private const val EASY_CODEX_RELEASE_API_BASE_URL = "https://api.github.com/repos/Ryan-Laws/easycodex"
 
 private fun normalizeDefaultServiceTier(value: String): String {
     return when (value.trim().lowercase()) {
@@ -160,14 +164,66 @@ private fun normalizeDefaultServiceTier(value: String): String {
 }
 
 private fun compareVersions(left: String, right: String): Int {
-    val leftParts = left.split('.', '-').map { it.toIntOrNull() ?: 0 }
-    val rightParts = right.split('.', '-').map { it.toIntOrNull() ?: 0 }
-    val count = maxOf(leftParts.size, rightParts.size)
+    val leftVersion = splitVersion(left)
+    val rightVersion = splitVersion(right)
+    val count = maxOf(leftVersion.numbers.size, rightVersion.numbers.size, 3)
     for (index in 0 until count) {
-        val diff = (leftParts.getOrNull(index) ?: 0) - (rightParts.getOrNull(index) ?: 0)
+        val diff = (leftVersion.numbers.getOrNull(index) ?: 0) - (rightVersion.numbers.getOrNull(index) ?: 0)
+        if (diff != 0) return diff
+    }
+    if (leftVersion.prerelease.isEmpty() && rightVersion.prerelease.isNotEmpty()) return 1
+    if (leftVersion.prerelease.isNotEmpty() && rightVersion.prerelease.isEmpty()) return -1
+    val prereleaseCount = maxOf(leftVersion.prerelease.size, rightVersion.prerelease.size)
+    for (index in 0 until prereleaseCount) {
+        val leftPart = leftVersion.prerelease.getOrNull(index) ?: return -1
+        val rightPart = rightVersion.prerelease.getOrNull(index) ?: return 1
+        if (leftPart == rightPart) continue
+        val leftNumber = leftPart.toIntOrNull()
+        val rightNumber = rightPart.toIntOrNull()
+        if (leftNumber != null && rightNumber != null) return leftNumber - rightNumber
+        if (leftNumber != null) return -1
+        if (rightNumber != null) return 1
+        val diff = leftPart.compareTo(rightPart)
         if (diff != 0) return diff
     }
     return 0
+}
+
+private data class ParsedVersion(val numbers: List<Int>, val prerelease: List<String>)
+
+private fun splitVersion(value: String): ParsedVersion {
+    val clean = value.trim().removePrefix("v")
+    val main = clean.substringBefore('-')
+    val prerelease = clean.substringAfter('-', "")
+    return ParsedVersion(
+        numbers = main.split('.').map { it.toIntOrNull() ?: 0 },
+        prerelease = prerelease.split('.', '+').filter { it.isNotBlank() },
+    )
+}
+
+private fun normalizeUpdateChannel(value: String?): String {
+    return if (value?.trim()?.lowercase() == "beta") "beta" else DEFAULT_UPDATE_CHANNEL
+}
+
+private fun updateReleaseApiUrl(channel: String): String {
+    return if (channel == "beta") {
+        "$EASY_CODEX_RELEASE_API_BASE_URL/releases?per_page=30"
+    } else {
+        "$EASY_CODEX_RELEASE_API_BASE_URL/releases/latest"
+    }
+}
+
+private fun selectReleaseForChannel(json: String, channel: String): JSONObject? {
+    return if (channel == "beta") {
+        val releases = runCatching { JSONArray(json) }.getOrNull() ?: return null
+        for (index in 0 until releases.length()) {
+            val release = releases.optJSONObject(index) ?: continue
+            if (release.optBoolean("prerelease", false)) return release
+        }
+        null
+    } else {
+        runCatching { JSONObject(json) }.getOrNull()
+    }
 }
 
 fun applyDaylightThemeDefault(prefs: android.content.SharedPreferences) {
@@ -190,6 +246,11 @@ data class NotificationHistoryItem(
     val body: String,
     val status: String,
     val deliveredCount: Int,
+)
+
+data class ApkUpdateCandidate(
+    val version: String,
+    val url: String,
 )
 
 fun parseEasyCodexConnectionUri(uri: Uri?): EasyCodexConnectionConfig? {
@@ -246,20 +307,31 @@ fun SettingsApp(onClose: () -> Unit) {
     var themeMode by remember { mutableStateOf(prefs.getString(PREF_THEME_MODE, DEFAULT_THEME_MODE) ?: DEFAULT_THEME_MODE) }
     var themeColor by remember { mutableStateOf(prefs.getString(PREF_THEME_COLOR, DEFAULT_THEME_COLOR) ?: DEFAULT_THEME_COLOR) }
     var appLayout by remember { mutableStateOf(prefs.getString(PREF_APP_LAYOUT, DEFAULT_APP_LAYOUT) ?: DEFAULT_APP_LAYOUT) }
+    var updateChannel by remember { mutableStateOf(normalizeUpdateChannel(prefs.getString(PREF_UPDATE_CHANNEL, DEFAULT_UPDATE_CHANNEL))) }
     var appLanguage by remember { mutableStateOf(prefs.getString(PREF_APP_LANGUAGE, DEFAULT_APP_LANGUAGE) ?: DEFAULT_APP_LANGUAGE) }
     var oledMode by remember { mutableStateOf(prefs.getBoolean(PREF_OLED_MODE, false)) }
     var saveState by remember { mutableStateOf("") }
     var apiKeyVisible by remember { mutableStateOf(false) }
+    var connectionTesting by remember { mutableStateOf(false) }
     val strings = appStringsFor(appLanguage)
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
-    val updateClient = remember { OkHttpClient() }
+    val updateClient = remember {
+        OkHttpClient.Builder()
+            .retryOnConnectionFailure(true)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .callTimeout(30, TimeUnit.SECONDS)
+            .build()
+    }
     var destination by remember { mutableStateOf<SettingsDestination?>(null) }
     var notificationAgents by remember { mutableStateOf<List<NotificationAgentPreference>>(emptyList()) }
     var notificationHistory by remember { mutableStateOf<List<NotificationHistoryItem>>(emptyList()) }
     var notificationStatus by remember { mutableStateOf("") }
     var notificationSyncing by remember { mutableStateOf(false) }
     var updateChecking by remember { mutableStateOf(false) }
+    var pendingApkUpdate by remember { mutableStateOf<ApkUpdateCandidate?>(null) }
     var relayClient by remember { mutableStateOf<SettingsRelayClient?>(null) }
+    var connectionTestClient by remember { mutableStateOf<SettingsRelayClient?>(null) }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         saveState = if (granted) sendLocalTestNotification(context, strings) else strings.notificationsDisabled
     }
@@ -267,13 +339,14 @@ fun SettingsApp(onClose: () -> Unit) {
     DisposableEffect(Unit) {
         onDispose {
             relayClient?.close()
+            connectionTestClient?.close()
         }
     }
 
-    fun save() {
+    fun persistSettings(nextRelayUrl: String = relayUrl, nextApiKey: String = apiKey) {
         prefs.edit()
-            .putString(PREF_RELAY_URL, relayUrl.trim())
-            .putString(PREF_API_KEY, apiKey.trim())
+            .putString(PREF_RELAY_URL, nextRelayUrl.trim())
+            .putString(PREF_API_KEY, nextApiKey.trim())
             .putString(PREF_DEFAULT_MODEL, defaultModel.ifBlank { DEFAULT_AGENT_MODEL })
             .putString(PREF_DEFAULT_CWD, defaultCwd.trim().ifBlank { DEFAULT_AGENT_CWD })
             .putString(PREF_DEFAULT_REASONING_EFFORT, reasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT })
@@ -281,11 +354,45 @@ fun SettingsApp(onClose: () -> Unit) {
             .putString(PREF_THEME_MODE, themeMode.ifBlank { DEFAULT_THEME_MODE })
             .putString(PREF_THEME_COLOR, themeColor.ifBlank { DEFAULT_THEME_COLOR })
             .putString(PREF_APP_LAYOUT, appLayout.ifBlank { DEFAULT_APP_LAYOUT })
+            .putString(PREF_UPDATE_CHANNEL, normalizeUpdateChannel(updateChannel))
             .putString(PREF_APP_LANGUAGE, appLanguage.ifBlank { DEFAULT_APP_LANGUAGE })
             .putBoolean(PREF_OLED_MODE, oledMode)
             .apply()
         (context as? Activity)?.setResult(Activity.RESULT_OK)
-        saveState = strings.saved
+    }
+
+    fun testSavedConnection(nextRelayUrl: String = relayUrl, nextApiKey: String = apiKey) {
+        connectionTestClient?.close()
+        connectionTestClient = null
+        val endpoint = nextRelayUrl.trim().ifBlank { DEFAULT_RELAY_URL }
+        val relayError = validateRelayEndpoint(endpoint, strings)
+        if (relayError != null) {
+            connectionTesting = false
+            saveState = strings.connectionTestFailed(relayError)
+            return
+        }
+        connectionTesting = true
+        saveState = strings.testingConnection
+        val nextClient = SettingsRelayClient(endpoint, nextApiKey.trim())
+        connectionTestClient = nextClient
+        var finished = false
+        nextClient.connect { connectError ->
+            if (finished) return@connect
+            finished = true
+            if (connectionTestClient == nextClient) connectionTestClient = null
+            nextClient.close()
+            connectionTesting = false
+            saveState = if (connectError == null) {
+                strings.connectionTestSucceeded
+            } else {
+                strings.connectionTestFailed(connectError)
+            }
+        }
+    }
+
+    fun save() {
+        persistSettings()
+        testSavedConnection()
     }
 
     fun clearConnectionConfig() {
@@ -293,6 +400,9 @@ fun SettingsApp(onClose: () -> Unit) {
         apiKey = ""
         relayClient?.close()
         relayClient = null
+        connectionTestClient?.close()
+        connectionTestClient = null
+        connectionTesting = false
         notificationAgents = emptyList()
         notificationHistory = emptyList()
         prefs.edit()
@@ -306,21 +416,8 @@ fun SettingsApp(onClose: () -> Unit) {
     fun importConnectionConfig(config: EasyCodexConnectionConfig) {
         relayUrl = config.relayUrl
         apiKey = config.apiKey
-        prefs.edit()
-            .putString(PREF_RELAY_URL, config.relayUrl)
-            .putString(PREF_API_KEY, config.apiKey)
-            .putString(PREF_DEFAULT_MODEL, defaultModel.ifBlank { DEFAULT_AGENT_MODEL })
-            .putString(PREF_DEFAULT_CWD, defaultCwd.trim().ifBlank { DEFAULT_AGENT_CWD })
-            .putString(PREF_DEFAULT_REASONING_EFFORT, reasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT })
-            .putString(PREF_DEFAULT_SERVICE_TIER, normalizeDefaultServiceTier(serviceTier.ifBlank { DEFAULT_SERVICE_TIER }))
-            .putString(PREF_THEME_MODE, themeMode.ifBlank { DEFAULT_THEME_MODE })
-            .putString(PREF_THEME_COLOR, themeColor.ifBlank { DEFAULT_THEME_COLOR })
-            .putString(PREF_APP_LAYOUT, appLayout.ifBlank { DEFAULT_APP_LAYOUT })
-            .putString(PREF_APP_LANGUAGE, appLanguage.ifBlank { DEFAULT_APP_LANGUAGE })
-            .putBoolean(PREF_OLED_MODE, oledMode)
-            .apply()
-        (context as? Activity)?.setResult(Activity.RESULT_OK)
-        saveState = strings.importedFromQr
+        persistSettings(config.relayUrl, config.apiKey)
+        testSavedConnection(config.relayUrl, config.apiKey)
     }
 
     fun scanRelayQr() {
@@ -437,8 +534,9 @@ fun SettingsApp(onClose: () -> Unit) {
         if (updateChecking) return
         updateChecking = true
         saveState = strings.checkingForUpdates
+        val channel = normalizeUpdateChannel(updateChannel)
         val request = Request.Builder()
-            .url(EASY_CODEX_RELEASE_API_URL)
+            .url(updateReleaseApiUrl(channel))
             .header("Accept", "application/vnd.github+json")
             .build()
         updateClient.newCall(request).enqueue(object : okhttp3.Callback {
@@ -457,16 +555,20 @@ fun SettingsApp(onClose: () -> Unit) {
                         saveState = strings.updateCheckFailed("HTTP ${response.code}")
                         return@post
                     }
-                    val release = runCatching { JSONObject(body) }.getOrNull()
-                    val tag = release?.optString("tag_name").orEmpty().ifBlank {
-                        release?.optString("name").orEmpty()
+                    val release = selectReleaseForChannel(body, channel)
+                    if (release == null) {
+                        saveState = strings.noApkFound(if (channel == "beta") strings.betaChannel else strings.stableChannel)
+                        return@post
+                    }
+                    val tag = release.optString("tag_name").orEmpty().ifBlank {
+                        release.optString("name").orEmpty()
                     }
                     val latestVersion = tag.trim().removePrefix("v").ifBlank { EASY_CODEX_APP_VERSION }
                     if (compareVersions(latestVersion, EASY_CODEX_APP_VERSION) <= 0) {
                         saveState = strings.appUpToDate(EASY_CODEX_APP_VERSION)
                         return@post
                     }
-                    val assets = release?.optJSONArray("assets") ?: JSONArray()
+                    val assets = release.optJSONArray("assets") ?: JSONArray()
                     var apkUrl = ""
                     for (index in 0 until assets.length()) {
                         val asset = assets.optJSONObject(index) ?: continue
@@ -480,8 +582,8 @@ fun SettingsApp(onClose: () -> Unit) {
                         saveState = strings.noApkFound(latestVersion)
                         return@post
                     }
+                    pendingApkUpdate = ApkUpdateCandidate(latestVersion, apkUrl)
                     saveState = strings.updateAvailable(latestVersion)
-                    startApkDownload(latestVersion, apkUrl)
                 }
             }
         })
@@ -652,8 +754,8 @@ fun SettingsApp(onClose: () -> Unit) {
                                         Icon(Icons.Default.QrCodeScanner, contentDescription = null)
                                         Text(strings.scanQrCode)
                                     }
-                                    Button(onClick = ::save) {
-                                        Text(strings.saveSettings)
+                                    Button(onClick = ::save, enabled = !connectionTesting) {
+                                        Text(if (connectionTesting) strings.testingConnection else strings.saveSettings)
                                     }
                                     TextButton(onClick = ::clearConnectionConfig) {
                                         Icon(Icons.Default.Security, contentDescription = null)
@@ -865,6 +967,23 @@ fun SettingsApp(onClose: () -> Unit) {
                                 icon = { Icon(Icons.Default.Settings, contentDescription = null) },
                             ) {
                                 InfoRow(title = strings.version, detail = EASY_CODEX_APP_VERSION)
+                                Text(strings.updateChannel, style = MaterialTheme.typography.labelLarge)
+                                Text(
+                                    strings.updateChannelSubtitle,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                ChipOptionRow(
+                                    options = listOf(
+                                        ChipOption("stable", strings.stableChannel),
+                                        ChipOption("beta", strings.betaChannel),
+                                    ),
+                                    selected = updateChannel,
+                                    onSelect = {
+                                        updateChannel = normalizeUpdateChannel(it)
+                                        save()
+                                    },
+                                )
                                 Button(onClick = ::checkForUpdates, enabled = !updateChecking) {
                                     Text(if (updateChecking) strings.checkingForUpdates else strings.checkForUpdates)
                                 }
@@ -874,6 +993,26 @@ fun SettingsApp(onClose: () -> Unit) {
                                         style = MaterialTheme.typography.labelLarge,
                                         color = MaterialTheme.colorScheme.primary,
                                     )
+                                }
+                                pendingApkUpdate?.let { candidate ->
+                                    Text(
+                                        strings.updateInstallPromptBody(candidate.version),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Button(
+                                            onClick = {
+                                                pendingApkUpdate = null
+                                                startApkDownload(candidate.version, candidate.url)
+                                            },
+                                        ) {
+                                            Text(strings.downloadUpdate)
+                                        }
+                                        TextButton(onClick = { pendingApkUpdate = null }) {
+                                            Text(strings.cancel)
+                                        }
+                                    }
                                 }
                                 InfoRow(title = strings.connectionInstructions, detail = strings.connectionInstructionsDetail)
                                 HorizontalDivider()

@@ -10,6 +10,8 @@ In EasyCodex, an agent is a `codex app-server` child process managed by the agen
 Mobile app <-> Agent Relay <-> codex app-server process <-> Codex thread
 ```
 
+EasyCodex also exposes mobile Codex CLI consoles. The phone still does not run Codex itself; it opens one or more console windows, while the relay runs one `codex exec` process per active window in an allowed desktop workspace and streams stdout/stderr back over the authenticated WebSocket.
+
 Each running EasyCodex agent has:
 
 - an internal EasyCodex agent id
@@ -56,6 +58,8 @@ Main files:
 9. The relay broadcasts events back to authenticated app clients.
 10. Codex thread state changes also emit `codex/threads_changed`, so clients can refresh task lists and active resumable thread details immediately.
 
+The relay keeps a single running agent attached to each Codex thread id. If a client asks to resume a thread that is already running, the relay returns the existing agent instead of spawning a second `codex app-server` process for the same thread.
+
 ## Core WebSocket Actions
 
 Agent actions:
@@ -71,6 +75,9 @@ Agent actions:
 | `stop_agent` | Stop an agent process. |
 | `update_agent_model` | Change an agent model. |
 | `update_agent_config` | Change model, cwd, approval policy, system prompt, service tier, or reasoning effort. |
+| `cli_start` | Prepare a mobile CLI window for an allowed workspace and return Codex CLI metadata. |
+| `cli_run` | Start one `codex exec` run for a CLI `windowId` and stream `cli/*` events. |
+| `cli_stop` | Stop the active CLI run for a CLI `windowId` if one is running. |
 
 Codex metadata actions:
 
@@ -78,9 +85,9 @@ Codex metadata actions:
 | --- | --- |
 | `list_codex_models` | Read model catalog from the Codex runtime. |
 | `runtime_capabilities` | Report official vs compatible runtime behavior. |
-| `check_update` | Check the latest EasyCodex GitHub release and report whether the relay is outdated. |
+| `check_update` | Check the configured EasyCodex update channel and report whether the relay is outdated. |
 | `apply_update` | Apply a fast git-based relay update when the relay is running from an EasyCodex repository checkout. |
-| `list_codex_threads` | List available Codex threads globally by default; pass `cwd` or `includeGlobal=false` to scope results to one workspace, and `all=true` to follow cursors across pages. |
+| `list_codex_threads` | List available Codex threads globally by default; pass `cwd` or `includeGlobal=false` to scope results to one workspace, `all=true` to follow cursors across pages, and `activeOnly=true` to return only threads that are still running or queued. |
 | `read_codex_thread` | Read a Codex thread and convert it to app messages. |
 
 Live sync events:

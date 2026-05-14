@@ -15,12 +15,13 @@ permissions:
 
 concurrency:
   group: release-desktop-relay-${{ github.event.inputs.release_tag || github.ref_name }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -88,10 +89,17 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install desktop dependencies
-        run: npm ci
+        timeout-minutes: 8
+        run: |
+          npm config set fetch-retries 5
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set progress true
+          npm ci --prefer-offline --no-audit
         working-directory: desktop-relay
 
       - name: Build desktop relay
+        timeout-minutes: 20
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npm run ${{ matrix.script }}
@@ -110,6 +118,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           tag="${{ steps.release.outputs.tag }}"
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file CHANGELOG.md
+          notes_file="$RUNNER_TEMP/easycodex-release-notes.md"
+          node scripts/extract-release-notes.mjs "${{ steps.release.outputs.version }}" > "$notes_file"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --notes-file "$notes_file"
+          else
+            if [[ "$tag" == *"-"* ]]; then
+              gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file" --prerelease
+            else
+              gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file"
+            fi
+          fi
           find desktop-relay/release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.blockmap' \) -print0 | sort -z | xargs -0 gh release upload "$tag" --clobber

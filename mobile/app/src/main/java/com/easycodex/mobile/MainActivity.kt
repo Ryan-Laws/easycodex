@@ -11,10 +11,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioAttributes
-import android.media.AudioManager
-import android.media.RingtoneManager
-import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -32,8 +28,13 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -43,9 +44,11 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -72,7 +75,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
@@ -82,6 +87,7 @@ import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
@@ -89,6 +95,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TaskAlt
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -96,8 +103,9 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
@@ -113,7 +121,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -132,10 +139,15 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
@@ -154,6 +166,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlin.math.cos
+import kotlin.math.sin
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -173,8 +190,10 @@ private const val EMOJI_COLUMNS = 8
 private const val EMOJI_ROWS = 5
 private const val EMOJI_PAGE_SIZE = EMOJI_COLUMNS * EMOJI_ROWS
 const val AGENTS_REFRESH_DEBOUNCE_MS = 500L
+const val BACKGROUND_AGENTS_REFRESH_DEBOUNCE_MS = 5_000L
 const val AGENT_ACTIVITY_UPDATE_THROTTLE_MS = 500L
-const val STREAM_DELTA_FLUSH_MS = 250L
+const val STREAM_DELTA_FLUSH_MS = 500L
+const val BACKGROUND_STREAM_DELTA_FLUSH_MS = 1_500L
 const val CODEX_THREAD_DETAIL_PREFETCH_LIMIT = 10
 const val CODEX_THREAD_DETAIL_MAX_RETRIES = 3
 const val CODEX_THREAD_DETAIL_RETRY_BASE_MS = 1_200L
@@ -309,7 +328,8 @@ private fun TopBarStatusPill(status: String, text: String) {
 @Composable
 fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = null) {
     val context = LocalContext.current
-    val controller = remember { EasyCodexController(context.applicationContext) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val controller = remember { EasyCodexControllerProvider.get(context.applicationContext) }
     val strings = appStringsFor(controller.appLanguage)
     val prefs = remember { context.getSharedPreferences(EASY_CODEX_PREFS, Context.MODE_PRIVATE) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -321,6 +341,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
     var createAgentInitialCwd by remember { mutableStateOf<String?>(null) }
     var showTroubleshooting by remember { mutableStateOf(false) }
     var showUsageGuide by remember { mutableStateOf(!prefs.getBoolean(PREF_USAGE_GUIDE_SEEN, false)) }
+    var showCliMode by remember { mutableStateOf(false) }
     var planModeEnabled by remember { mutableStateOf(false) }
     var consumedInitialAgentId by remember(initialAgentId) { mutableStateOf(false) }
     val settingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -351,17 +372,32 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
         }
     }
 
+    DisposableEffect(lifecycleOwner, controller) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> controller.setAppInForeground(true)
+                Lifecycle.Event.ON_STOP -> controller.setAppInForeground(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        controller.setAppInForeground(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     LaunchedEffect(Unit) {
         withFrameNanos { }
-        delay(520)
+        delay(900)
         appContentReady = true
-        delay(280)
+        delay(520)
         startupMaskVisible = false
     }
 
     LaunchedEffect(appContentReady) {
         if (!appContentReady) return@LaunchedEffect
-        controller.connect()
+        EasyCodexConnectionService.start(context)
     }
 
     LaunchedEffect(appContentReady) {
@@ -372,10 +408,6 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose { controller.disconnect() }
     }
 
     LaunchedEffect(importedConnection, appContentReady) {
@@ -400,6 +432,12 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
         }
     }
 
+    LaunchedEffect(showCliMode, controller.connectionStatus) {
+        if (showCliMode && controller.connectionStatus == "connected") {
+            controller.startCliConsole()
+        }
+    }
+
     EasyCodexTheme(
         context = context,
         themeMode = controller.themeMode,
@@ -415,6 +453,8 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                     drawerContent = {
                         AgentDrawer(
                             agents = controller.agents,
+                            alerts = controller.alerts,
+                            projectOptions = controller.projectOptions(),
                             activeAgentId = controller.activeAgentId,
                             onHome = {
                                 controller.openHome()
@@ -428,6 +468,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                 controller.startProjectDraft(cwd)
                                 scope.launch { drawerState.close() }
                             },
+                            onDeleteAgent = { controller.deleteAgent(it) },
                         )
                     },
                 ) {
@@ -437,28 +478,47 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                             CenterAlignedTopAppBar(
                                 title = {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                        Text(
-                                            controller.draftAgent?.let { strings.homeQuestion }
-                                                ?: controller.activeAgent?.name
-                                                ?: "EasyCodex",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.SemiBold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        val activeAgent = controller.activeAgent
+                                        val titleText = when {
+                                            showCliMode -> "Codex CLI"
+                                            controller.draftAgent != null -> strings.homeQuestion
+                                            controller.activeAgent != null -> ""
+                                            else -> "EasyCodex"
+                                        }
+                                        if (titleText.isNotBlank()) {
+                                            Text(
+                                                titleText,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
                                         TopBarStatusPill(
                                             status = controller.connectionStatus,
-                                            text = activeAgent?.let(::agentStatusLabel) ?: controller.statusText,
+                                            text = controller.statusText,
                                         )
                                     }
                                 },
                                 navigationIcon = {
-                                    IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                        Icon(Icons.Default.Menu, contentDescription = strings.agentsContentDescription)
+                                    if (showCliMode) {
+                                        IconButton(onClick = { showCliMode = false }) {
+                                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.back)
+                                        }
+                                    } else {
+                                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                            Icon(Icons.Default.Menu, contentDescription = strings.agentsContentDescription)
+                                        }
                                     }
                                 },
                                 actions = {
+                                    if (!showCliMode) {
+                                        IconButton(onClick = { showCliMode = true }) {
+                                            Icon(Icons.Default.Terminal, contentDescription = "Codex CLI")
+                                        }
+                                    }
+                                    IconButton(onClick = { showTroubleshooting = true }) {
+                                        Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = strings.connectionTroubleshooting)
+                                    }
                                     IconButton(onClick = { openSettings() }) {
                                         Icon(Icons.Default.Settings, contentDescription = strings.settingsContentDescription)
                                     }
@@ -469,40 +529,51 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                             )
                         },
                         bottomBar = {
-                            val draftAgent = controller.draftAgent
-                            val activeAgent = controller.activeAgent
-                            val composerAgent = draftAgent ?: activeAgent
-                            val projectOptions = controller.projectOptions()
-                            MessageComposer(
-                                text = controller.inputText,
-                                attachments = controller.attachmentDrafts,
-                                enabled = controller.connectionStatus == "connected" && composerAgent != null,
-                                agent = composerAgent,
-                                projectOptions = projectOptions,
-                                canChangeProject = draftAgent != null && !controller.draftProjectLocked,
-                                modelOptions = controller.availableModelOptions(composerAgent),
-                                reasoningOptions = controller.reasoningOptionsFor(composerAgent),
-                                serviceTierOptions = controller.serviceTierOptionsFor(composerAgent),
-                                runtimeCapabilities = controller.runtimeCapabilities,
-                                planModeEnabled = planModeEnabled,
-                                onTextChange = { controller.inputText = it },
-                                onPlanModeChange = { planModeEnabled = it },
-                                onRemoveAttachment = { controller.removeAttachmentDraft(it) },
-                                onProjectChange = { controller.updateDraftProject(it) },
-                                onModelChange = { controller.updateActiveModel(it) },
-                                onReasoningEffortChange = { controller.updateActiveReasoningEffort(it) },
-                                onServiceTierChange = { controller.updateActiveServiceTier(it) },
-                                onBrowseDirectories = { path, callback -> controller.browseDirectories(path, callback) },
-                                onAttachFiles = { filePicker.launch("*/*") },
-                                onAttachImages = { imagePicker.launch("image/*") },
-                                onInsertEmoji = { controller.appendToInput(it) },
-                                onVoiceInput = {
-                                    val intent = buildSystemVoiceInputIntent(context)
-                                    runCatching { voiceInput.launch(intent) }
-                                        .onFailure { controller.statusText = strings.startVoiceInput }
-                                },
-                                onSend = { controller.sendActiveMessage(planModeEnabled) },
-                            )
+                            if (!showCliMode) {
+                                val draftAgent = controller.draftAgent
+                                val activeAgent = controller.activeAgent
+                                val composerAgent = draftAgent ?: activeAgent
+                                val projectOptions = controller.projectOptions()
+                                MessageComposer(
+                                    text = controller.inputText,
+                                    attachments = controller.attachmentDrafts,
+                                    queuedFollowUps = composerAgent?.queuedFollowUps.orEmpty(),
+                                    enabled = controller.connectionStatus == "connected" && composerAgent != null,
+                                    agent = composerAgent,
+                                    projectOptions = projectOptions,
+                                    canChangeProject = draftAgent != null && !controller.draftProjectLocked,
+                                    modelOptions = controller.availableModelOptions(composerAgent),
+                                    reasoningOptions = controller.reasoningOptionsFor(composerAgent),
+                                    serviceTierOptions = controller.serviceTierOptionsFor(composerAgent),
+                                    runtimeCapabilities = controller.runtimeCapabilities,
+                                    planModeEnabled = planModeEnabled,
+                                    onTextChange = { controller.inputText = it },
+                                    onPlanModeChange = { planModeEnabled = it },
+                                    onGuideQueuedFollowUp = { queued ->
+                                        controller.inputText = if (controller.inputText.isBlank()) {
+                                            queued.text
+                                        } else {
+                                            "${controller.inputText.trimEnd()}\n${queued.text}"
+                                        }
+                                    },
+                                    onRemoveAttachment = { controller.removeAttachmentDraft(it) },
+                                    onProjectChange = { controller.updateDraftProject(it) },
+                                    onModelChange = { controller.updateActiveModel(it) },
+                                    onReasoningEffortChange = { controller.updateActiveReasoningEffort(it) },
+                                    onServiceTierChange = { controller.updateActiveServiceTier(it) },
+                                    onBrowseDirectories = { path, callback -> controller.browseDirectories(path, callback) },
+                                    onAttachFiles = { filePicker.launch("*/*") },
+                                    onAttachImages = { imagePicker.launch("image/*") },
+                                    onInsertEmoji = { controller.appendToInput(it) },
+                                    onVoiceInput = {
+                                        val intent = buildSystemVoiceInputIntent(context)
+                                        runCatching { voiceInput.launch(intent) }
+                                            .onFailure { controller.statusText = strings.startVoiceInput }
+                                    },
+                                    onInterrupt = { controller.interruptActiveAgent() },
+                                    onSend = { controller.sendActiveMessage(planModeEnabled) },
+                                )
+                            }
                         },
                     ) { padding ->
                         Column(
@@ -510,31 +581,37 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                 .fillMaxSize()
                                 .padding(padding),
                         ) {
-                            ConnectionBanner(
-                                status = controller.connectionStatus,
-                                detail = controller.statusText,
-                                onHelp = { showTroubleshooting = true },
-                                onConfigure = if (controller.relayUrl.isBlank() || controller.apiKey.isBlank()) {
-                                    { openSettings() }
-                                } else {
-                                    null
-                                },
-                            )
                             val draftAgent = controller.draftAgent
-                            if (draftAgent != null) {
+                            if (showCliMode) {
+                                CliConsoleScreen(
+                                    state = controller.cliConsole,
+                                    connected = controller.connectionStatus == "connected",
+                                    onCwdChange = { controller.updateCliCwd(it) },
+                                    onInputChange = { controller.updateCliInput(it) },
+                                    onSend = { controller.sendCliCommand() },
+                                    onStop = { controller.stopCliCommand() },
+                                    onCreateWindow = { controller.createCliWindow() },
+                                    onSelectWindow = { controller.selectCliWindow(it) },
+                                )
+                            } else if (draftAgent != null) {
                                 val projectOptions = controller.projectOptions()
+                                val recentAlertKinds = controller.alerts
+                                    .distinctBy { it.agentId }
+                                    .associate { it.agentId to it.kind }
                                 HomeTaskScreen(
                                     draftAgent = draftAgent,
                                     projectOptions = projectOptions,
                                     reasoningOptions = controller.reasoningOptionsFor(draftAgent),
                                     serviceTierOptions = controller.serviceTierOptionsFor(draftAgent),
                                     recentAgents = controller.agents,
+                                    recentAlertKinds = recentAlertKinds,
                                     runtimeCapabilities = controller.runtimeCapabilities,
                                     canChangeProject = !controller.draftProjectLocked,
                                     onProjectChange = { controller.updateDraftProject(it) },
                                     onReasoningEffortChange = { controller.updateActiveReasoningEffort(it) },
                                     onServiceTierChange = { controller.updateActiveServiceTier(it) },
                                     onOpenAgent = { controller.selectAgent(it) },
+                                    onDeleteAgent = { controller.deleteAgent(it) },
                                     onBrowseDirectories = { path, callback -> controller.browseDirectories(path, callback) },
                                 )
                             } else {
@@ -542,12 +619,9 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                     agent = controller.activeAgent,
                                     layoutMode = controller.appLayout,
                                     emptyMessage = strings.emptyConversation,
-                                    notificationLevelState = controller.notificationLevelState,
-                                    onInterrupt = { controller.interruptActiveAgent() },
+                                    relayUrl = controller.relayUrl,
+                                    apiKey = controller.apiKey,
                                     onOpenDiffReview = { controller.openDiffReview() },
-                                    onNotificationLevelChange = { agentId, level ->
-                                        controller.updateNotificationLevel(agentId, level)
-                                    },
                                     onOpenPlan = { message ->
                                         controller.activeAgent?.let { controller.showPlanReview(it.id, message) }
                                     },
@@ -559,8 +633,8 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
             }
             AnimatedVisibility(
                 visible = startupMaskVisible,
-                enter = fadeIn(animationSpec = tween(durationMillis = 120)),
-                exit = fadeOut(animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing)),
+                enter = fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
+                exit = fadeOut(animationSpec = tween(durationMillis = 460, easing = FastOutSlowInEasing)),
             ) {
                 StartupMask()
             }
@@ -613,6 +687,14 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
         )
     }
 
+    controller.userInputRequests.firstOrNull()?.let { request ->
+        UserInputRequestDialog(
+            request = request,
+            onSubmit = { answers -> controller.respondUserInputRequest(request, answers) },
+            onDismiss = { controller.deferUserInputRequest(request) },
+        )
+    }
+
     val activePlanReview = controller.planReview
     if (activePlanReview != null) {
         PlanReviewDialog(
@@ -648,29 +730,176 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
 @Composable
 private fun StartupMask() {
     val strings = LocalAppStrings.current
+    val colors = MaterialTheme.colorScheme
+    val infiniteTransition = rememberInfiniteTransition(label = "startup mask")
+    val pulse by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "startup pulse",
+    )
+    val orbit by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 3200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "startup orbit",
+    )
+    val shimmer by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1500, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "startup shimmer",
+    )
     Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background,
-        contentColor = MaterialTheme.colorScheme.onBackground,
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        colors.background,
+                        colors.surfaceContainerLowest,
+                        colors.surfaceContainerLow,
+                    ),
+                ),
+            )
+            .drawBehind {
+                drawCircle(
+                    color = colors.primary.copy(alpha = 0.12f + pulse * 0.04f),
+                    radius = size.minDimension * (0.36f + pulse * 0.05f),
+                    center = Offset(size.width * 0.5f, size.height * 0.43f),
+                )
+                drawCircle(
+                    color = colors.tertiary.copy(alpha = 0.08f),
+                    radius = size.minDimension * 0.25f,
+                    center = Offset(size.width * 0.78f, size.height * 0.22f),
+                )
+            },
+        color = Color.Transparent,
+        contentColor = colors.onBackground,
     ) {
         Box(contentAlignment = Alignment.Center) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(18.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                EasyCodexAppIcon(
-                    modifier = Modifier.size(72.dp),
-                    contentDescription = "EasyCodex",
-                )
-                CircularProgressIndicator(
-                    modifier = Modifier.size(28.dp),
-                    strokeWidth = 3.dp,
+                Box(
+                    modifier = Modifier.size(156.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val strokeWide = 5.dp.toPx()
+                        val strokeThin = 2.5.dp.toPx()
+                        val ringInset = 13.dp.toPx()
+                        drawCircle(
+                            color = colors.primary.copy(alpha = 0.10f),
+                            radius = size.minDimension / 2f - ringInset,
+                            style = Stroke(width = strokeWide),
+                        )
+                        drawArc(
+                            color = colors.primary.copy(alpha = 0.76f),
+                            startAngle = orbit,
+                            sweepAngle = 92f,
+                            useCenter = false,
+                            style = Stroke(width = strokeWide, cap = StrokeCap.Round),
+                            topLeft = Offset(ringInset, ringInset),
+                            size = androidx.compose.ui.geometry.Size(
+                                size.width - ringInset * 2,
+                                size.height - ringInset * 2,
+                            ),
+                        )
+                        drawArc(
+                            color = colors.tertiary.copy(alpha = 0.48f),
+                            startAngle = -orbit * 0.72f,
+                            sweepAngle = 54f,
+                            useCenter = false,
+                            style = Stroke(width = strokeThin, cap = StrokeCap.Round),
+                            topLeft = Offset(ringInset * 1.75f, ringInset * 1.75f),
+                            size = androidx.compose.ui.geometry.Size(
+                                size.width - ringInset * 3.5f,
+                                size.height - ringInset * 3.5f,
+                            ),
+                        )
+                        val angle = Math.toRadians(orbit.toDouble())
+                        val dotRadius = size.minDimension / 2f - ringInset
+                        drawCircle(
+                            color = colors.primary,
+                            radius = 4.5.dp.toPx(),
+                            center = Offset(
+                                x = center.x + cos(angle).toFloat() * dotRadius,
+                                y = center.y + sin(angle).toFloat() * dotRadius,
+                            ),
+                        )
+                    }
+                    Surface(
+                        modifier = Modifier
+                            .size(92.dp)
+                            .graphicsLayer {
+                                scaleX = 0.98f + pulse * 0.03f
+                                scaleY = 0.98f + pulse * 0.03f
+                                shadowElevation = 18f + pulse * 8f
+                            },
+                        shape = RoundedCornerShape(28.dp),
+                        color = colors.surface.copy(alpha = 0.90f),
+                        tonalElevation = 6.dp,
+                    ) {
+                        Box(
+                            modifier = Modifier.padding(9.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            EasyCodexAppIcon(
+                                modifier = Modifier.size(74.dp),
+                                contentDescription = "EasyCodex",
+                            )
+                        }
+                    }
+                }
+                Text(
+                    "EasyCodex",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.onBackground,
                 )
                 Text(
                     strings.preparingEasyCodex,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = colors.onSurfaceVariant,
                 )
+                Canvas(
+                    modifier = Modifier
+                        .padding(top = 4.dp)
+                        .width(156.dp)
+                        .height(4.dp),
+                ) {
+                    val radius = 2.dp.toPx()
+                    drawRoundRect(
+                        color = colors.outlineVariant.copy(alpha = 0.45f),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(radius, radius),
+                    )
+                    val barWidth = size.width * 0.44f
+                    val start = (size.width - barWidth) * shimmer
+                    drawRoundRect(
+                        brush = Brush.horizontalGradient(
+                            listOf(
+                                colors.primary.copy(alpha = 0.35f),
+                                colors.primary,
+                                colors.tertiary.copy(alpha = 0.70f),
+                            ),
+                        ),
+                        topLeft = Offset(start, 0f),
+                        size = androidx.compose.ui.geometry.Size(barWidth, size.height),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(radius, radius),
+                    )
+                }
+                Spacer(modifier = Modifier.height(20.dp))
             }
         }
     }
@@ -690,12 +919,19 @@ fun EasyCodexAppIcon(
 }
 
 fun projectNameFromCwd(cwd: String): String {
+    if (isConversationProjectPath(cwd)) return "对话"
     val cleaned = cleanNullablePath(cwd) ?: return "未命名项目"
     return cleaned
         .trimEnd('\\', '/')
         .split('\\', '/')
         .lastOrNull { it.isNotBlank() }
         ?: "未命名项目"
+}
+
+const val CONVERSATION_PROJECT_PATH = "__easycodex_conversations__"
+
+fun isConversationProjectPath(path: String): Boolean {
+    return normalizePathKey(path) == normalizePathKey(CONVERSATION_PROJECT_PATH)
 }
 
 fun normalizePathKey(path: String): String {
@@ -944,6 +1180,7 @@ private fun UsageGuideStep(
 fun MessageComposer(
     text: String,
     attachments: List<AttachmentDraft>,
+    queuedFollowUps: List<QueuedFollowUp>,
     enabled: Boolean,
     agent: Agent?,
     projectOptions: List<String>,
@@ -955,6 +1192,7 @@ fun MessageComposer(
     planModeEnabled: Boolean,
     onTextChange: (String) -> Unit,
     onPlanModeChange: (Boolean) -> Unit,
+    onGuideQueuedFollowUp: (QueuedFollowUp) -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onProjectChange: (String) -> Unit,
     onModelChange: (String) -> Unit,
@@ -965,19 +1203,17 @@ fun MessageComposer(
     onAttachImages: () -> Unit,
     onInsertEmoji: (String) -> Unit,
     onVoiceInput: () -> Unit,
+    onInterrupt: () -> Unit,
     onSend: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
-    var activePanel by remember { mutableStateOf(ComposerPanel.None) }
+    var actionsExpanded by remember { mutableStateOf(false) }
     var quickRepliesExpanded by remember { mutableStateOf(false) }
+    var runtimePicker by remember { mutableStateOf<RuntimePicker?>(null) }
+    var showProjectPicker by remember { mutableStateOf(false) }
     var sendAnimationKey by remember { mutableStateOf(0) }
     val sendButtonScale = remember { Animatable(1f) }
     val sendIconTravel = remember { Animatable(0f) }
-    val quickReplyArrowRotation by animateFloatAsState(
-        targetValue = if (quickRepliesExpanded) 180f else 0f,
-        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-        label = "quick reply arrow rotation",
-    )
     val quickReplyPrompts = remember {
         listOf(
             "先调查，再给修复计划",
@@ -986,6 +1222,20 @@ fun MessageComposer(
             "继续上次任务",
         )
     }
+    val showInterruptButton = agent?.isBusy() == true && text.isBlank() && attachments.isEmpty()
+    val selectedModel = agent?.model.orEmpty()
+    val displayModel = selectedModel.ifBlank { modelOptions.firstOrNull()?.model.orEmpty() }
+    val selectedModelLabel = modelOptions.firstOrNull { it.model == displayModel }?.displayName
+        ?: displayModel.ifBlank { strings.detectingModel }
+    val displayReasoningEffort = agent?.reasoningEffort?.takeIf { it.isNotBlank() }
+        ?: modelOptions.firstOrNull { it.model == displayModel }?.defaultReasoningEffort?.takeIf { it.isNotBlank() }
+        ?: reasoningOptions.firstOrNull()?.takeIf { it.isNotBlank() }
+        ?: DEFAULT_REASONING_EFFORT
+    val displayServiceTier = agent?.serviceTier?.takeIf { it.isNotBlank() }
+        ?: serviceTierOptions.firstOrNull()?.takeIf { it.isNotBlank() }
+        ?: DEFAULT_SERVICE_TIER
+    val selectedProject = agent?.cwd.orEmpty()
+    val selectedProjectLabel = cleanNullablePath(selectedProject)?.let { projectNameFromCwd(it) } ?: strings.selectProject
 
     LaunchedEffect(sendAnimationKey) {
         if (sendAnimationKey == 0) return@LaunchedEffect
@@ -1027,6 +1277,11 @@ fun MessageComposer(
             .imePadding(),
     ) {
         Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            QueuedFollowUpsPanel(
+                items = queuedFollowUps,
+                enabled = enabled,
+                onGuide = onGuideQueuedFollowUp,
+            )
             AnimatedVisibility(
                 visible = attachments.isNotEmpty(),
                 enter = expandVertically(
@@ -1060,6 +1315,57 @@ fun MessageComposer(
                 }
             }
             Spacer(Modifier.height(6.dp))
+            AnimatedVisibility(
+                visible = actionsExpanded,
+                enter = fadeIn(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)) +
+                    slideInVertically(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)) { it / 3 },
+                exit = fadeOut(animationSpec = tween(durationMillis = 110, easing = FastOutSlowInEasing)) +
+                    slideOutVertically(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)) { it / 4 },
+            ) {
+                ComposerFloatingActions(
+                    enabled = enabled,
+                    planModeEnabled = planModeEnabled,
+                    modelLabel = compactModelLabel(selectedModelLabel),
+                    reasoningLabel = if (runtimeCapabilities.supportsReasoningEffort) {
+                        reasoningLabel(displayReasoningEffort, strings)
+                    } else {
+                        ""
+                    },
+                    serviceTierLabel = serviceTierLabel(displayServiceTier, strings),
+                    showServiceTier = runtimeCapabilities.supportsServiceTier && serviceTierOptions.isNotEmpty(),
+                    showProject = canChangeProject && selectedProject.isNotBlank(),
+                    projectLabel = selectedProjectLabel,
+                    quickRepliesExpanded = quickRepliesExpanded,
+                    quickReplyPrompts = quickReplyPrompts,
+                    onModelClick = { runtimePicker = RuntimePicker.Model },
+                    onReasoningClick = {
+                        if (runtimeCapabilities.supportsReasoningEffort && reasoningOptions.isNotEmpty()) {
+                            runtimePicker = RuntimePicker.Reasoning
+                        } else {
+                            runtimePicker = RuntimePicker.Model
+                        }
+                    },
+                    onServiceTierClick = { runtimePicker = RuntimePicker.ServiceTier },
+                    onProjectClick = { showProjectPicker = true },
+                    onPlanModeChange = onPlanModeChange,
+                    onQuickRepliesToggle = { quickRepliesExpanded = !quickRepliesExpanded },
+                    onQuickReply = { prompt ->
+                        onTextChange(if (text.isBlank()) prompt else "${text.trimEnd()}\n$prompt")
+                        quickRepliesExpanded = false
+                        actionsExpanded = false
+                    },
+                    onAttachFiles = {
+                        actionsExpanded = false
+                        quickRepliesExpanded = false
+                        onAttachFiles()
+                    },
+                    onAttachImages = {
+                        actionsExpanded = false
+                        quickRepliesExpanded = false
+                        onAttachImages()
+                    },
+                )
+            }
             Surface(
                 color = MaterialTheme.colorScheme.surface,
                 shape = EasyCodexDesign.ComposerPanelShape,
@@ -1076,8 +1382,11 @@ fun MessageComposer(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         AnimatedComposerIconButton(
-                            selected = activePanel == ComposerPanel.Tools,
-                            onClick = { activePanel = activePanel.toggle(ComposerPanel.Tools) },
+                            selected = actionsExpanded,
+                            onClick = {
+                                actionsExpanded = !actionsExpanded
+                                if (!actionsExpanded) quickRepliesExpanded = false
+                            },
                             enabled = enabled,
                             rotationWhenSelected = 45f,
                         ) { iconModifier ->
@@ -1112,149 +1421,465 @@ fun MessageComposer(
                         )
                         FilledTonalButton(
                             onClick = {
-                                activePanel = ComposerPanel.None
-                                sendAnimationKey += 1
-                                onSend()
+                                actionsExpanded = false
+                                quickRepliesExpanded = false
+                                if (showInterruptButton) {
+                                    onInterrupt()
+                                } else {
+                                    sendAnimationKey += 1
+                                    onSend()
+                                }
                             },
-                            enabled = enabled && (text.isNotBlank() || attachments.isNotEmpty()),
+                            enabled = enabled && (showInterruptButton || text.isNotBlank() || attachments.isNotEmpty()),
                             shape = CircleShape,
                             modifier = Modifier
                                 .size(52.dp)
                                 .scale(sendButtonScale.value),
                             contentPadding = PaddingValues(0.dp),
                         ) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.Send,
-                                contentDescription = strings.send,
-                                modifier = Modifier.graphicsLayer(
-                                    translationX = sendIconTravel.value,
-                                    translationY = -sendIconTravel.value * 0.35f,
-                                    rotationZ = sendIconTravel.value * 1.4f,
-                                    alpha = (1f - sendIconTravel.value / 60f).coerceIn(0.72f, 1f),
-                                ),
-                            )
+                            if (showInterruptButton) {
+                                Icon(Icons.Default.Stop, contentDescription = strings.interrupt)
+                            } else {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = strings.send,
+                                    modifier = Modifier.graphicsLayer(
+                                        translationX = sendIconTravel.value,
+                                        translationY = -sendIconTravel.value * 0.35f,
+                                        rotationZ = sendIconTravel.value * 1.4f,
+                                        alpha = (1f - sendIconTravel.value / 60f).coerceIn(0.72f, 1f),
+                                    ),
+                                )
+                            }
                         }
                     }
-                    AgentRuntimeBar(
-                        agent = agent,
-                        enabled = enabled,
-                        projectOptions = projectOptions,
-                        canChangeProject = false,
-                        modelOptions = modelOptions,
-                        reasoningOptions = reasoningOptions,
-                        serviceTierOptions = serviceTierOptions,
-                        runtimeCapabilities = runtimeCapabilities,
-                        showProject = false,
-                        showRuntime = true,
-                        onProjectChange = onProjectChange,
-                        onModelChange = onModelChange,
-                        onReasoningEffortChange = onReasoningEffortChange,
-                        onServiceTierChange = onServiceTierChange,
-                        onBrowseDirectories = onBrowseDirectories,
-                    )
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        FilterChip(
-                            selected = !planModeEnabled,
-                            onClick = { onPlanModeChange(false) },
-                            enabled = enabled,
-                            label = { Text(strings.runDirectly) },
-                        )
-                        FilterChip(
-                            selected = planModeEnabled,
-                            onClick = { onPlanModeChange(true) },
-                            enabled = enabled,
-                            label = { Text(strings.planFirst) },
-                        )
-                        AssistChip(
-                            onClick = { quickRepliesExpanded = !quickRepliesExpanded },
-                            enabled = enabled,
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Default.KeyboardArrowDown,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(18.dp)
-                                        .graphicsLayer(rotationZ = quickReplyArrowRotation),
-                                )
-                            },
-                            label = { Text("快速回答") },
-                        )
-                    }
                 }
-            }
-            AnimatedVisibility(
-                visible = quickRepliesExpanded,
-                enter = expandVertically(
-                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                    expandFrom = Alignment.Top,
-                ) + fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
-                exit = shrinkVertically(
-                    animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-                    shrinkTowards = Alignment.Top,
-                ) + fadeOut(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
-            ) {
-                FlowRow(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    quickReplyPrompts.forEach { prompt ->
-                        AssistChip(
-                            onClick = {
-                                onTextChange(if (text.isBlank()) prompt else "${text.trimEnd()}\n$prompt")
-                                quickRepliesExpanded = false
-                            },
-                            enabled = enabled,
-                            label = { Text(prompt) },
-                        )
-                    }
-                }
-            }
-            AnimatedVisibility(
-                visible = activePanel != ComposerPanel.None,
-                enter = expandVertically(
-                    animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-                    expandFrom = Alignment.Top,
-                ) + fadeIn(animationSpec = tween(durationMillis = 140)) + slideInVertically { it / 5 },
-                exit = shrinkVertically(
-                    animationSpec = tween(durationMillis = 150, easing = FastOutSlowInEasing),
-                    shrinkTowards = Alignment.Top,
-                ) + fadeOut(animationSpec = tween(durationMillis = 100)) + slideOutVertically { it / 6 },
-            ) {
-                ComposerContextPanel(
-                    enabled = enabled,
-                    agent = agent,
-                    projectOptions = projectOptions,
-                    canChangeProject = canChangeProject,
-                    modelOptions = modelOptions,
-                    reasoningOptions = reasoningOptions,
-                    serviceTierOptions = serviceTierOptions,
-                    runtimeCapabilities = runtimeCapabilities,
-                    planModeEnabled = planModeEnabled,
-                    onPlanModeChange = onPlanModeChange,
-                    onProjectChange = onProjectChange,
-                    onModelChange = onModelChange,
-                    onReasoningEffortChange = onReasoningEffortChange,
-                    onServiceTierChange = onServiceTierChange,
-                    onBrowseDirectories = onBrowseDirectories,
-                    onAttachFiles = {
-                        activePanel = ComposerPanel.None
-                        onAttachFiles()
-                    },
-                    onAttachImages = {
-                        activePanel = ComposerPanel.None
-                        onAttachImages()
-                    },
-                )
             }
         }
     }
+
+    if (showProjectPicker) {
+        DirectoryPickerDialog(
+            initialPath = selectedProject,
+            pinnedPaths = projectOptions,
+            onBrowseDirectories = onBrowseDirectories,
+            onSelect = {
+                onProjectChange(it)
+                showProjectPicker = false
+                actionsExpanded = false
+            },
+            onDismiss = { showProjectPicker = false },
+        )
+    }
+
+    when (runtimePicker) {
+        RuntimePicker.Model -> RuntimeChoiceDialog(
+            title = strings.chooseModel,
+            options = modelOptions.map { RuntimeChoice(it.model, it.displayName, it.model) },
+            selected = displayModel,
+            onSelect = {
+                onModelChange(it)
+                runtimePicker = null
+                actionsExpanded = false
+            },
+            onDismiss = { runtimePicker = null },
+        )
+
+        RuntimePicker.Reasoning -> RuntimeChoiceDialog(
+            title = strings.chooseReasoning,
+            options = reasoningOptions.map { RuntimeChoice(it, reasoningLabel(it, strings), reasoningDescription(it, strings)) },
+            selected = displayReasoningEffort,
+            onSelect = {
+                onReasoningEffortChange(it)
+                runtimePicker = null
+                actionsExpanded = false
+            },
+            onDismiss = { runtimePicker = null },
+        )
+
+        RuntimePicker.ServiceTier -> RuntimeChoiceDialog(
+            title = strings.chooseSpeed,
+            options = serviceTierOptions.map { RuntimeChoice(it, serviceTierLabel(it, strings), serviceTierDescription(it, strings)) },
+            selected = displayServiceTier,
+            onSelect = {
+                onServiceTierChange(it)
+                runtimePicker = null
+                actionsExpanded = false
+            },
+            onDismiss = { runtimePicker = null },
+        )
+
+        RuntimePicker.Project, null -> Unit
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ComposerFloatingActions(
+    enabled: Boolean,
+    planModeEnabled: Boolean,
+    modelLabel: String,
+    reasoningLabel: String,
+    serviceTierLabel: String,
+    showServiceTier: Boolean,
+    showProject: Boolean,
+    projectLabel: String,
+    quickRepliesExpanded: Boolean,
+    quickReplyPrompts: List<String>,
+    onModelClick: () -> Unit,
+    onReasoningClick: () -> Unit,
+    onServiceTierClick: () -> Unit,
+    onProjectClick: () -> Unit,
+    onPlanModeChange: (Boolean) -> Unit,
+    onQuickRepliesToggle: () -> Unit,
+    onQuickReply: (String) -> Unit,
+    onAttachFiles: () -> Unit,
+    onAttachImages: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 2.dp, end = 14.dp, bottom = 8.dp),
+        horizontalAlignment = Alignment.Start,
+        verticalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            ComposerActionBubble(
+                icon = Icons.Default.Settings,
+                label = strings.chooseModel,
+                detail = listOf(modelLabel, reasoningLabel).filter { it.isNotBlank() }.joinToString(" "),
+                enabled = enabled,
+                onClick = onModelClick,
+            )
+            ComposerActionBubble(
+                icon = Icons.Default.TaskAlt,
+                label = if (planModeEnabled) strings.planFirst else strings.runDirectly,
+                detail = if (planModeEnabled) strings.runDirectly else strings.planFirst,
+                selected = planModeEnabled,
+                enabled = enabled,
+                onClick = { onPlanModeChange(!planModeEnabled) },
+            )
+            ComposerActionBubble(
+                icon = Icons.Default.Search,
+                label = "快速回答",
+                detail = if (quickRepliesExpanded) "收起" else "常用提示",
+                selected = quickRepliesExpanded,
+                enabled = enabled,
+                onClick = onQuickRepliesToggle,
+            )
+            if (reasoningLabel.isNotBlank()) {
+                ComposerActionBubble(
+                    icon = Icons.Default.Check,
+                    label = strings.chooseReasoning,
+                    detail = reasoningLabel,
+                    enabled = enabled,
+                    onClick = onReasoningClick,
+                )
+            }
+            if (showServiceTier) {
+                ComposerActionBubble(
+                    icon = Icons.Default.KeyboardArrowDown,
+                    label = strings.chooseSpeed,
+                    detail = serviceTierLabel,
+                    enabled = enabled,
+                    onClick = onServiceTierClick,
+                )
+            }
+            if (showProject) {
+                ComposerActionBubble(
+                    icon = Icons.Default.Folder,
+                    label = strings.project,
+                    detail = projectLabel,
+                    enabled = enabled,
+                    onClick = onProjectClick,
+                )
+            }
+            ComposerActionBubble(
+                icon = Icons.Default.AttachFile,
+                label = strings.file,
+                enabled = enabled,
+                onClick = onAttachFiles,
+            )
+            ComposerActionBubble(
+                icon = Icons.Default.Image,
+                label = strings.image,
+                enabled = enabled,
+                onClick = onAttachImages,
+            )
+        }
+        AnimatedVisibility(
+            visible = quickRepliesExpanded,
+            enter = expandVertically(
+                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                expandFrom = Alignment.Top,
+            ) + fadeIn(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
+            exit = shrinkVertically(
+                animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing),
+                shrinkTowards = Alignment.Top,
+            ) + fadeOut(animationSpec = tween(durationMillis = 90, easing = FastOutSlowInEasing)),
+        ) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                quickReplyPrompts.forEach { prompt ->
+                    AssistChip(
+                        onClick = { onQuickReply(prompt) },
+                        enabled = enabled,
+                        label = {
+                            Text(
+                                prompt,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComposerActionBubble(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    detail: String = "",
+    selected: Boolean = false,
+) {
+    Surface(
+        color = if (selected) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHigh
+        },
+        contentColor = if (selected) {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        } else {
+            MaterialTheme.colorScheme.onSurface
+        },
+        shape = RoundedCornerShape(999.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.62f)),
+        tonalElevation = 3.dp,
+        shadowElevation = 4.dp,
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .clickable(enabled = enabled, onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 10.dp, top = 8.dp, end = 13.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                } else {
+                    MaterialTheme.colorScheme.surface
+                },
+                contentColor = if (selected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.size(30.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (detail.isNotBlank()) {
+                    Text(
+                        detail,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QueuedFollowUpsPanel(
+    items: List<QueuedFollowUp>,
+    enabled: Boolean,
+    onGuide: (QueuedFollowUp) -> Unit,
+) {
+    var selectedItem by remember { mutableStateOf<QueuedFollowUp?>(null) }
+    val clipboard = LocalClipboard.current
+    val clipboardScope = rememberCoroutineScope()
+
+    selectedItem?.let { item ->
+        QueuedFollowUpDetailDialog(
+            item = item,
+            enabled = enabled,
+            onDismiss = { selectedItem = null },
+            onCopy = {
+                clipboardScope.launch {
+                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("EasyCodex queued task", item.text)))
+                }
+            },
+            onGuide = {
+                selectedItem = null
+                onGuide(item)
+            },
+        )
+    }
+
+    AnimatedVisibility(
+        visible = items.isNotEmpty(),
+        enter = expandVertically(
+            animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+            expandFrom = Alignment.Bottom,
+        ) + fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
+        exit = shrinkVertically(
+            animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+            shrinkTowards = Alignment.Bottom,
+        ) + fadeOut(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(18.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+            tonalElevation = 1.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 8.dp),
+        ) {
+            Column {
+                items.take(5).forEachIndexed { index, item ->
+                    if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f))
+                    QueuedFollowUpRow(
+                        item = item,
+                        enabled = enabled,
+                        onOpen = { selectedItem = item },
+                        onGuide = { onGuide(item) },
+                    )
+                }
+                if (items.size > 5) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f))
+                    Text(
+                        "另有 ${items.size - 5} 个排队任务",
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QueuedFollowUpRow(
+    item: QueuedFollowUp,
+    enabled: Boolean,
+    onOpen: () -> Unit,
+    onGuide: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onOpen)
+            .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+        )
+        Text(
+            item.text,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        TextButton(
+            onClick = onGuide,
+            enabled = enabled,
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+        ) {
+            Text(
+                "引导",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun QueuedFollowUpDetailDialog(
+    item: QueuedFollowUp,
+    enabled: Boolean,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+    onGuide: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("排队任务详情") },
+        text = {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    item.text.ifBlank { "任务内容为空。" },
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onGuide,
+                enabled = enabled,
+            ) {
+                Text("引导")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onCopy, enabled = item.text.isNotBlank()) {
+                    Text("复制")
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("关闭")
+                }
+            }
+        },
+    )
 }
 
 @Composable
@@ -1267,8 +1892,6 @@ private fun ComposerContextPanel(
     reasoningOptions: List<String>,
     serviceTierOptions: List<String>,
     runtimeCapabilities: RuntimeCapabilities,
-    planModeEnabled: Boolean,
-    onPlanModeChange: (Boolean) -> Unit,
     onProjectChange: (String) -> Unit,
     onModelChange: (String) -> Unit,
     onReasoningEffortChange: (String) -> Unit,
@@ -1289,23 +1912,6 @@ private fun ComposerContextPanel(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.size(38.dp)) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.TaskAlt, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-                    }
-                }
-                Column(Modifier.weight(1f)) {
-                    Text("计划模式", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                    Text(
-                        if (planModeEnabled) "先整理计划，再等待你确认" else "直接把消息发送给 EasyCodex",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = planModeEnabled, onCheckedChange = onPlanModeChange, enabled = enabled)
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             AgentRuntimeBar(
                 agent = agent,
                 enabled = enabled,
@@ -1387,19 +1993,20 @@ private fun AgentRuntimeBar(
             )
         }
         if (showRuntime) {
-            FilterChip(
-                selected = false,
-                enabled = enabled && modelOptions.isNotEmpty(),
-                onClick = { picker = RuntimePicker.Model },
-                label = { Text(selectedModelLabel, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            )
-        }
-        if (showRuntime && runtimeCapabilities.supportsReasoningEffort) {
-            FilterChip(
-                selected = false,
-                enabled = enabled && reasoningOptions.isNotEmpty(),
-                onClick = { picker = RuntimePicker.Reasoning },
-                label = { Text(reasoningLabel(displayReasoningEffort, strings)) },
+            RuntimeCombinedChip(
+                enabled = enabled && (modelOptions.isNotEmpty() || reasoningOptions.isNotEmpty()),
+                modelLabel = compactModelLabel(selectedModelLabel),
+                reasoningLabel = if (runtimeCapabilities.supportsReasoningEffort) {
+                    reasoningLabel(displayReasoningEffort, strings)
+                } else {
+                    ""
+                },
+                modelOptionsAvailable = modelOptions.isNotEmpty(),
+                reasoningOptions = if (runtimeCapabilities.supportsReasoningEffort) reasoningOptions else emptyList(),
+                selectedReasoning = displayReasoningEffort,
+                selectedModelLabel = selectedModelLabel,
+                onReasoningSelect = onReasoningEffortChange,
+                onModelSelect = { picker = RuntimePicker.Model },
             )
         }
         if (showRuntime && runtimeCapabilities.supportsServiceTier && serviceTierOptions.isNotEmpty()) {
@@ -1463,6 +2070,94 @@ private fun AgentRuntimeBar(
     }
 }
 
+@Composable
+private fun RuntimeCombinedChip(
+    enabled: Boolean,
+    modelLabel: String,
+    reasoningLabel: String,
+    modelOptionsAvailable: Boolean,
+    reasoningOptions: List<String>,
+    selectedReasoning: String,
+    selectedModelLabel: String,
+    onReasoningSelect: (String) -> Unit,
+    onModelSelect: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        FilterChip(
+            selected = false,
+            enabled = enabled,
+            onClick = { expanded = true },
+            label = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        listOf(modelLabel, reasoningLabel).filter { it.isNotBlank() }.joinToString(" "),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(16.dp))
+                }
+            },
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.width(228.dp),
+        ) {
+            if (reasoningOptions.isNotEmpty()) {
+                Text(
+                    "智能",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                reasoningOptions.forEach { option ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                reasoningLabel(option, strings),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        },
+                        trailingIcon = {
+                            if (option == selectedReasoning) {
+                                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(20.dp))
+                            }
+                        },
+                        onClick = {
+                            onReasoningSelect(option)
+                            expanded = false
+                        },
+                    )
+                }
+                HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+            }
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        selectedModelLabel.ifBlank { strings.detectingModel },
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                trailingIcon = {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, modifier = Modifier.size(20.dp))
+                },
+                enabled = modelOptionsAvailable,
+                onClick = {
+                    expanded = false
+                    onModelSelect()
+                },
+            )
+        }
+    }
+}
+
 private enum class RuntimePicker {
     Project,
     Model,
@@ -1471,6 +2166,15 @@ private enum class RuntimePicker {
 }
 
 private data class RuntimeChoice(val value: String, val label: String, val description: String = "")
+
+private fun compactModelLabel(label: String): String {
+    val normalized = label
+        .removePrefix("GPT-")
+        .removePrefix("gpt-")
+        .removePrefix("Codex ")
+        .trim()
+    return normalized.ifBlank { label.ifBlank { "Model" } }
+}
 
 @Composable
 private fun RuntimeChoiceDialog(

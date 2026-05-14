@@ -30,14 +30,19 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TaskAlt
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -67,11 +72,14 @@ import java.util.Locale
 
 private data class DrawerAgentItem(
     val id: String,
+    val position: Int,
     val name: String,
     val projectPath: String,
     val status: String,
     val activity: String?,
     val updatedAt: Long,
+    val pinned: Boolean,
+    val hasAlert: Boolean,
 ) {
     fun isBusy(): Boolean {
         return status.trim().lowercase(Locale.ROOT) in setOf(
@@ -92,13 +100,24 @@ private data class DrawerAgentItem(
     }
 }
 
+private fun isDefaultRelativeProjectPath(path: String): Boolean {
+    return normalizePathKey(path) == normalizePathKey(DEFAULT_AGENT_CWD)
+}
+
+private fun isPinnedProjectOption(path: String): Boolean {
+    return !isDefaultRelativeProjectPath(path) && !isConversationProjectPath(path)
+}
+
 @Composable
 fun AgentDrawer(
     agents: List<Agent>,
+    alerts: List<AgentAlert>,
+    projectOptions: List<String>,
     activeAgentId: String?,
     onHome: () -> Unit,
     onSelect: (String) -> Unit,
     onCreateInProject: (String) -> Unit,
+    onDeleteAgent: (String) -> Unit,
 ) {
     val strings = LocalAppStrings.current
     var query by remember { mutableStateOf("") }
@@ -110,14 +129,20 @@ fun AgentDrawer(
     val normalizedQuery = debouncedQuery.trim().lowercase(Locale.ROOT)
     val drawerAgents by remember {
         derivedStateOf {
-            agents.map { agent ->
+            val alertAgentIds = alerts.mapTo(mutableSetOf()) { it.agentId }
+            agents.mapIndexed { index, agent ->
                 DrawerAgentItem(
                     id = agent.id,
+                    position = index,
                     name = agent.name,
-                    projectPath = cleanNullablePath(agent.projectRoot) ?: cleanNullablePath(agent.cwd) ?: DEFAULT_AGENT_CWD,
+                    projectPath = cleanNullablePath(agent.projectRoot)
+                        ?: cleanNullablePath(agent.cwd)
+                        ?: CONVERSATION_PROJECT_PATH,
                     status = agent.status,
                     activity = agent.activity,
                     updatedAt = agent.updatedAt,
+                    pinned = agent.pinned,
+                    hasAlert = agent.id in alertAgentIds,
                 )
             }
         }
@@ -132,10 +157,31 @@ fun AgentDrawer(
             }
         }
     }
-    val groupedAgents = remember(visibleAgents) {
+    val pinnedAgents = remember(visibleAgents) {
         visibleAgents
-            .sortedByDescending { it.updatedAt }
-            .groupBy { it.projectPath }
+            .filter { it.pinned }
+            .sortedByDescending { it.position }
+    }
+    val groupedAgents = remember(visibleAgents, projectOptions, normalizedQuery) {
+        val visibleProjectOptions = projectOptions
+            .mapNotNull(::cleanNullablePath)
+            .filter(::isPinnedProjectOption)
+            .filter { projectPath ->
+                normalizedQuery.isBlank() || projectNameFromCwd(projectPath).lowercase(Locale.ROOT).contains(normalizedQuery) ||
+                    projectPath.lowercase(Locale.ROOT).contains(normalizedQuery)
+            }
+        val groupedTasks = visibleAgents
+            .filterNot { it.pinned }
+            .groupBy { normalizePathKey(it.projectPath) }
+        val groupedTaskPaths = visibleAgents
+            .filterNot { it.pinned }
+            .map { it.projectPath }
+            .distinctBy(::normalizePathKey)
+        val conversationTaskPaths = groupedTaskPaths.filter(::isConversationProjectPath)
+        val regularTaskPaths = groupedTaskPaths.filterNot(::isConversationProjectPath)
+        (conversationTaskPaths + visibleProjectOptions + regularTaskPaths)
+            .distinctBy(::normalizePathKey)
+            .associateWith { groupedTasks[normalizePathKey(it)].orEmpty() }
     }
     val projectPaths = groupedAgents.keys.toList()
     var collapsedProjectPaths by remember { mutableStateOf(emptySet<String>()) }
@@ -202,7 +248,7 @@ fun AgentDrawer(
                 .fillMaxWidth()
                 .padding(horizontal = 14.dp, vertical = 6.dp),
         )
-        if (agents.isEmpty()) {
+        if (agents.isEmpty() && projectPaths.isEmpty()) {
             Text(
                 strings.noAgents,
                 modifier = Modifier.padding(24.dp),
@@ -210,7 +256,7 @@ fun AgentDrawer(
             )
             return@ModalDrawerSheet
         }
-        if (visibleAgents.isEmpty()) {
+        if (visibleAgents.isEmpty() && projectPaths.isEmpty()) {
             Text(
                 strings.noMatchingTasks,
                 modifier = Modifier.padding(24.dp),
@@ -221,31 +267,56 @@ fun AgentDrawer(
         LazyColumn(
             modifier = Modifier
                 .weight(1f),
-            contentPadding = PaddingValues(bottom = 12.dp),
+            contentPadding = PaddingValues(bottom = 96.dp),
         ) {
-            item("drawer_projects_header") {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 18.dp, end = 12.dp, top = 18.dp, bottom = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+            if (pinnedAgents.isNotEmpty()) {
+                item("drawer_pinned_header") {
                     Text(
-                        strings.projects,
-                        modifier = Modifier.weight(1f),
+                        strings.pinned,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 18.dp, end = 12.dp, top = 18.dp, bottom = 6.dp),
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    TextButton(
-                        onClick = {
-                            collapsedProjectPaths = if (allProjectsCollapsed) {
-                                emptySet()
-                            } else {
-                                projectPaths.toSet()
-                            }
-                        },
+                }
+                items(pinnedAgents, key = { "pinned_${it.id}" }) { agent ->
+                    DrawerAgentProjectRow(
+                        agent = agent,
+                        selected = agent.id == activeAgentId,
+                        onClick = { onSelect(agent.id) },
+                        onDelete = { onDeleteAgent(agent.id) },
+                    )
+                }
+                item("drawer_pinned_spacer") {
+                    Spacer(Modifier.height(8.dp))
+                }
+            }
+            if (projectPaths.isNotEmpty()) {
+                item("drawer_projects_header") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 18.dp, end = 12.dp, top = 18.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(if (allProjectsCollapsed) strings.expandAll else strings.collapseAll)
+                        Text(
+                            strings.projects,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(
+                            onClick = {
+                                collapsedProjectPaths = if (allProjectsCollapsed) {
+                                    emptySet()
+                                } else {
+                                    projectPaths.toSet()
+                                }
+                            },
+                        ) {
+                            Text(if (allProjectsCollapsed) strings.expandAll else strings.collapseAll)
+                        }
                     }
                 }
             }
@@ -264,6 +335,7 @@ fun AgentDrawer(
                             }
                         },
                         onCreate = { onCreateInProject(projectPath) },
+                        showCreate = !isConversationProjectPath(projectPath),
                     )
                 }
                 item("project_agents_$projectPath") {
@@ -288,6 +360,7 @@ fun AgentDrawer(
                                     agent = agent,
                                     selected = agent.id == activeAgentId,
                                     onClick = { onSelect(agent.id) },
+                                    onDelete = { onDeleteAgent(agent.id) },
                                 )
                             }
                         }
@@ -302,7 +375,12 @@ fun AgentDrawer(
 }
 
 @Composable
-private fun DrawerAgentProjectRow(agent: DrawerAgentItem, selected: Boolean, onClick: () -> Unit) {
+private fun DrawerAgentProjectRow(
+    agent: DrawerAgentItem,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
     val strings = LocalAppStrings.current
     val rowColor = if (selected) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent
     Surface(
@@ -318,15 +396,26 @@ private fun DrawerAgentProjectRow(agent: DrawerAgentItem, selected: Boolean, onC
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Surface(
-                shape = CircleShape,
-                color = when {
-                    agent.isBusy() -> MaterialTheme.colorScheme.primary
-                    agent.status.equals("error", ignoreCase = true) -> MaterialTheme.colorScheme.error
-                    else -> MaterialTheme.colorScheme.outlineVariant
-                },
-                modifier = Modifier.size(8.dp),
-            ) {}
+            val markerColor = when {
+                agent.isBusy() -> MaterialTheme.colorScheme.primary
+                agent.status.equals("error", ignoreCase = true) -> MaterialTheme.colorScheme.error
+                agent.hasAlert -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.outlineVariant
+            }
+            if (agent.pinned) {
+                Icon(
+                    Icons.Outlined.PushPin,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = markerColor,
+                )
+            } else {
+                Surface(
+                    shape = CircleShape,
+                    color = markerColor,
+                    modifier = Modifier.size(8.dp),
+                ) {}
+            }
             Spacer(Modifier.width(10.dp))
             Text(
                 agent.name,
@@ -338,25 +427,7 @@ private fun DrawerAgentProjectRow(agent: DrawerAgentItem, selected: Boolean, onC
             )
             Spacer(Modifier.width(8.dp))
             if (agent.isBusy()) {
-                Row(
-                    modifier = Modifier.weight(0.72f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(15.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        agent.activity?.takeIf { it.isNotBlank() } ?: "加载中",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                TaskBusyIndicator(modifier = Modifier.weight(0.72f))
             } else {
                 Text(
                     relativeTime(agent.updatedAt, strings),
@@ -365,6 +436,10 @@ private fun DrawerAgentProjectRow(agent: DrawerAgentItem, selected: Boolean, onC
                     maxLines = 1,
                 )
             }
+            AgentTaskActions(
+                isBusy = agent.isBusy(),
+                onDelete = onDelete,
+            )
         }
     }
 }
@@ -376,6 +451,7 @@ fun ProjectHeader(
     expanded: Boolean,
     onToggle: () -> Unit,
     onCreate: () -> Unit,
+    showCreate: Boolean = true,
 ) {
     val strings = LocalAppStrings.current
     val arrowRotation by animateFloatAsState(
@@ -426,22 +502,29 @@ fun ProjectHeader(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        IconButton(
-            onClick = onCreate,
-            modifier = Modifier.size(36.dp),
-        ) {
-            Icon(
-                Icons.Default.Add,
-                contentDescription = strings.createInProject,
-                modifier = Modifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        if (showCreate) {
+            IconButton(
+                onClick = onCreate,
+                modifier = Modifier.size(36.dp),
+            ) {
+                Icon(
+                    Icons.Default.Add,
+                    contentDescription = strings.createInProject,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
 
 @Composable
-fun AgentProjectRow(agent: Agent, selected: Boolean, onClick: () -> Unit) {
+fun AgentProjectRow(
+    agent: Agent,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onDelete: (() -> Unit)? = null,
+) {
     val strings = LocalAppStrings.current
     val rowColor = if (selected) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent
     Surface(
@@ -477,25 +560,7 @@ fun AgentProjectRow(agent: Agent, selected: Boolean, onClick: () -> Unit) {
             )
             Spacer(Modifier.width(8.dp))
             if (agent.isBusy()) {
-                Row(
-                    modifier = Modifier.weight(0.72f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(15.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        agent.activity?.takeIf { it.isNotBlank() } ?: "加载中",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                TaskBusyIndicator(modifier = Modifier.weight(0.72f))
             } else {
                 Text(
                     relativeTime(agent.updatedAt, strings),
@@ -504,7 +569,77 @@ fun AgentProjectRow(agent: Agent, selected: Boolean, onClick: () -> Unit) {
                     maxLines = 1,
                 )
             }
+            if (onDelete != null) {
+                AgentTaskActions(
+                    isBusy = agent.isBusy(),
+                    onDelete = onDelete,
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun AgentTaskActions(
+    isBusy: Boolean,
+    onDelete: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    var menuExpanded by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    IconButton(
+        onClick = { menuExpanded = true },
+        modifier = Modifier.size(36.dp),
+    ) {
+        Icon(
+            Icons.Default.MoreVert,
+            contentDescription = strings.taskActionsContentDescription,
+            modifier = Modifier.size(20.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    DropdownMenu(
+        expanded = menuExpanded,
+        onDismissRequest = { menuExpanded = false },
+    ) {
+        DropdownMenuItem(
+            text = { Text(strings.archiveTask) },
+            leadingIcon = {
+                Icon(
+                    Icons.Default.Archive,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            onClick = {
+                menuExpanded = false
+                showDeleteConfirm = true
+            },
+        )
+    }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text(strings.archiveTaskTitle) },
+            text = { Text(if (isBusy) strings.archiveRunningTaskBody else strings.archiveTaskBody) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteConfirm = false
+                        onDelete()
+                    },
+                ) {
+                    Text(strings.confirmArchiveTask)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text(strings.cancel)
+                }
+            },
+        )
     }
 }
 
@@ -516,12 +651,14 @@ fun HomeTaskScreen(
     reasoningOptions: List<String>,
     serviceTierOptions: List<String>,
     recentAgents: List<Agent>,
+    recentAlertKinds: Map<String, AgentAlertKind>,
     runtimeCapabilities: RuntimeCapabilities,
     canChangeProject: Boolean,
     onProjectChange: (String) -> Unit,
     onReasoningEffortChange: (String) -> Unit,
     onServiceTierChange: (String) -> Unit,
     onOpenAgent: (String) -> Unit,
+    onDeleteAgent: (String) -> Unit,
     onBrowseDirectories: (String?, (DirectoryListing?, String?) -> Unit) -> Unit,
 ) {
     val strings = LocalAppStrings.current
@@ -555,84 +692,86 @@ fun HomeTaskScreen(
             }
         }
         if (canChangeProject) item {
-            Surface(
-                shape = RoundedCornerShape(22.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerLow,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
-                tonalElevation = 1.dp,
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(22.dp))
-                    .clickable { showProjectPicker = true },
+                    .padding(top = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
+                    tonalElevation = 1.dp,
+                    modifier = Modifier
+                        .fillMaxWidth(0.88f)
+                        .clip(RoundedCornerShape(18.dp))
+                        .clickable { showProjectPicker = true },
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        EasyCodexIconBubble(icon = Icons.Default.Folder, modifier = Modifier.size(42.dp))
-                        Spacer(Modifier.width(12.dp))
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        EasyCodexIconBubble(icon = Icons.Default.Folder, modifier = Modifier.size(34.dp))
+                        Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text(
                                 strings.project,
-                                style = MaterialTheme.typography.labelLarge,
+                                style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Text(
                                 projectNameFromCwd(draftAgent.cwd),
-                                style = MaterialTheme.typography.titleMedium,
+                                style = MaterialTheme.typography.bodyLarge,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
-                        ) {
                             Text(
-                                strings.chooseProjectDirectory,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                                style = MaterialTheme.typography.labelMedium,
+                                draftAgent.cwd,
+                                style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
-                    Text(
-                        draftAgent.cwd,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
                 }
             }
         }
-        val recent = recentAgents.sortedByDescending { it.updatedAt }.take(5)
+        val recent = recentAgents.sortedByDescending { it.updatedAt }.take(3)
         if (recent.isNotEmpty()) {
             item {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text(
-                        strings.recentTasks,
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
+                        modifier = Modifier.fillMaxWidth(0.88f),
+                    ) {
+                        Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                            Text(
+                                strings.recentTasks,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            recent.forEach { agent ->
+                                CompactRecentTaskRow(
+                                    agent = agent,
+                                    alertKind = recentAlertKinds[agent.id],
+                                    onClick = { onOpenAgent(agent.id) },
+                                    onDelete = { onDeleteAgent(agent.id) },
+                                )
+                            }
+                        }
+                    }
                 }
-            }
-            items(recent, key = { it.id }) { agent ->
-                AgentProjectRow(
-                    agent = agent,
-                    selected = false,
-                    onClick = { onOpenAgent(agent.id) },
-                )
             }
         }
     }
@@ -647,6 +786,85 @@ fun HomeTaskScreen(
                 showProjectPicker = false
             },
             onDismiss = { showProjectPicker = false },
+        )
+    }
+}
+
+@Composable
+private fun CompactRecentTaskRow(
+    agent: Agent,
+    alertKind: AgentAlertKind?,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = when {
+                agent.isBusy() -> MaterialTheme.colorScheme.primary
+                agent.status.equals("error", ignoreCase = true) -> MaterialTheme.colorScheme.error
+                alertKind != null -> agentAlertIndicatorColor(alertKind)
+                else -> MaterialTheme.colorScheme.outlineVariant
+            },
+            modifier = Modifier.size(7.dp),
+        ) {}
+        Spacer(Modifier.width(9.dp))
+        Text(
+            agent.name,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.width(8.dp))
+        if (agent.isBusy()) {
+            TaskBusyIndicator()
+        } else {
+            Text(
+                relativeTime(agent.updatedAt, strings),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        AgentTaskActions(
+            isBusy = agent.isBusy(),
+            onDelete = onDelete,
+        )
+    }
+}
+
+@Composable
+private fun agentAlertIndicatorColor(kind: AgentAlertKind): Color {
+    return when (kind) {
+        AgentAlertKind.Completed -> MaterialTheme.colorScheme.primary
+        AgentAlertKind.Question,
+        AgentAlertKind.Confirmation -> MaterialTheme.colorScheme.tertiary
+        AgentAlertKind.Error -> MaterialTheme.colorScheme.error
+    }
+}
+
+@Composable
+private fun TaskBusyIndicator(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.End,
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(15.dp),
+            strokeWidth = 2.dp,
+            color = MaterialTheme.colorScheme.primary,
         )
     }
 }
