@@ -1,13 +1,5 @@
 # Changelog
 
-## 0.1.1 - 2026-05-14
-
-### Improved
-
-- Added desktop relay release builds for macOS Intel, macOS Apple Silicon, and Linux x64.
-- Fixed Windows relay installer icon metadata, system-wide install location, high-DPI awareness, and installer language selection.
-- Published desktop release assets with platform and architecture names so users can choose the correct installer.
-
 ## 0.1.0 - 2026-05-14
 
 Initial public release of EasyCodex.
@@ -18,6 +10,7 @@ Initial public release of EasyCodex.
 - Node.js agent relay for authenticated WebSocket control, workspace-aware Codex session orchestration, QR/deep-link pairing, and local health checks.
 - Electron desktop relay launcher for Windows, including install/build controls, relay start/stop, workspace selection, API key management, QR pairing, and live health/status display.
 - Windows desktop relay distribution with installer and portable executable builds.
+- macOS Intel, macOS Apple Silicon, and Linux x64 desktop relay release builds.
 - Multilingual app and desktop relay UI coverage for English, Simplified Chinese, Traditional Chinese, Japanese, Korean, Spanish, French, and German.
 - Mobile handling for long command output, file diffs, and streaming agent updates so phone-sized screens stay responsive.
 
@@ -28,3 +21,4 @@ Initial public release of EasyCodex.
 - Mobile conversation views now summarize noisy tool output and provide expandable previews for long messages.
 - Project and worktree selection flows are more resilient on small screens.
 - App and desktop icons were refreshed for the first release.
+- Windows relay installer icon metadata, system-wide install location, high-DPI awareness, and installer language selection were corrected.

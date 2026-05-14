@@ -59,8 +59,8 @@ Linux artifacts are written to `desktop-relay/release/` as AppImage and deb pack
 You do not need a MacBook or Linux workstation to publish the desktop builds. Push a version tag and GitHub Actions will build Windows x64, macOS x64, macOS arm64, and Linux x64:
 
 ```powershell
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
 The workflow uploads the Windows installer, Windows portable app, macOS DMG/ZIP builds for both Intel and Apple Silicon, and Linux AppImage/deb builds to the GitHub Release for that tag.
