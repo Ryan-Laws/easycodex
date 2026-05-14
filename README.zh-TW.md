@@ -9,7 +9,7 @@
     <a href="README.zh-TW.md">繁體中文</a>
   </p>
   <p>
-    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.1"><img alt="Release v0.1.1" src="https://img.shields.io/badge/release-v0.1.1-2f80ed?style=flat-square"></a>
+    <a href="https://github.com/Ryan-Laws/easycodex/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Ryan-Laws/easycodex?label=release&style=flat-square"></a>
     <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green?style=flat-square"></a>
     <img alt="Windows" src="https://img.shields.io/badge/Windows-relay%20app-0078D4?logo=windows&logoColor=white&style=flat-square">
     <img alt="Android" src="https://img.shields.io/badge/Android-mobile%20APK-3DDC84?logo=android&logoColor=white&style=flat-square">
@@ -19,7 +19,7 @@
     <a href="https://visitor-badge.laobi.icu/"><img alt="Visitors" src="https://visitor-badge.laobi.icu/badge?page_id=Ryan-Laws.easycodex"></a>
   </p>
   <p>
-    <a href="https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.1"><strong>下載 EasyCodex 0.1.1</strong></a>
+    <a href="https://github.com/Ryan-Laws/easycodex/releases/latest"><strong>下載最新版 EasyCodex</strong></a>
     ·
     <a href="https://github.com/Ryan-Laws/easycodex/releases">全部 Release</a>
   </p>
@@ -31,24 +31,24 @@ EasyCodex 是一個本機優先的 Codex 程式開發智能體遠端控制應用
 
 ## 安裝 EasyCodex
 
-從 [EasyCodex 0.1.1](https://github.com/Ryan-Laws/easycodex/releases/tag/v0.1.1) 下載目前版本。在 GitHub 頁面上，也可以從倉庫右側的 **Releases** 入口進入發布頁，再選擇最新的 EasyCodex 版本。
+從 [最新版 EasyCodex Release](https://github.com/Ryan-Laws/easycodex/releases/latest) 下載目前版本。在 GitHub 頁面上，也可以從倉庫右側的 **Releases** 入口進入發布頁，再選擇最新的 EasyCodex 版本。
 
 | 平台 | 下載 | 用途 |
 | --- | --- | --- |
-| Windows | [`EasyCodex.Relay.Setup.0.1.1-x64.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.Setup.0.1.1-x64.exe) | 推薦的 Windows 桌面端中繼安裝包 |
-| Windows | [`EasyCodex.Relay.Portable.0.1.1-x64.exe`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.Portable.0.1.1-x64.exe) | 免安裝可攜版 Windows 中繼 |
-| Android | [`EasyCodex.Mobile.0.1.1.apk`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Mobile.0.1.1.apk) | Android 手機應用 |
-| macOS Apple Silicon | [`EasyCodex.Relay.0.1.1.mac-arm64.dmg`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.mac-arm64.dmg) | Apple Silicon 桌面端中繼 |
-| macOS Intel | [`EasyCodex.Relay.0.1.1.mac-x64.dmg`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.mac-x64.dmg) | Intel 桌面端中繼 |
-| Linux | [`EasyCodex.Relay.0.1.1.linux-x64.AppImage`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.linux-x64.AppImage) | 免安裝 Linux 中繼 |
-| Linux | [`EasyCodex.Relay.0.1.1.linux-x64.deb`](https://github.com/Ryan-Laws/easycodex/releases/download/v0.1.1/EasyCodex.Relay.0.1.1.linux-x64.deb) | Debian/Ubuntu 安裝包 |
+| Windows | `EasyCodex.Relay.Setup.*-x64.exe` | 推薦的 Windows 桌面端中繼安裝包 |
+| Windows | `EasyCodex.Relay.Portable.*-x64.exe` | 免安裝可攜版 Windows 中繼 |
+| Android | `EasyCodex.Mobile.*.apk` | Android 手機應用 |
+| macOS Apple Silicon | `EasyCodex.Relay.*.mac-arm64.dmg` | Apple Silicon 桌面端中繼 |
+| macOS Intel | `EasyCodex.Relay.*.mac-x64.dmg` | Intel 桌面端中繼 |
+| Linux | `EasyCodex.Relay.*.linux-x64.AppImage` | 免安裝 Linux 中繼 |
+| Linux | `EasyCodex.Relay.*.linux-x64.deb` | Debian/Ubuntu 安裝包 |
 
 ## 快速開始
 
 1. 在電腦上安裝並登入 OpenAI Codex CLI。
 2. 在 Windows 或 macOS 上安裝並開啟 **EasyCodex Relay**。
 3. 在桌面端應用裡點擊啟動中繼。它會顯示中繼狀態、連線位址、API Key 和 QR Code。
-4. 在 Android 手機上安裝 `EasyCodex.Mobile.0.1.1.apk`。
+4. 在 Android 手機上安裝最新 Release 裡的 `EasyCodex.Mobile.*.apk`。
 5. 用手機掃描 QR Code，或在應用內開啟連線連結。
 6. 選擇工作區，建立或恢復 Codex 對話，然後用手機控制智能體。
 
