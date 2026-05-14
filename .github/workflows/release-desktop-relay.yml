@@ -88,4 +88,4 @@ jobs:
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
         run: |
           gh release view "$TAG_NAME" >/dev/null 2>&1 || gh release create "$TAG_NAME" --title "EasyCodex ${TAG_NAME#v}" --notes-file CHANGELOG.md
-          find desktop-relay/release -maxdepth 1 -type f -print0 | sort -z | xargs -0 gh release upload "$TAG_NAME" --clobber
+          find desktop-relay/release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.blockmap' \) -print0 | sort -z | xargs -0 gh release upload "$TAG_NAME" --clobber

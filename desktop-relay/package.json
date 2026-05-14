@@ -115,7 +115,7 @@
     },
     "linux": {
       "icon": "src/assets/icon.png",
-      "artifactName": "EasyCodex.Relay.${version}.linux-${arch}.${ext}",
+      "artifactName": "EasyCodex.Relay.${version}.linux-x64.${ext}",
       "category": "Development",
       "maintainer": "Ryan-Laws <Ryan-Laws@users.noreply.github.com>",
       "target": [
