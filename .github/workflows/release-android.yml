@@ -176,10 +176,10 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release edit "$tag" --notes-file "$notes_file"
           else
-            prerelease_args=()
             if [[ "$tag" == *"-"* ]]; then
-              prerelease_args=(--prerelease)
+              gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file" --prerelease || gh release view "$tag" >/dev/null
+            else
+              gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file" || gh release view "$tag" >/dev/null
             fi
-            gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file" "${prerelease_args[@]}" || gh release view "$tag" >/dev/null
           fi
           gh release upload "$tag" "${{ steps.sign.outputs.apk }}" "${{ steps.sign.outputs.apk }}.sha256"

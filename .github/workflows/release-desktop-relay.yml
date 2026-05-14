@@ -125,10 +125,10 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release edit "$tag" --notes-file "$notes_file"
           else
-            prerelease_args=()
             if [[ "$tag" == *"-"* ]]; then
-              prerelease_args=(--prerelease)
+              gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file" --prerelease
+            else
+              gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file"
             fi
-            gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file" "${prerelease_args[@]}"
           fi
           find desktop-relay/release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.blockmap' \) -print0 | sort -z | xargs -0 gh release upload "$tag" --clobber
