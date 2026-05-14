@@ -30,9 +30,11 @@
   "build": {
     "appId": "dev.easycodex.desktop-relay",
     "productName": "EasyCodex Relay",
+    "icon": "build/icon.ico",
     "directories": {
       "output": "release"
     },
+    "afterPack": "scripts/after-pack.cjs",
     "files": [
       "src/**/*",
       "package.json"
@@ -66,6 +68,7 @@
       }
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         "nsis",
         "portable"
@@ -74,8 +77,15 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": false,
+      "perMachine": true,
       "allowToChangeInstallationDirectory": true,
+      "displayLanguageSelector": true,
+      "installerLanguages": [
+        "en_US",
+        "zh_CN",
+        "zh_TW"
+      ],
+      "multiLanguageInstaller": true,
       "createDesktopShortcut": false,
       "createStartMenuShortcut": false,
       "shortcutName": "EasyCodex Relay",
