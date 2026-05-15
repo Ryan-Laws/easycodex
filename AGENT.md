@@ -1,158 +1,235 @@
 # EasyCodex Agent Runtime
 
-This document describes how EasyCodex manages Codex agents.
+This document describes the current relay-managed Codex runtime used by the Android app and the desktop relay workbench.
 
 ## Mental Model
 
-In EasyCodex, an agent is a `codex app-server` child process managed by the agent relay. The phone never launches Codex directly.
+EasyCodex is a local-first controller. The phone and desktop UI never run Codex directly; they talk to the Agent Relay, and the relay launches local Codex processes beside the selected workspace.
 
 ```text
-Mobile app <-> Agent Relay <-> codex app-server process <-> Codex thread
+Android app / Desktop workbench
+        <-> authenticated WebSocket
+Agent Relay
+        <-> JSON-RPC over stdio
+codex app-server
+        <-> Codex thread state
 ```
 
-EasyCodex also exposes mobile Codex CLI consoles. The phone still does not run Codex itself; it opens one or more console windows, while the relay runs one `codex exec` process per active window in an allowed desktop workspace and streams stdout/stderr back over the authenticated WebSocket.
+The relay also exposes mobile Codex CLI consoles. Each CLI window runs a separate `codex exec` process in an allowed workspace and streams stdout/stderr back as `cli/*` events.
 
-Each running EasyCodex agent has:
+Each running agent has:
 
-- an internal EasyCodex agent id
+- an EasyCodex agent id
 - a Codex thread id
-- a model
-- a working directory
-- approval policy
-- service tier
-- reasoning effort
-- optional system prompt
-- status such as `initializing`, `ready`, `working`, `error`, or `stopped`
+- model, reasoning effort, service tier, cwd, approval policy, and optional system prompt
+- status: `initializing`, `ready`, `working`, `error`, or `stopped`
+- normalized messages for agent text, reasoning, commands, command output, file changes, plans, and delegated sub-agent activity
+- pending approval or user-input requests when Codex asks for a client decision
+- queued mobile follow-up turns when a message arrives while the agent is busy
 
 ## Relay Responsibilities
 
-The agent relay is responsible for:
-
-- authenticating mobile clients with the relay API key
-- spawning `codex app-server`
-- sending JSON-RPC messages to Codex over stdio
-- translating Codex notifications into WebSocket events
-- translating Codex server-initiated requests, such as approval prompts, into mobile confirmation flows
-- managing in-memory running agents
-- persisting enough agent metadata to restore agents after relay restart
-- sending optional Expo mobile notifications for registered clients and local in-app notification events over WebSocket
-- exposing file, Git, repo, worktree, model, and runtime capability actions to the app
-
 Main files:
 
-- `agent-relay/src/server.ts` handles HTTP, WebSocket, auth, and action routing.
-- `agent-relay/src/session-orchestrator.ts` manages Codex child processes and agent state.
-- `agent-relay/src/codex-rpc.ts` builds JSON-RPC requests for `codex app-server`.
-- `agent-relay/src/notifier.ts` sends Expo mobile notifications only for clients that explicitly register an Expo token.
+- `agent-relay/src/server.ts` handles HTTP, WebSocket auth, action routing, workspace safety, Git/file APIs, attachment upload, CLI processes, stream replay, update checks, and desktop relay events.
+- `agent-relay/src/session-orchestrator.ts` manages `codex app-server`, agent state, Codex thread listing/reading/archiving, stream normalization, message truncation, turn queues, user-input requests, and runtime capability detection.
+- `agent-relay/src/codex-rpc.ts` defines Codex JSON-RPC calls and turn input item shapes, including text, image URLs, and local images.
+- `agent-relay/src/notifier.ts` stores notification preferences/history and sends optional Expo push notifications.
+- `agent-relay/src/updater.ts` checks and applies EasyCodex update channels.
+
+The relay must keep these boundaries explicit:
+
+- WebSocket and health checks require the relay API key.
+- File, Git, CLI, and agent cwd operations must resolve inside allowed EasyCodex workspace roots.
+- New arbitrary workspace roots require `trust_workspace_root`; system/profile/application-data roots are refused.
+- Uploaded attachments are written under the selected cwd in `.easycodex-attachments/`.
+- Relay state belongs under `~/.easycodex/`, not in the repository.
 
 ## Agent Lifecycle
 
-1. The app sends `create_agent`.
-2. The relay spawns `codex app-server` with the requested cwd.
-3. The relay sends `initialize`.
-4. The relay sends `initialized`.
-5. The relay starts or resumes a Codex thread.
-6. The app sends user messages with `send_message`.
-7. The relay sends `turn/start`.
-8. Codex streams notifications such as `turn/started`, `item/*`, and `turn/completed`.
-9. The relay broadcasts events back to authenticated app clients.
-10. Codex thread state changes also emit `codex/threads_changed`, so clients can refresh task lists and active resumable thread details immediately.
+1. A client sends `create_agent`, optionally with a first message and attachments.
+2. The relay validates cwd against allowed workspace roots.
+3. The relay starts `codex app-server` in that cwd.
+4. The relay sends `initialize` and `initialized`.
+5. The relay starts a new Codex thread or resumes an existing thread.
+6. A client sends `send_message`.
+7. The relay sends `turn/start` with text and optional attachment input items.
+8. Codex streams notifications such as `turn/started`, `item/*`, `turn/plan/updated`, `turn/diff/updated`, and `turn/completed`.
+9. The relay normalizes those events into mobile/desktop-friendly messages and broadcasts stream envelopes.
+10. `agents/changed` and `codex/threads_changed` tell clients to refresh task lists and selected thread details.
 
-The relay keeps a single running agent attached to each Codex thread id. If a client asks to resume a thread that is already running, the relay returns the existing agent instead of spawning a second `codex app-server` process for the same thread.
+Only one running relay agent is attached to a Codex thread id. If a client resumes a thread that is already active, the relay returns the existing agent.
 
-## Core WebSocket Actions
+## WebSocket Actions
 
-Agent actions:
+Agent and message actions:
 
 | Action | Purpose |
 | --- | --- |
-| `create_agent` | Start a Codex agent process and thread. |
-| `list_agents` | Return running relay-managed agents. |
-| `get_agent` | Return one agent. |
-| `send_message` | Send a user message to an agent. |
-| `interrupt` | Interrupt the current agent turn. |
-| `respond_agent_request` | Approve or deny a pending Codex request from the mobile app. |
-| `stop_agent` | Stop an agent process. |
-| `update_agent_model` | Change an agent model. |
+| `create_agent` | Start or resume an agent. Supports `name`, `model`, `cwd`, `approvalPolicy`, `systemPrompt`, `serviceTier`, `reasoningEffort`, `codexThreadId`, first `message`, and `attachments`. |
+| `list_agents` | Return relay-managed running agents. |
+| `get_agent` | Return one running agent. |
+| `send_message` | Send a turn to an agent, or queue it while busy. Supports attachments. |
+| `interrupt` | Interrupt the current turn. |
+| `respond_agent_request` | Approve or deny a Codex approval/tool request. |
+| `respond_agent_user_input` | Answer a Codex user-input request produced by `request_user_input`. |
+| `stop_agent` | Stop a running agent process. |
+| `archive_codex_thread` | Archive a Codex thread and optionally stop/remove its running agent. |
+| `update_agent_model` | Change the in-memory model for an agent. |
 | `update_agent_config` | Change model, cwd, approval policy, system prompt, service tier, or reasoning effort. |
-| `cli_start` | Prepare a mobile CLI window for an allowed workspace and return Codex CLI metadata. |
-| `cli_run` | Start one `codex exec` run for a CLI `windowId` and stream `cli/*` events. |
-| `cli_stop` | Stop the active CLI run for a CLI `windowId` if one is running. |
 
-Codex metadata actions:
+Stream and runtime actions:
 
 | Action | Purpose |
 | --- | --- |
-| `list_codex_models` | Read model catalog from the Codex runtime. |
-| `runtime_capabilities` | Report official vs compatible runtime behavior. |
-| `check_update` | Check the configured EasyCodex update channel and report whether the relay is outdated. |
-| `apply_update` | Apply a fast git-based relay update when the relay is running from an EasyCodex repository checkout. |
-| `list_codex_threads` | List available Codex threads globally by default; pass `cwd` or `includeGlobal=false` to scope results to one workspace, `all=true` to follow cursors across pages, and `activeOnly=true` to return only threads that are still running or queued. |
-| `read_codex_thread` | Read a Codex thread and convert it to app messages. |
+| `replay_stream` | Replay retained stream envelopes after reconnect from a session id and sequence number. |
+| `list_codex_threads` | List Codex threads; supports cursoring, `all`, cwd scoping, global inclusion, and `activeOnly`. |
+| `read_codex_thread` | Read a thread and convert it to app messages. |
+| `list_codex_models` | Read the Codex runtime model catalog. |
+| `runtime_capabilities` | Report official vs compatible runtime behavior and supported model knobs. |
+| `check_update` | Check the configured EasyCodex update channel. |
+| `apply_update` | Apply a git-based relay update when running from a checkout. |
 
-Live sync events:
-
-| Event | Purpose |
-| --- | --- |
-| `agents/changed` | Running agent collection changed and clients should refresh the task list. |
-| `relay/update_available` | The startup or requested update check found a newer EasyCodex release. |
-| `relay/update_applied` | A relay update command completed and clients should prompt for restart if needed. |
-| `codex/threads_changed` | Codex thread state changed on disk or through relay actions; clients should refresh task lists and the selected resumable thread. |
-| `agent/requested` | Codex asked the client for a decision, such as approving a command or tool action. |
-| `agent/request_resolved` | A pending mobile approval request was answered. |
-
-Workspace actions:
+CLI actions:
 
 | Action | Purpose |
 | --- | --- |
-| `list_files` | List files and directories under a cwd. |
-| `list_directories` | List directories for cwd picking. |
-| `read_file` | Read a file for the mobile file viewer. |
+| `cli_start` | Prepare a CLI window and return Codex version/runtime metadata. |
+| `cli_run` | Run one `codex exec` prompt for a window. Supports cwd, model, reasoning effort, sandbox mode, and skip-git-repo-check. |
+| `cli_stop` | Stop the active CLI run for a window. |
 
-Git/repo actions:
+Workspace and attachment actions:
 
 | Action | Purpose |
 | --- | --- |
-| `git_status` | Show branch and dirty state. |
-| `git_log` | Show recent commits. |
-| `git_diff` | Show working tree diff. |
-| `git_commit` | Commit explicitly selected files. |
-| `git_branches` | List branches. |
-| `git_worktrees` | List Git worktrees for the current repository, including path, display name, branch, and current/locked state. |
-| `git_checkout` | Switch branches. |
-| `clone_repo` | Clone a remote repository into the relay repo directory. |
-| `list_repos` | List relay-managed repositories. |
-| `pull_repo` | Pull a relay-managed repository. |
+| `browse_directories` | Browse allowed roots, child directories, and Git worktrees for a directory picker. |
+| `trust_workspace_root` | Add a validated custom workspace root for this relay process. |
+| `list_files` | List files/directories under a cwd-relative path. |
+| `list_directories` | List only directories under a cwd-relative path. |
+| `read_file` | Read one text file under a cwd. |
+| `upload_attachments` | Upload up to 12 files, each up to 12 MB, into `.easycodex-attachments/`. |
 
-Sub-agent and delegated-agent events are normalized into app messages with type `sub_agent` when Codex emits `collabAgentToolCall` or known delegation tools such as `spawn_agent`, `wait_agent`, `send_input`, `resume_agent`, or `close_agent`.
+Git and repository actions:
 
-Directory browsing also includes a `worktrees` collection when the selected directory is inside a Git repository, so mobile clients can surface isolated Codex workspaces instead of treating them as ordinary folders.
+| Action | Purpose |
+| --- | --- |
+| `git_status` | Return branch, clean state, and changed files. |
+| `git_log` | Return recent commits. |
+| `git_diff` | Return full or single-file diff. |
+| `git_commit` | Stage and commit explicitly selected files. |
+| `git_branches` | List local branches. |
+| `git_worktrees` | List worktrees for a repository. |
+| `git_checkout` | Switch branch. |
+| `clone_repo` | Clone into the relay repo directory. |
+| `list_repos` | List relay-managed repos. |
+| `pull_repo` | Pull a relay-managed repo. |
+
+Notification actions:
+
+| Action | Purpose |
+| --- | --- |
+| `register_notification_token` | Register an Expo push token for the authenticated client. |
+| `update_client_language` | Sync client language for localized notifications. |
+| `update_notification_prefs` | Store per-agent notification level: `all`, `errors`, or `muted`. |
+| `get_notification_prefs` | Return notification preferences. |
+| `list_notification_history` | Return recent relay notification history. |
+
+## Stream Events
+
+The relay sends response envelopes for requests and stream envelopes for live state. Important stream events include:
+
+- `agents/changed`
+- `codex/threads_changed`
+- `relay/update_available`
+- `relay/update_applied`
+- `agent/requested`
+- `agent/request_resolved`
+- `agent/user_input_requested`
+- `agent/user_input_resolved`
+- `turn/started`, `turn/completed`, `turn/failed`
+- `item/started`, `item/completed`
+- `item/agentMessage/delta`
+- `item/reasoning/delta`
+- `item/commandOutput/delta`
+- `item/fileChange/delta`
+- `cli/started`, `cli/output`, `cli/completed`, `cli/error`, `cli/stopped`
+
+Long stream deltas are batched and capped for mobile. Long historical messages are summarized or truncated with an EasyCodex notice so the phone stays responsive.
+
+## Thread and Message Normalization
+
+The orchestrator maps old and current Codex event names into stable app message types:
+
+- `agent` for assistant text
+- `user` for user prompts
+- `thinking` for reasoning summaries/deltas
+- `command` for shell or MCP call start
+- `command_output` for command/MCP output
+- `file_change` for patches, diffs, and code changes
+- `plan` for plan updates
+- `sub_agent` for delegated agent tool calls and results
+- `status` for lifecycle/error notices
+
+When a user prompt contains injected AGENTS/environment context, the relay and Android app hide that context in display copies and keep the user-facing prompt readable.
+
+## Attachments
+
+Mobile attachments are uploaded before a turn. The relay:
+
+- accepts at most 12 files per upload
+- rejects files over 12 MB
+- sanitizes file names
+- writes files under `.easycodex-attachments/` in the selected cwd
+- sends images to Codex as local image input where possible
+- includes non-image files in the prompt as local file references
+
+The Android app keeps preview metadata locally so sent messages can show attachment chips and image previews.
 
 ## Persistence
 
-The relay writes agent metadata under the relay host's user home:
+Runtime state is outside the repo:
 
 ```text
+~/.easycodex/config.json
 ~/.easycodex/agents.json
+~/.easycodex/repos/
+~/.easycodex/desktop-relay.json
+~/.easycodex/desktop-relay-runtime/
 ```
 
-This is runtime state, not repository state. Do not commit relay-generated agent state.
+The relay also reads Codex desktop/global state from `~/.codex/` when available to surface pinned threads, visible workspace roots, queued follow-ups, archived threads, and active sessions.
 
-## Security Notes
+## Environment Variables
 
-- The relay controls local files and can launch Codex inside a cwd. Treat access to it as powerful.
-- Always require the relay API key for WebSocket and health checks.
-- Prefer trusted LAN or Tailscale for local use.
-- Prefer `wss://` behind a reverse proxy for remote/VPS use.
-- Never commit relay API keys or `OPENAI_API_KEY`.
+Common relay variables:
+
+- `PORT`
+- `API_KEY`
+- `CODEX_CWD`
+- `CODEX_EXECUTABLE` or `EASY_CODEX_CODEX_PATH`
+- `REPOS_DIR`
+- `AUTO_PULL_REPOS`
+- `EASYCODEX_UPDATE_CHANNEL`
+- `EASYCODEX_UPDATE_REPO`
+- `EASYCODEX_LOG_CONNECT_SECRETS`
+- `EASYCODEX_NO_TERMINAL_QR`
+- `EASY_CODEX_COMPATIBLE_API`
+- `EASY_CODEX_MOBILE_MESSAGE_TEXT_LIMIT`
+- `EASY_CODEX_MOBILE_DETAIL_TEXT_LIMIT`
+- `EASY_CODEX_MOBILE_STREAM_TEXT_LIMIT`
+- `EASY_CODEX_STREAM_BATCH_FLUSH_MS`
+- `EASY_CODEX_STREAM_BATCH_MAX_CHARS`
 
 ## When Changing Agent Behavior
 
 Update this document when changing:
 
-- WebSocket action names or payloads
+- WebSocket action names, payloads, or stream events
 - Codex JSON-RPC request shapes
-- agent status values
+- agent status values or message type normalization
+- workspace safety rules
+- attachment limits or turn input mapping
 - persistence behavior
 - notification behavior
 - runtime capability detection
+- desktop relay startup/update behavior that affects the relay contract

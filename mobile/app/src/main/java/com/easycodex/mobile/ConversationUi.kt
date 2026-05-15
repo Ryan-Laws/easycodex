@@ -4,15 +4,12 @@ import android.content.ClipData
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
+import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -47,6 +44,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
@@ -72,6 +70,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -81,6 +80,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -129,7 +130,7 @@ private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMet
             itemSpacing = 6.dp,
             bubblePadding = 10.dp,
             bubbleShape = 14.dp,
-            userBubbleWidth = 0.98f,
+            userBubbleWidth = 0.86f,
             assistantBubbleWidth = 0.98f,
             detailBubbleWidth = 0.98f,
         )
@@ -139,7 +140,7 @@ private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMet
             itemSpacing = 14.dp,
             bubblePadding = 16.dp,
             bubbleShape = 24.dp,
-            userBubbleWidth = 0.92f,
+            userBubbleWidth = 0.78f,
             assistantBubbleWidth = 0.96f,
             detailBubbleWidth = 0.92f,
         )
@@ -149,7 +150,7 @@ private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMet
             itemSpacing = 10.dp,
             bubblePadding = 14.dp,
             bubbleShape = 20.dp,
-            userBubbleWidth = 0.96f,
+            userBubbleWidth = 0.82f,
             assistantBubbleWidth = 0.98f,
             detailBubbleWidth = 0.96f,
         )
@@ -189,7 +190,7 @@ fun Conversation(
     val bottomIndex = conversationItems.size
     val bottomAnchorCount = conversationItems.size + 1
     val lastMessage = visibleMessages.lastOrNull()
-    val outputRevision = "${agent.updatedAt}:${visibleMessages.size}:${lastMessage?.stableKey().orEmpty()}:${lastMessage?.text?.length ?: 0}:${lastMessage?.text?.hashCode() ?: 0}:${lastMessage?.streaming == true}"
+    val outputRevision = "${visibleMessages.size}:${lastMessage?.stableKey().orEmpty()}:${lastMessage?.text?.length ?: 0}:${lastMessage?.streaming == true}"
     val isAtBottom by remember(listState, bottomAnchorCount) {
         derivedStateOf {
             !listState.canScrollForward
@@ -640,11 +641,15 @@ private fun LightweightDetailHeader(
     onToggleExpanded: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val hapticView = LocalView.current
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable { onToggleExpanded() }
+            .clickable(role = Role.Button) {
+                hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                onToggleExpanded()
+            }
             .padding(horizontal = 2.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -774,14 +779,8 @@ private fun DetailGroupBubble(
                 )
                 AnimatedVisibility(
                     visible = expanded,
-                    enter = expandVertically(
-                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                        expandFrom = Alignment.Top,
-                    ) + fadeIn(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
-                    exit = shrinkVertically(
-                        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-                        shrinkTowards = Alignment.Top,
-                    ) + fadeOut(animationSpec = tween(durationMillis = 100, easing = FastOutSlowInEasing)),
+                    enter = easyCodexExpandVertically(expandFrom = Alignment.Top),
+                    exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
                 ) {
                     Column(
                         modifier = Modifier
@@ -809,7 +808,7 @@ private fun MessageBubble(
     onOpenPlan: () -> Unit = {},
     onOpenDiffReview: () -> Unit = {},
 ) {
-    val isUser = message.role == "user"
+    val isUser = message.role == "user" || message.type == "user"
     val isPlainAssistant = !isUser && message.type != "plan" && !message.isDetailMessage()
     val isDetail = message.isDetailMessage()
     if (isDetail) {
@@ -849,7 +848,12 @@ private fun MessageBubble(
         Box(Modifier.fillMaxWidth(bubbleWidth)) {
             Surface(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .then(
+                        when {
+                            isUser -> Modifier.align(Alignment.CenterEnd)
+                            else -> Modifier.fillMaxWidth()
+                        },
+                    )
                     .then(
                         if (message.text.isBlank()) {
                             Modifier
@@ -878,11 +882,13 @@ private fun MessageBubble(
                     }
                     when {
                         message.type == "plan" -> PlanMessageCard(message, onOpenPlan)
+                        message.type == "thinking" && message.streaming -> ThinkingMessageContent(message.text)
                         else -> MarkdownMessageContent(
                             text = message.text.ifBlank { "..." },
                             previewLongContent = isPlainAssistant,
                             relayUrl = relayUrl,
                             apiKey = apiKey,
+                            modifier = if (isUser) Modifier else Modifier.fillMaxWidth(),
                         )
                     }
                 }
@@ -909,6 +915,32 @@ private fun MessageBubble(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ThinkingMessageContent(text: String) {
+    val label = text.trim().trimEnd('。', '.', '…').ifBlank { "思考中" }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            label,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        CircularProgressIndicator(
+            modifier = Modifier.size(16.dp),
+            strokeWidth = 2.dp,
+            strokeCap = StrokeCap.Round,
+            color = MaterialTheme.colorScheme.primary,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+        )
     }
 }
 
@@ -1042,14 +1074,8 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
         )
         AnimatedVisibility(
             visible = expanded,
-            enter = expandVertically(
-                animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
-                expandFrom = Alignment.Top,
-            ) + fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
-            exit = shrinkVertically(
-                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                shrinkTowards = Alignment.Top,
-            ) + fadeOut(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
+            enter = easyCodexExpandVertically(expandFrom = Alignment.Top),
+            exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
         ) {
             Column(
                 modifier = Modifier.fillMaxWidth(),
@@ -1113,6 +1139,7 @@ private fun FileChangeCard(
     onOpenDiffReview: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
+    val hapticView = LocalView.current
     val entries = detail.fileEntries.ifEmpty { detail.files.map { FileChangeEntry(it) } }
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -1122,7 +1149,10 @@ private fun FileChangeCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
-                .clickable { onToggleExpanded() }
+                .clickable(role = Role.Button) {
+                    hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    onToggleExpanded()
+                }
                 .padding(horizontal = 2.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1151,14 +1181,8 @@ private fun FileChangeCard(
         }
         AnimatedVisibility(
             visible = expanded,
-            enter = expandVertically(
-                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                expandFrom = Alignment.Top,
-            ) + fadeIn(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
-            exit = shrinkVertically(
-                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-                shrinkTowards = Alignment.Top,
-            ) + fadeOut(animationSpec = tween(durationMillis = 100, easing = FastOutSlowInEasing)),
+            enter = easyCodexExpandVertically(expandFrom = Alignment.Top),
+            exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
         ) {
             Column(
                 modifier = Modifier
@@ -1251,6 +1275,7 @@ fun MarkdownMessageContent(
     previewLongContent: Boolean = false,
     relayUrl: String = "",
     apiKey: String = "",
+    modifier: Modifier = Modifier.fillMaxWidth(),
 ) {
     var expanded by remember(text) { mutableStateOf(false) }
     val isLong = previewLongContent && textNeedsPreview(text)
@@ -1259,7 +1284,7 @@ fun MarkdownMessageContent(
     }
     val blocks = remember(visibleText) { markdownBlocks(visibleText) }
     Column(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         blocks.forEach { block ->

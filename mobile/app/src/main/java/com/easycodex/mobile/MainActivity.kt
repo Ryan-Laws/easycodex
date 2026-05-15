@@ -19,7 +19,9 @@ import android.os.Looper
 import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import android.util.Base64
+import android.view.HapticFeedbackConstants
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -30,17 +32,13 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.animateColorAsState
@@ -107,7 +105,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -149,15 +147,20 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -192,8 +195,10 @@ private const val EMOJI_PAGE_SIZE = EMOJI_COLUMNS * EMOJI_ROWS
 const val AGENTS_REFRESH_DEBOUNCE_MS = 500L
 const val BACKGROUND_AGENTS_REFRESH_DEBOUNCE_MS = 5_000L
 const val AGENT_ACTIVITY_UPDATE_THROTTLE_MS = 500L
-const val STREAM_DELTA_FLUSH_MS = 500L
+const val STREAM_DELTA_FLUSH_MS = 160L
 const val BACKGROUND_STREAM_DELTA_FLUSH_MS = 1_500L
+const val CLI_OUTPUT_FLUSH_MS = 160L
+const val RELAY_STATE_DETAIL_REFRESH_DEBOUNCE_MS = 250L
 const val CODEX_THREAD_DETAIL_PREFETCH_LIMIT = 10
 const val CODEX_THREAD_DETAIL_MAX_RETRIES = 3
 const val CODEX_THREAD_DETAIL_RETRY_BASE_MS = 1_200L
@@ -344,6 +349,14 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
     var showCliMode by remember { mutableStateOf(false) }
     var planModeEnabled by remember { mutableStateOf(false) }
     var consumedInitialAgentId by remember(initialAgentId) { mutableStateOf(false) }
+    var drawerAgentsSnapshot by remember { mutableStateOf<List<Agent>?>(null) }
+    var drawerAlertsSnapshot by remember { mutableStateOf<List<AgentAlert>?>(null) }
+    var drawerProjectOptionsSnapshot by remember { mutableStateOf<List<String>?>(null) }
+    fun captureDrawerSnapshot() {
+        drawerAgentsSnapshot = controller.agents.toList()
+        drawerAlertsSnapshot = controller.alerts.toList()
+        drawerProjectOptionsSnapshot = controller.projectOptions()
+    }
     val settingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         controller.reloadSettings()
     }
@@ -389,9 +402,9 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
 
     LaunchedEffect(Unit) {
         withFrameNanos { }
-        delay(900)
+        delay(360)
         appContentReady = true
-        delay(520)
+        delay(EasyCodexMotion.Exit.toLong())
         startupMaskVisible = false
     }
 
@@ -438,6 +451,22 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
         }
     }
 
+    BackHandler(enabled = showCliMode) {
+        showCliMode = false
+    }
+
+    LaunchedEffect(drawerState.currentValue, drawerState.targetValue) {
+        val drawerVisible = drawerState.currentValue != DrawerValue.Closed || drawerState.targetValue != DrawerValue.Closed
+        if (drawerVisible) {
+            if (drawerAgentsSnapshot == null) captureDrawerSnapshot()
+        } else {
+            delay(120)
+            drawerAgentsSnapshot = null
+            drawerAlertsSnapshot = null
+            drawerProjectOptionsSnapshot = null
+        }
+    }
+
     EasyCodexTheme(
         context = context,
         themeMode = controller.themeMode,
@@ -451,10 +480,13 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                     drawerState = drawerState,
                     gesturesEnabled = true,
                     drawerContent = {
+                        val drawerAgents = drawerAgentsSnapshot ?: controller.agents.toList()
+                        val drawerAlerts = drawerAlertsSnapshot ?: controller.alerts.toList()
+                        val drawerProjectOptions = drawerProjectOptionsSnapshot ?: controller.projectOptions()
                         AgentDrawer(
-                            agents = controller.agents,
-                            alerts = controller.alerts,
-                            projectOptions = controller.projectOptions(),
+                            agents = drawerAgents,
+                            alerts = drawerAlerts,
+                            projectOptions = drawerProjectOptions,
                             activeAgentId = controller.activeAgentId,
                             onHome = {
                                 controller.openHome()
@@ -505,7 +537,10 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.back)
                                         }
                                     } else {
-                                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                        IconButton(onClick = {
+                                            captureDrawerSnapshot()
+                                            scope.launch { drawerState.open() }
+                                        }) {
                                             Icon(Icons.Default.Menu, contentDescription = strings.agentsContentDescription)
                                         }
                                     }
@@ -535,7 +570,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                 val composerAgent = draftAgent ?: activeAgent
                                 val projectOptions = controller.projectOptions()
                                 MessageComposer(
-                                    text = controller.inputText,
+                                    textValue = controller.inputTextValue,
                                     attachments = controller.attachmentDrafts,
                                     queuedFollowUps = composerAgent?.queuedFollowUps.orEmpty(),
                                     enabled = controller.connectionStatus == "connected" && composerAgent != null,
@@ -547,14 +582,15 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                     serviceTierOptions = controller.serviceTierOptionsFor(composerAgent),
                                     runtimeCapabilities = controller.runtimeCapabilities,
                                     planModeEnabled = planModeEnabled,
-                                    onTextChange = { controller.inputText = it },
+                                    onTextChange = { controller.inputTextValue = it },
                                     onPlanModeChange = { planModeEnabled = it },
                                     onGuideQueuedFollowUp = { queued ->
-                                        controller.inputText = if (controller.inputText.isBlank()) {
+                                        val nextText = if (controller.inputText.isBlank()) {
                                             queued.text
                                         } else {
                                             "${controller.inputText.trimEnd()}\n${queued.text}"
                                         }
+                                        controller.inputText = nextText
                                     },
                                     onRemoveAttachment = { controller.removeAttachmentDraft(it) },
                                     onProjectChange = { controller.updateDraftProject(it) },
@@ -587,6 +623,13 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                     state = controller.cliConsole,
                                     connected = controller.connectionStatus == "connected",
                                     onCwdChange = { controller.updateCliCwd(it) },
+                                    onModelChange = { controller.updateCliModel(it) },
+                                    onReasoningEffortChange = { controller.updateCliReasoningEffort(it) },
+                                    onSandboxModeChange = { controller.updateCliSandboxMode(it) },
+                                    onSkipGitRepoCheckChange = { controller.updateCliSkipGitRepoCheck(it) },
+                                    projectOptions = controller.projectOptions(),
+                                    modelOptions = controller.availableModelOptions(controller.activeAgent),
+                                    onBrowseDirectories = { path, callback -> controller.browseDirectories(path, callback) },
                                     onInputChange = { controller.updateCliInput(it) },
                                     onSend = { controller.sendCliCommand() },
                                     onStop = { controller.stopCliCommand() },
@@ -595,23 +638,11 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                 )
                             } else if (draftAgent != null) {
                                 val projectOptions = controller.projectOptions()
-                                val recentAlertKinds = controller.alerts
-                                    .distinctBy { it.agentId }
-                                    .associate { it.agentId to it.kind }
                                 HomeTaskScreen(
                                     draftAgent = draftAgent,
                                     projectOptions = projectOptions,
-                                    reasoningOptions = controller.reasoningOptionsFor(draftAgent),
-                                    serviceTierOptions = controller.serviceTierOptionsFor(draftAgent),
-                                    recentAgents = controller.agents,
-                                    recentAlertKinds = recentAlertKinds,
-                                    runtimeCapabilities = controller.runtimeCapabilities,
                                     canChangeProject = !controller.draftProjectLocked,
                                     onProjectChange = { controller.updateDraftProject(it) },
-                                    onReasoningEffortChange = { controller.updateActiveReasoningEffort(it) },
-                                    onServiceTierChange = { controller.updateActiveServiceTier(it) },
-                                    onOpenAgent = { controller.selectAgent(it) },
-                                    onDeleteAgent = { controller.deleteAgent(it) },
                                     onBrowseDirectories = { path, callback -> controller.browseDirectories(path, callback) },
                                 )
                             } else {
@@ -633,8 +664,8 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
             }
             AnimatedVisibility(
                 visible = startupMaskVisible,
-                enter = fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
-                exit = fadeOut(animationSpec = tween(durationMillis = 460, easing = FastOutSlowInEasing)),
+                enter = fadeIn(animationSpec = EasyCodexMotion.fastTween()),
+                exit = fadeOut(animationSpec = EasyCodexMotion.exitTween()),
             ) {
                 StartupMask()
             }
@@ -1178,7 +1209,7 @@ private fun UsageGuideStep(
 
 @Composable
 fun MessageComposer(
-    text: String,
+    textValue: TextFieldValue,
     attachments: List<AttachmentDraft>,
     queuedFollowUps: List<QueuedFollowUp>,
     enabled: Boolean,
@@ -1190,7 +1221,7 @@ fun MessageComposer(
     serviceTierOptions: List<String>,
     runtimeCapabilities: RuntimeCapabilities,
     planModeEnabled: Boolean,
-    onTextChange: (String) -> Unit,
+    onTextChange: (TextFieldValue) -> Unit,
     onPlanModeChange: (Boolean) -> Unit,
     onGuideQueuedFollowUp: (QueuedFollowUp) -> Unit,
     onRemoveAttachment: (String) -> Unit,
@@ -1207,6 +1238,7 @@ fun MessageComposer(
     onSend: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
+    val text = textValue.text
     var actionsExpanded by remember { mutableStateOf(false) }
     var quickRepliesExpanded by remember { mutableStateOf(false) }
     var runtimePicker by remember { mutableStateOf<RuntimePicker?>(null) }
@@ -1214,6 +1246,10 @@ fun MessageComposer(
     var sendAnimationKey by remember { mutableStateOf(0) }
     val sendButtonScale = remember { Animatable(1f) }
     val sendIconTravel = remember { Animatable(0f) }
+    val hapticView = LocalView.current
+    fun performTapHaptic() {
+        hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
     val quickReplyPrompts = remember {
         listOf(
             "先调查，再给修复计划",
@@ -1236,35 +1272,28 @@ fun MessageComposer(
         ?: DEFAULT_SERVICE_TIER
     val selectedProject = agent?.cwd.orEmpty()
     val selectedProjectLabel = cleanNullablePath(selectedProject)?.let { projectNameFromCwd(it) } ?: strings.selectProject
-
     LaunchedEffect(sendAnimationKey) {
         if (sendAnimationKey == 0) return@LaunchedEffect
         launch {
             sendButtonScale.snapTo(0.88f)
             sendButtonScale.animateTo(
-                targetValue = 1.08f,
-                animationSpec = tween(durationMillis = 110, easing = FastOutSlowInEasing),
+                targetValue = 1.03f,
+                animationSpec = EasyCodexMotion.fastTween(),
             )
             sendButtonScale.animateTo(
                 targetValue = 1f,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMedium,
-                ),
+                animationSpec = EasyCodexMotion.PressSpring,
             )
         }
         launch {
             sendIconTravel.snapTo(0f)
             sendIconTravel.animateTo(
-                targetValue = 18f,
-                animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing),
+                targetValue = 14f,
+                animationSpec = EasyCodexMotion.fastTween(),
             )
             sendIconTravel.animateTo(
                 targetValue = 0f,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioNoBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
+                animationSpec = EasyCodexMotion.PressSpring,
             )
         }
     }
@@ -1284,18 +1313,12 @@ fun MessageComposer(
             )
             AnimatedVisibility(
                 visible = attachments.isNotEmpty(),
-                enter = expandVertically(
-                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                    expandFrom = Alignment.Top,
-                ) + fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
-                exit = shrinkVertically(
-                    animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-                    shrinkTowards = Alignment.Top,
-                ) + fadeOut(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
+                enter = easyCodexExpandVertically(expandFrom = Alignment.Top),
+                exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
             ) {
                 Column(
                     modifier = Modifier.animateContentSize(
-                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        animationSpec = EasyCodexMotion.normalTween(),
                     ),
                 ) {
                     Spacer(Modifier.height(6.dp))
@@ -1317,10 +1340,10 @@ fun MessageComposer(
             Spacer(Modifier.height(6.dp))
             AnimatedVisibility(
                 visible = actionsExpanded,
-                enter = fadeIn(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)) +
-                    slideInVertically(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)) { it / 3 },
-                exit = fadeOut(animationSpec = tween(durationMillis = 110, easing = FastOutSlowInEasing)) +
-                    slideOutVertically(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)) { it / 4 },
+                enter = fadeIn(animationSpec = EasyCodexMotion.fastTween()) +
+                    slideInVertically(animationSpec = EasyCodexMotion.normalTween()) { it / 3 },
+                exit = fadeOut(animationSpec = EasyCodexMotion.fastTween()) +
+                    slideOutVertically(animationSpec = EasyCodexMotion.exitTween()) { it / 4 },
             ) {
                 ComposerFloatingActions(
                     enabled = enabled,
@@ -1350,7 +1373,8 @@ fun MessageComposer(
                     onPlanModeChange = onPlanModeChange,
                     onQuickRepliesToggle = { quickRepliesExpanded = !quickRepliesExpanded },
                     onQuickReply = { prompt ->
-                        onTextChange(if (text.isBlank()) prompt else "${text.trimEnd()}\n$prompt")
+                        val nextText = if (text.isBlank()) prompt else "${text.trimEnd()}\n$prompt"
+                        onTextChange(TextFieldValue(text = nextText, selection = TextRange(nextText.length)))
                         quickRepliesExpanded = false
                         actionsExpanded = false
                     },
@@ -1384,6 +1408,7 @@ fun MessageComposer(
                         AnimatedComposerIconButton(
                             selected = actionsExpanded,
                             onClick = {
+                                performTapHaptic()
                                 actionsExpanded = !actionsExpanded
                                 if (!actionsExpanded) quickRepliesExpanded = false
                             },
@@ -1397,7 +1422,7 @@ fun MessageComposer(
                             )
                         }
                         OutlinedTextField(
-                            value = text,
+                            value = textValue,
                             onValueChange = onTextChange,
                             enabled = enabled,
                             modifier = Modifier.weight(1f),
@@ -1419,23 +1444,23 @@ fun MessageComposer(
                             maxLines = 5,
                             shape = RoundedCornerShape(24.dp),
                         )
-                        FilledTonalButton(
+                        FilledTonalIconButton(
                             onClick = {
                                 actionsExpanded = false
                                 quickRepliesExpanded = false
                                 if (showInterruptButton) {
+                                    performTapHaptic()
                                     onInterrupt()
                                 } else {
+                                    performTapHaptic()
                                     sendAnimationKey += 1
                                     onSend()
                                 }
                             },
                             enabled = enabled && (showInterruptButton || text.isNotBlank() || attachments.isNotEmpty()),
-                            shape = CircleShape,
                             modifier = Modifier
                                 .size(52.dp)
                                 .scale(sendButtonScale.value),
-                            contentPadding = PaddingValues(0.dp),
                         ) {
                             if (showInterruptButton) {
                                 Icon(Icons.Default.Stop, contentDescription = strings.interrupt)
@@ -1464,6 +1489,7 @@ fun MessageComposer(
             pinnedPaths = projectOptions,
             onBrowseDirectories = onBrowseDirectories,
             onSelect = {
+                performTapHaptic()
                 onProjectChange(it)
                 showProjectPicker = false
                 actionsExpanded = false
@@ -1613,14 +1639,8 @@ private fun ComposerFloatingActions(
         }
         AnimatedVisibility(
             visible = quickRepliesExpanded,
-            enter = expandVertically(
-                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-                expandFrom = Alignment.Top,
-            ) + fadeIn(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
-            exit = shrinkVertically(
-                animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing),
-                shrinkTowards = Alignment.Top,
-            ) + fadeOut(animationSpec = tween(durationMillis = 90, easing = FastOutSlowInEasing)),
+            enter = easyCodexExpandVertically(expandFrom = Alignment.Top),
+            exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
         ) {
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1670,7 +1690,7 @@ private fun ComposerActionBubble(
         shadowElevation = 4.dp,
         modifier = Modifier
             .clip(RoundedCornerShape(999.dp))
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(start = 10.dp, top = 8.dp, end = 13.dp, bottom = 8.dp),
@@ -1746,14 +1766,8 @@ private fun QueuedFollowUpsPanel(
 
     AnimatedVisibility(
         visible = items.isNotEmpty(),
-        enter = expandVertically(
-            animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-            expandFrom = Alignment.Bottom,
-        ) + fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
-        exit = shrinkVertically(
-            animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-            shrinkTowards = Alignment.Bottom,
-        ) + fadeOut(animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing)),
+        enter = easyCodexExpandVertically(expandFrom = Alignment.Bottom),
+        exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Bottom),
     ) {
         Surface(
             color = MaterialTheme.colorScheme.surface,
@@ -1799,7 +1813,7 @@ private fun QueuedFollowUpRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onOpen)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onOpen)
             .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2295,7 +2309,7 @@ private fun AnimatedComposerIconButton(
 ) {
     val containerColor by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-        animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing),
+        animationSpec = EasyCodexMotion.fastTween(),
         label = "composer icon container color",
     )
     val contentColor by animateColorAsState(
@@ -2304,20 +2318,17 @@ private fun AnimatedComposerIconButton(
         } else {
             MaterialTheme.colorScheme.onSurfaceVariant
         },
-        animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing),
+        animationSpec = EasyCodexMotion.fastTween(),
         label = "composer icon content color",
     )
     val iconScale by animateFloatAsState(
         targetValue = if (selected) 1.12f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium,
-        ),
+        animationSpec = EasyCodexMotion.SelectionSpring,
         label = "composer icon scale",
     )
     val iconRotation by animateFloatAsState(
         targetValue = if (selected) rotationWhenSelected else 0f,
-        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+        animationSpec = EasyCodexMotion.normalTween(),
         label = "composer icon rotation",
     )
 
@@ -2382,7 +2393,7 @@ private fun ComposerToolItem(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f)),
         modifier = modifier
             .clip(RoundedCornerShape(18.dp))
-            .clickable(enabled = enabled, onClick = onClick)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -2494,21 +2505,18 @@ private fun EmojiCell(
             emojiScale.snapTo(0.78f)
             emojiScale.animateTo(
                 targetValue = 1.18f,
-                animationSpec = tween(durationMillis = 90, easing = FastOutSlowInEasing),
+                animationSpec = EasyCodexMotion.fastTween(),
             )
             emojiScale.animateTo(
                 targetValue = 1f,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMedium,
-                ),
+                animationSpec = EasyCodexMotion.SelectionSpring,
             )
         }
         launch {
             highlightAlpha.snapTo(0.58f)
             highlightAlpha.animateTo(
                 targetValue = 0f,
-                animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                animationSpec = EasyCodexMotion.spatialTween(),
             )
         }
     }
@@ -2517,7 +2525,7 @@ private fun EmojiCell(
         modifier = modifier
             .height(34.dp)
             .clip(CircleShape)
-            .clickable(enabled = enabled && item != null) {
+            .clickable(enabled = enabled && item != null, role = Role.Button) {
                 item?.let {
                     tapKey += 1
                     onInsertEmoji(it)

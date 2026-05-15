@@ -1,14 +1,9 @@
 package com.easycodex.mobile
 
+import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -36,6 +31,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
@@ -63,6 +59,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -120,7 +118,12 @@ fun AgentDrawer(
     onDeleteAgent: (String) -> Unit,
 ) {
     val strings = LocalAppStrings.current
+    val hapticView = LocalView.current
+    fun performTapHaptic() {
+        hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
     var query by remember { mutableStateOf("") }
+    var searchExpanded by remember { mutableStateOf(false) }
     var debouncedQuery by remember { mutableStateOf("") }
     LaunchedEffect(query) {
         delay(180)
@@ -206,10 +209,44 @@ fun AgentDrawer(
                 contentDescription = "EasyCodex",
             )
             Spacer(Modifier.width(12.dp))
-            Column {
+            Column(Modifier.weight(1f)) {
                 Text("EasyCodex", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(strings.easyCodexAgents, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            IconButton(
+                onClick = {
+                    performTapHaptic()
+                    searchExpanded = !searchExpanded
+                    if (!searchExpanded) query = ""
+                },
+                modifier = Modifier.size(40.dp),
+            ) {
+                Icon(
+                    if (searchExpanded) Icons.Default.Close else Icons.Default.Search,
+                    contentDescription = strings.searchTasksOrProjects,
+                    tint = if (searchExpanded || query.isNotBlank()) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
+        AnimatedVisibility(
+            visible = searchExpanded,
+            enter = easyCodexExpandVertically(expandFrom = Alignment.Top),
+            exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
+        ) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                placeholder = { Text(strings.searchTasksOrProjects) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 14.dp, end = 14.dp, bottom = 6.dp),
+            )
         }
         Surface(
             color = if (activeAgentId == null) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent,
@@ -218,7 +255,10 @@ fun AgentDrawer(
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 6.dp)
                 .clip(RoundedCornerShape(18.dp))
-                .clickable(onClick = onHome),
+                .clickable(role = Role.Button) {
+                    performTapHaptic()
+                    onHome()
+                },
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -238,16 +278,6 @@ fun AgentDrawer(
                 )
             }
         }
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            singleLine = true,
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-            placeholder = { Text(strings.searchTasksOrProjects) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 6.dp),
-        )
         if (agents.isEmpty() && projectPaths.isEmpty()) {
             Text(
                 strings.noAgents,
@@ -341,25 +371,32 @@ fun AgentDrawer(
                 item("project_agents_$projectPath") {
                     AnimatedVisibility(
                         visible = expanded,
-                        enter = expandVertically(
-                            animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
-                            expandFrom = Alignment.Top,
-                        ) + fadeIn(animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)),
-                        exit = shrinkVertically(
-                            animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                            shrinkTowards = Alignment.Top,
-                        ) + fadeOut(animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing)),
+                        enter = easyCodexExpandVertically(expandFrom = Alignment.Top),
+                        exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
                     ) {
                         Column(
                             modifier = Modifier.animateContentSize(
-                                animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
+                                animationSpec = EasyCodexMotion.normalTween(),
                             ),
                         ) {
+                            if (projectAgents.isEmpty()) {
+                                Text(
+                                    strings.noTasks,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 46.dp, end = 16.dp, top = 6.dp, bottom = 8.dp),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                             projectAgents.forEach { agent ->
                                 DrawerAgentProjectRow(
                                     agent = agent,
                                     selected = agent.id == activeAgentId,
-                                    onClick = { onSelect(agent.id) },
+                                    onClick = {
+                                        performTapHaptic()
+                                        onSelect(agent.id)
+                                    },
                                     onDelete = { onDeleteAgent(agent.id) },
                                 )
                             }
@@ -390,7 +427,7 @@ private fun DrawerAgentProjectRow(
             .fillMaxWidth()
             .padding(start = 28.dp, end = 12.dp, top = 2.dp, bottom = 2.dp)
             .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick),
+            .clickable(role = Role.Button, onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -456,13 +493,13 @@ fun ProjectHeader(
     val strings = LocalAppStrings.current
     val arrowRotation by animateFloatAsState(
         targetValue = if (expanded) 180f else 0f,
-        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        animationSpec = EasyCodexMotion.normalTween(),
         label = "project header arrow rotation",
     )
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .animateContentSize(animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing))
+            .animateContentSize(animationSpec = EasyCodexMotion.normalTween())
             .padding(start = 16.dp, end = 12.dp, top = 8.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -534,7 +571,7 @@ fun AgentProjectRow(
             .fillMaxWidth()
             .padding(start = 28.dp, end = 12.dp, top = 2.dp, bottom = 2.dp)
             .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick),
+            .clickable(role = Role.Button, onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -648,17 +685,8 @@ private fun AgentTaskActions(
 fun HomeTaskScreen(
     draftAgent: Agent,
     projectOptions: List<String>,
-    reasoningOptions: List<String>,
-    serviceTierOptions: List<String>,
-    recentAgents: List<Agent>,
-    recentAlertKinds: Map<String, AgentAlertKind>,
-    runtimeCapabilities: RuntimeCapabilities,
     canChangeProject: Boolean,
     onProjectChange: (String) -> Unit,
-    onReasoningEffortChange: (String) -> Unit,
-    onServiceTierChange: (String) -> Unit,
-    onOpenAgent: (String) -> Unit,
-    onDeleteAgent: (String) -> Unit,
     onBrowseDirectories: (String?, (DirectoryListing?, String?) -> Unit) -> Unit,
 ) {
     val strings = LocalAppStrings.current
@@ -691,7 +719,7 @@ fun HomeTaskScreen(
                 )
             }
         }
-        if (canChangeProject) item {
+        item {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -706,7 +734,13 @@ fun HomeTaskScreen(
                     modifier = Modifier
                         .fillMaxWidth(0.88f)
                         .clip(RoundedCornerShape(18.dp))
-                        .clickable { showProjectPicker = true },
+                        .then(
+                            if (canChangeProject) {
+                                Modifier.clickable(role = Role.Button) { showProjectPicker = true }
+                            } else {
+                                Modifier
+                            },
+                        ),
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -739,41 +773,6 @@ fun HomeTaskScreen(
                 }
             }
         }
-        val recent = recentAgents.sortedByDescending { it.updatedAt }.take(3)
-        if (recent.isNotEmpty()) {
-            item {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(18.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerLow,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
-                        modifier = Modifier.fillMaxWidth(0.88f),
-                    ) {
-                        Column(modifier = Modifier.padding(vertical = 6.dp)) {
-                            Text(
-                                strings.recentTasks,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            recent.forEach { agent ->
-                                CompactRecentTaskRow(
-                                    agent = agent,
-                                    alertKind = recentAlertKinds[agent.id],
-                                    onClick = { onOpenAgent(agent.id) },
-                                    onDelete = { onDeleteAgent(agent.id) },
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     if (showProjectPicker && canChangeProject) {
@@ -787,70 +786,6 @@ fun HomeTaskScreen(
             },
             onDismiss = { showProjectPicker = false },
         )
-    }
-}
-
-@Composable
-private fun CompactRecentTaskRow(
-    agent: Agent,
-    alertKind: AgentAlertKind?,
-    onClick: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    val strings = LocalAppStrings.current
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
-            .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Surface(
-            shape = CircleShape,
-            color = when {
-                agent.isBusy() -> MaterialTheme.colorScheme.primary
-                agent.status.equals("error", ignoreCase = true) -> MaterialTheme.colorScheme.error
-                alertKind != null -> agentAlertIndicatorColor(alertKind)
-                else -> MaterialTheme.colorScheme.outlineVariant
-            },
-            modifier = Modifier.size(7.dp),
-        ) {}
-        Spacer(Modifier.width(9.dp))
-        Text(
-            agent.name,
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.width(8.dp))
-        if (agent.isBusy()) {
-            TaskBusyIndicator()
-        } else {
-            Text(
-                relativeTime(agent.updatedAt, strings),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        AgentTaskActions(
-            isBusy = agent.isBusy(),
-            onDelete = onDelete,
-        )
-    }
-}
-
-@Composable
-private fun agentAlertIndicatorColor(kind: AgentAlertKind): Color {
-    return when (kind) {
-        AgentAlertKind.Completed -> MaterialTheme.colorScheme.primary
-        AgentAlertKind.Question,
-        AgentAlertKind.Confirmation -> MaterialTheme.colorScheme.tertiary
-        AgentAlertKind.Error -> MaterialTheme.colorScheme.error
     }
 }
 
@@ -879,8 +814,13 @@ fun DirectoryPickerDialog(
     onDismiss: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
+    val hapticView = LocalView.current
+    fun performTapHaptic() {
+        hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
     var listing by remember { mutableStateOf<DirectoryListing?>(null) }
     var currentPath by remember(initialPath) { mutableStateOf(initialPath) }
+    var customPath by remember(initialPath) { mutableStateOf(initialPath) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -912,22 +852,49 @@ fun DirectoryPickerDialog(
         title = { Text(strings.chooseProjectDirectory) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "现有项目",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     pinned.take(4).forEach { path ->
                         AssistChip(
-                            onClick = { load(path) },
+                            onClick = {
+                                performTapHaptic()
+                                load(path)
+                            },
                             label = { Text(projectNameFromCwd(path), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         )
                     }
                     listing?.roots.orEmpty().forEach { root ->
                         AssistChip(
-                            onClick = { load(root.path) },
+                            onClick = {
+                                performTapHaptic()
+                                load(root.path)
+                            },
                             label = { Text(root.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         )
                     }
+                }
+                OutlinedTextField(
+                    value = customPath,
+                    onValueChange = { customPath = it },
+                    singleLine = true,
+                    label = { Text("自定义项目路径") },
+                    modifier = androidx.compose.ui.Modifier.fillMaxWidth(),
+                )
+                TextButton(
+                    onClick = {
+                        performTapHaptic()
+                        load(customPath)
+                    },
+                    enabled = customPath.isNotBlank() && !loading,
+                ) {
+                    Text("打开自定义项目")
                 }
                 Text(
                     currentPath,
@@ -947,7 +914,10 @@ fun DirectoryPickerDialog(
                         worktrees.forEach { worktree ->
                             WorktreePickerRow(
                                 worktree = worktree,
-                                onClick = { load(worktree.path) },
+                                onClick = {
+                                    performTapHaptic()
+                                    load(worktree.path)
+                                },
                             )
                         }
                     }
@@ -977,7 +947,10 @@ fun DirectoryPickerDialog(
                             DirectoryPickerRow(
                                 name = "..",
                                 path = parent,
-                                onClick = { load(parent) },
+                                onClick = {
+                                    performTapHaptic()
+                                    load(parent)
+                                },
                             )
                         }
                     }
@@ -985,7 +958,10 @@ fun DirectoryPickerDialog(
                         DirectoryPickerRow(
                             name = entry.name,
                             path = entry.path,
-                            onClick = { load(entry.path) },
+                            onClick = {
+                                performTapHaptic()
+                                load(entry.path)
+                            },
                         )
                     }
                 }
@@ -993,7 +969,10 @@ fun DirectoryPickerDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = { onSelect(listing?.path ?: currentPath) },
+                onClick = {
+                    performTapHaptic()
+                    onSelect(listing?.path ?: currentPath)
+                },
                 enabled = listing != null,
             ) {
                 Text(strings.useThisDirectory)
@@ -1020,7 +999,7 @@ private fun WorktreePickerRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick),
+            .clickable(role = Role.Button, onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -1068,7 +1047,7 @@ private fun DirectoryPickerRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick),
+            .clickable(role = Role.Button, onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),

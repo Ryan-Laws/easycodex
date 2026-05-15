@@ -5,11 +5,12 @@ import os from 'os';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import net from 'net';
 import { execFileSync, spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import { promises as fsPromises } from 'fs';
 import simpleGit from 'simple-git';
 import qrcode from 'qrcode-terminal';
-import { SessionOrchestrator, codexDesktopVisibleWorkspaceRoots } from './session-orchestrator';
+import { SessionOrchestrator, codexDesktopVisibleWorkspaceRoots, type MessageAttachmentInput } from './session-orchestrator';
 import { applyUpdate, checkForUpdates, type UpdateInfo } from './updater';
 import {
   registerNotificationToken,
@@ -48,16 +49,38 @@ interface StreamHistoryEntry {
   data: unknown;
 }
 
+interface PendingStreamBatch {
+  agentId: string;
+  event: string;
+  data: Record<string, unknown>;
+  textKey: 'delta' | 'chunk';
+  textLength: number;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 interface CliRun {
   id: string;
   windowId: string;
   cwd: string;
+  commandLine: string;
   process: ChildProcess;
   startedAt: number;
 }
 
+interface RelayWarning {
+  code: string;
+  message: string;
+  recommendation?: string;
+}
+
 function generateApiKey(): string {
   return crypto.randomBytes(32).toString('hex');
+}
+
+function maskSecret(value: string): string {
+  const clean = value.trim();
+  if (clean.length <= 12) return 'configured';
+  return `${clean.slice(0, 6)}...${clean.slice(-4)}`;
 }
 
 function loadOrCreateConfig(): RelayConfig {
@@ -83,7 +106,7 @@ function loadOrCreateConfig(): RelayConfig {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify({ apiKey }, null, 2), { encoding: 'utf8', mode: 0o600 });
   console.log('\n[auth] Generated relay API key for first start.');
   console.log(`[auth] Saved to ${CONFIG_PATH}`);
-  console.log(`[auth] API key: ${apiKey}\n`);
+  console.log(`[auth] API key: ${maskSecret(apiKey)}\n`);
   return { apiKey };
 }
 
@@ -126,6 +149,10 @@ function buildConnectHttpUrl(networkUrl: string, apiKey: string): string {
   return `${httpUrl}/c?k=${encodeURIComponent(apiKey)}`;
 }
 
+function shouldLogConnectSecrets(): boolean {
+  return parseBooleanEnv(process.env.EASYCODEX_LOG_CONNECT_SECRETS);
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -155,6 +182,17 @@ function codexCliInvocation(args: string[]): { command: string; args: string[]; 
     };
   }
   return { command, args, options: {} };
+}
+
+function quoteCommandArg(value: string): string {
+  if (/^[A-Za-z0-9_./:=+-]+$/.test(value)) return value;
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+function codexCliCommandLine(args: string[]): string {
+  const configured = cleanExecutablePath(process.env.CODEX_EXECUTABLE || process.env.EASY_CODEX_CODEX_PATH);
+  const executable = configured || 'codex';
+  return [quoteCommandArg(executable), ...args.map(quoteCommandArg)].join(' ');
 }
 
 function resolveWithinCwd(cwd: string, relativePath?: string): string {
@@ -295,9 +333,37 @@ function getAllowedWorkspaceRoots(): string[] {
   return uniqueResolvedPaths([
     getPrimaryWorkspaceRoot(),
     getReposRoot(),
+    ...Array.from(customWorkspaceRoots),
     ...codexDesktopVisibleWorkspaceRoots(),
     ...discoverRelayGitWorktrees(),
   ]);
+}
+
+function isDisallowedCustomWorkspaceRoot(targetPath: string): boolean {
+  const resolved = path.resolve(targetPath);
+  const parsed = path.parse(resolved);
+  if (resolved === parsed.root) return true;
+  const home = path.resolve(os.homedir());
+  if (normalizePathKey(resolved) === normalizePathKey(home)) return true;
+  const homeBoundaries = ['Desktop', 'Documents', 'Downloads'].map((name) => path.join(home, name));
+  if (homeBoundaries.some((root) => normalizePathKey(resolved) === normalizePathKey(root))) return true;
+  const disallowed = [
+    process.env.SystemRoot,
+    process.env.ProgramFiles,
+    process.env['ProgramFiles(x86)'],
+    process.env.APPDATA,
+    process.env.LOCALAPPDATA,
+  ].filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '');
+  return disallowed.some((root) => isWithinBase(root, resolved));
+}
+
+function trustCustomWorkspaceRoot(targetPath: string): string {
+  const resolved = resolveExistingDirectory(targetPath);
+  if (isDisallowedCustomWorkspaceRoot(resolved)) {
+    throw new Error('Refusing to use a system, profile, or application data directory as a project workspace.');
+  }
+  customWorkspaceRoots.add(resolved);
+  return resolved;
 }
 
 function resolveWorkspaceCwd(cwd?: string): string {
@@ -308,7 +374,7 @@ function resolveWorkspaceCwd(cwd?: string): string {
     if (!stat.isDirectory()) throw new Error(`Path is not a directory: ${requested}`);
     return requested;
   }
-  throw new Error('Path is outside the allowed EasyCodex workspace roots.');
+  throw new Error('Path is outside the allowed EasyCodex workspace roots. Use trust_workspace_root before accessing a new project directory.');
 }
 
 function resolveWithinWorkspace(cwd: string | undefined, relativePath?: string): { cwd: string; target: string } {
@@ -341,6 +407,41 @@ function parseBooleanEnv(value: string | undefined): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
 }
 
+function addRelayWarning(warning: RelayWarning): void {
+  if (relayWarnings.some((entry) => entry.code === warning.code)) return;
+  relayWarnings.push(warning);
+}
+
+function probeListen(host: string, port: number): Promise<{ ok: boolean; errorCode?: string }> {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    let settled = false;
+    const finish = (result: { ok: boolean; errorCode?: string }) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    probe.once('error', (err: NodeJS.ErrnoException) => {
+      finish({ ok: false, errorCode: err.code });
+    });
+    probe.once('listening', () => {
+      probe.close(() => finish({ ok: true }));
+    });
+    probe.listen(port, host);
+  });
+}
+
+async function detectPortWarnings(): Promise<void> {
+  const loopbackProbe = await probeListen('127.0.0.1', PORT);
+  if (!loopbackProbe.ok) {
+    addRelayWarning({
+      code: 'loopback_port_unavailable',
+      message: `127.0.0.1:${PORT} is already in use, so localhost health checks or desktop clients may reach a different process.`,
+      recommendation: `Use the printed network URL, free 127.0.0.1:${PORT}, or restart the relay with another PORT value.`,
+    });
+  }
+}
+
 function uniqueResolvedPaths(paths: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -367,7 +468,10 @@ function directoryLabel(targetPath: string): string {
 
 async function browseDirectories(targetPath?: string) {
   const allowedRoots = getAllowedWorkspaceRoots();
-  const requested = targetPath?.trim() ? resolveWorkspaceCwd(targetPath) : allowedRoots[0];
+  const requested = targetPath?.trim() ? resolveSafePath(targetPath) : allowedRoots[0];
+  if (!allowedRoots.some((root) => isWithinBase(root, requested))) {
+    throw new Error('Path is outside the allowed EasyCodex workspace roots. Use trust_workspace_root before browsing a new project directory.');
+  }
   const current = resolveExistingDirectory(requested);
   const roots = uniqueResolvedPaths(allowedRoots).map((root) => ({
     name: directoryLabel(root),
@@ -456,7 +560,20 @@ function codexCliVersion(): string {
   }
 }
 
-function startCliRun(windowId: string, cwd: string, prompt: string, model?: string, reasoningEffort?: string): CliRun {
+function cleanCliSandboxMode(value: unknown): string {
+  const clean = typeof value === 'string' ? value.trim() : '';
+  return ['read-only', 'workspace-write', 'danger-full-access'].includes(clean) ? clean : 'workspace-write';
+}
+
+function startCliRun(
+  windowId: string,
+  cwd: string,
+  prompt: string,
+  model?: string,
+  reasoningEffort?: string,
+  sandboxMode?: string,
+  skipGitRepoCheck = true,
+): CliRun {
   const safeWindowId = windowId.trim() || crypto.randomUUID();
   if (activeCliRuns.has(safeWindowId)) {
     throw new Error('This Codex CLI window is already running. Stop it or wait for it to finish.');
@@ -467,22 +584,22 @@ function startCliRun(windowId: string, cwd: string, prompt: string, model?: stri
   const runId = crypto.randomUUID();
   const cleanModel = typeof model === 'string' ? model.trim() : '';
   const cleanReasoning = typeof reasoningEffort === 'string' ? reasoningEffort.trim() : '';
+  const cleanSandbox = cleanCliSandboxMode(sandboxMode);
   const args = [
     'exec',
     '--cd',
     safeCwd,
     '--sandbox',
-    'workspace-write',
-    '--ask-for-approval',
-    'never',
-    '--skip-git-repo-check',
+    cleanSandbox,
     '--color',
     'never',
   ];
+  if (skipGitRepoCheck) args.push('--skip-git-repo-check');
   if (cleanModel) args.push('--model', cleanModel);
   if (cleanReasoning) args.push('-c', `model_reasoning_effort=${JSON.stringify(cleanReasoning)}`);
   args.push(trimmedPrompt);
   const invocation = codexCliInvocation(args);
+  const commandLine = codexCliCommandLine(args);
   const child = spawn(invocation.command, invocation.args, {
     cwd: safeCwd,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -494,6 +611,7 @@ function startCliRun(windowId: string, cwd: string, prompt: string, model?: stri
     id: runId,
     windowId: safeWindowId,
     cwd: safeCwd,
+    commandLine,
     process: child,
     startedAt: Date.now(),
   };
@@ -502,9 +620,11 @@ function startCliRun(windowId: string, cwd: string, prompt: string, model?: stri
     windowId: safeWindowId,
     runId,
     cwd: safeCwd,
-    command: 'codex exec',
+    command: commandLine,
     model: cleanModel,
     reasoningEffort: cleanReasoning,
+    sandboxMode: cleanSandbox,
+    skipGitRepoCheck,
     timestamp: run.startedAt,
   });
   child.stdout?.on('data', (chunk: Buffer) => {
@@ -570,6 +690,8 @@ const STREAM_HISTORY_LIMIT = Number(process.env.STREAM_HISTORY_LIMIT || 5000);
 const CODEX_WATCH_DEBOUNCE_MS = Number(process.env.CODEX_WATCH_DEBOUNCE_MS || 150);
 const CODEX_THREAD_POLL_INTERVAL_MS = Number(process.env.CODEX_THREAD_POLL_INTERVAL_MS || 5000);
 const MOBILE_STREAM_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_STREAM_TEXT_LIMIT || 12000);
+const STREAM_BATCH_FLUSH_MS = Number(process.env.EASY_CODEX_STREAM_BATCH_FLUSH_MS || 120);
+const STREAM_BATCH_MAX_CHARS = Number(process.env.EASY_CODEX_STREAM_BATCH_MAX_CHARS || 4000);
 const MOBILE_STREAM_TRUNCATED_NOTICE = '\n\n[EasyCodex mobile truncated this long output. Use the desktop relay/Codex session for the full text.]';
 let nextStreamSeq = 1;
 const streamHistory: StreamHistoryEntry[] = [];
@@ -580,6 +702,9 @@ let lastCodexThreadSignature: string | null = null;
 const codexWatchers: fs.FSWatcher[] = [];
 let lastUpdateCheck: UpdateInfo | null = null;
 const activeCliRuns = new Map<string, CliRun>();
+const customWorkspaceRoots = new Set<string>();
+const relayWarnings: RelayWarning[] = [];
+const pendingStreamBatches = new Map<string, PendingStreamBatch>();
 
 function getConnectedAuthenticatedCount(): number {
   let count = 0;
@@ -709,7 +834,7 @@ function rememberStreamEvent(agentId: string, event: string, data: unknown): Str
     timestamp: Date.now(),
     agentId,
     event,
-    data: sanitizeStreamData(data, event),
+    data: event.startsWith('cli/') ? data : sanitizeStreamData(data, event),
   };
   streamHistory.push(entry);
   if (streamHistory.length > STREAM_HISTORY_LIMIT) {
@@ -718,7 +843,7 @@ function rememberStreamEvent(agentId: string, event: string, data: unknown): Str
   return entry;
 }
 
-function broadcast(agentId: string, event: string, data: unknown) {
+function sendStreamEvent(agentId: string, event: string, data: unknown) {
   const entry = rememberStreamEvent(agentId, event, data);
   const message = JSON.stringify(entry);
   for (const session of clients.values()) {
@@ -727,6 +852,80 @@ function broadcast(agentId: string, event: string, data: unknown) {
       session.ws.send(message);
     }
   }
+}
+
+function streamBatchTextKey(event: string, data: unknown): 'delta' | 'chunk' | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const record = data as Record<string, unknown>;
+  if (event === 'cli/output' && typeof record.chunk === 'string') return 'chunk';
+  if (event.includes('/delta') && typeof record.delta === 'string') return 'delta';
+  return null;
+}
+
+function streamBatchKey(agentId: string, event: string, data: Record<string, unknown>, textKey: 'delta' | 'chunk'): string {
+  if (event === 'cli/output') {
+    const windowId = typeof data.windowId === 'string' ? data.windowId : '';
+    const stream = typeof data.stream === 'string' ? data.stream : '';
+    return [agentId, event, windowId, stream, textKey].join('\u0000');
+  }
+  const item = data.item && typeof data.item === 'object' && !Array.isArray(data.item)
+    ? data.item as Record<string, unknown>
+    : null;
+  const itemId = typeof data.itemId === 'string'
+    ? data.itemId
+    : typeof item?.id === 'string'
+      ? item.id
+      : '';
+  return [agentId, event, itemId, textKey].join('\u0000');
+}
+
+function flushStreamBatch(key: string) {
+  const batch = pendingStreamBatches.get(key);
+  if (!batch) return;
+  pendingStreamBatches.delete(key);
+  if (batch.timer) clearTimeout(batch.timer);
+  sendStreamEvent(batch.agentId, batch.event, batch.data);
+}
+
+function flushStreamBatches(agentId?: string) {
+  for (const [key, batch] of Array.from(pendingStreamBatches.entries())) {
+    if (!agentId || batch.agentId === agentId) flushStreamBatch(key);
+  }
+}
+
+function enqueueStreamBatch(agentId: string, event: string, data: unknown): boolean {
+  const textKey = streamBatchTextKey(event, data);
+  if (!textKey) return false;
+  const record = data as Record<string, unknown>;
+  const text = record[textKey];
+  if (typeof text !== 'string' || text.length === 0) return false;
+  const key = streamBatchKey(agentId, event, record, textKey);
+  const existing = pendingStreamBatches.get(key);
+  if (existing) {
+    existing.data[textKey] = `${existing.data[textKey] || ''}${text}`;
+    existing.data.timestamp = Date.now();
+    existing.textLength += text.length;
+    if (existing.textLength >= Math.max(1, STREAM_BATCH_MAX_CHARS)) flushStreamBatch(key);
+    return true;
+  }
+  const batch: PendingStreamBatch = {
+    agentId,
+    event,
+    data: { ...record, timestamp: Date.now() },
+    textKey,
+    textLength: text.length,
+    timer: null,
+  };
+  batch.timer = setTimeout(() => flushStreamBatch(key), Math.max(0, STREAM_BATCH_FLUSH_MS));
+  pendingStreamBatches.set(key, batch);
+  if (batch.textLength >= Math.max(1, STREAM_BATCH_MAX_CHARS)) flushStreamBatch(key);
+  return true;
+}
+
+function broadcast(agentId: string, event: string, data: unknown) {
+  if (enqueueStreamBatch(agentId, event, data)) return;
+  flushStreamBatches(agentId);
+  sendStreamEvent(agentId, event, data);
 }
 
 function broadcastCodexThreadsChanged(reason: string, detail: Record<string, unknown> = {}) {
@@ -848,6 +1047,7 @@ app.get('/health', (req, res) => {
     notificationClients: getRegisteredClientCount(),
     notificationTokens: getRegisteredTokenCount(),
     lastClientLanguage,
+    warnings: relayWarnings,
     update: lastUpdateCheck,
     runtime: manager.getRuntimeCapabilities(),
     system: {
@@ -1025,11 +1225,13 @@ wss.on('connection', (ws, req) => {
     try {
       switch (action) {
         case 'cli_start': {
-          const { windowId, cwd, model, reasoningEffort } = params as {
+          const { windowId, cwd, model, reasoningEffort, sandboxMode, skipGitRepoCheck } = params as {
             windowId?: string;
             cwd?: string;
             model?: string;
             reasoningEffort?: string;
+            sandboxMode?: string;
+            skipGitRepoCheck?: boolean;
           };
           const safeCwd = resolveWorkspaceCwd(cwd || getPrimaryWorkspaceRoot());
           const running = typeof windowId === 'string' && windowId.trim()
@@ -1041,22 +1243,35 @@ wss.on('connection', (ws, req) => {
             cwd: safeCwd,
             model: typeof model === 'string' ? model.trim() : '',
             reasoningEffort: typeof reasoningEffort === 'string' ? reasoningEffort.trim() : '',
+            sandboxMode: cleanCliSandboxMode(sandboxMode),
+            skipGitRepoCheck: skipGitRepoCheck !== false,
             version: codexCliVersion(),
             running: running != null,
             runId: running?.id || null,
+            command: running?.commandLine || null,
           });
           break;
         }
 
         case 'cli_run': {
-          const { windowId, cwd, prompt, model, reasoningEffort } = params as {
+          const { windowId, cwd, prompt, model, reasoningEffort, sandboxMode, skipGitRepoCheck } = params as {
             windowId?: string;
             cwd?: string;
             prompt?: string;
             model?: string;
             reasoningEffort?: string;
+            sandboxMode?: string;
+            skipGitRepoCheck?: boolean;
           };
-          const run = startCliRun(windowId || '', cwd || getPrimaryWorkspaceRoot(), prompt || '', model, reasoningEffort);
+          const run = startCliRun(
+            windowId || '',
+            cwd || getPrimaryWorkspaceRoot(),
+            prompt || '',
+            model,
+            reasoningEffort,
+            sandboxMode,
+            skipGitRepoCheck !== false,
+          );
           reply({ ok: true, windowId: run.windowId, runId: run.id, cwd: run.cwd });
           break;
         }
@@ -1079,6 +1294,8 @@ wss.on('connection', (ws, req) => {
             serviceTier,
             reasoningEffort,
             codexThreadId,
+            firstMessage,
+            attachments,
           } = params as {
             name: string;
             model: string;
@@ -1089,6 +1306,8 @@ wss.on('connection', (ws, req) => {
             serviceTier?: string;
             reasoningEffort?: string;
             codexThreadId?: string;
+            firstMessage?: string;
+            attachments?: MessageAttachmentInput[];
           };
           const resolvedCwd = resolveWorkspaceCwd(cwd);
           await maybeAutoPullRepo(resolvedCwd);
@@ -1105,7 +1324,10 @@ wss.on('connection', (ws, req) => {
               codexThreadId,
             },
           );
-          reply(agent);
+          if (typeof firstMessage === 'string' && firstMessage.trim()) {
+            await manager.sendMessage(agent.id, firstMessage, Array.isArray(attachments) ? attachments : []);
+          }
+          reply(manager.getAgent(agent.id) || agent);
           broadcast(agent.id, 'agents/changed', { reason: 'created', agent, timestamp: Date.now() });
           broadcastCodexThreadsChanged('agent_created', { agentId: agent.id });
           break;
@@ -1134,8 +1356,12 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'send_message': {
-          const { agentId, text } = params as { agentId: string; text: string };
-          await manager.sendMessage(agentId, text);
+          const { agentId, text, attachments } = params as {
+            agentId: string;
+            text: string;
+            attachments?: MessageAttachmentInput[];
+          };
+          await manager.sendMessage(agentId, text, Array.isArray(attachments) ? attachments : []);
           reply({ ok: true });
           broadcastCodexThreadsChanged('message_sent', { agentId });
           break;
@@ -1430,6 +1656,18 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'trust_workspace_root': {
+          const { path: targetPath } = params as { path?: string };
+          if (!targetPath?.trim()) throw new Error('path is required');
+          const trustedPath = trustCustomWorkspaceRoot(targetPath);
+          reply({
+            ok: true,
+            path: trustedPath,
+            allowedWorkspaceRoots: getAllowedWorkspaceRoots(),
+          });
+          break;
+        }
+
         case 'read_file': {
           const { cwd, path: relativePath } = params as { cwd: string; path: string };
           if (!relativePath) throw new Error('path is required');
@@ -1606,36 +1844,60 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  const ip = getLocalIP();
-  const networkUrl = `ws://${ip}:${PORT}`;
-  const qrPayload = buildConnectHttpUrl(networkUrl, config.apiKey);
-  const deepLink = buildConnectDeepLink(networkUrl, config.apiKey);
-  console.log('\n  Codex Agent Relay running');
-  console.log(`  Local:   ws://localhost:${PORT}`);
-  console.log(`  Network: ${networkUrl}`);
-  console.log(`  Config:  ${CONFIG_PATH}`);
-  console.log(`  Workspace: ${getPrimaryWorkspaceRoot()}`);
-  console.log(`  Repos:     ${getReposRoot()}`);
-  console.log(`  API key: ${config.apiKey}\n`);
-  if (process.env.EASYCODEX_NO_TERMINAL_QR !== '1') {
-    console.log('  Scan this QR with your phone camera to open EasyCodex and import the WebSocket URL and API key:');
-    qrcode.generate(qrPayload, { small: true });
-  }
-  console.log(`\n  QR payload: ${qrPayload}\n`);
-  console.log(`  Deep link: ${deepLink}\n`);
-  emitDesktopRelayEvent('ready', {
-    status: 'ok',
-    sessionId: relaySessionId,
-    workspaceRoot: getPrimaryWorkspaceRoot(),
-    reposRoot: getReposRoot(),
-    connectedClients: getConnectedAuthenticatedCount(),
-    notificationClients: getRegisteredClientCount(),
-    notificationTokens: getRegisteredTokenCount(),
-    lastClientLanguage,
+async function startRelayServer(): Promise<void> {
+  await detectPortWarnings();
+  await new Promise<void>((resolve, reject) => {
+    const onError = (err: Error) => reject(err);
+    server.once('error', onError);
+    server.listen(PORT, '0.0.0.0', () => {
+      server.off('error', onError);
+      const ip = getLocalIP();
+      const networkUrl = `ws://${ip}:${PORT}`;
+      const qrPayload = buildConnectHttpUrl(networkUrl, config.apiKey);
+      const deepLink = buildConnectDeepLink(networkUrl, config.apiKey);
+      console.log('\n  Codex Agent Relay running');
+      console.log(`  Local:   ws://localhost:${PORT}`);
+      console.log(`  Network: ${networkUrl}`);
+      console.log(`  Config:  ${CONFIG_PATH}`);
+      console.log(`  Workspace: ${getPrimaryWorkspaceRoot()}`);
+      console.log(`  Repos:     ${getReposRoot()}`);
+      console.log(`  API key: ${maskSecret(config.apiKey)}\n`);
+      for (const warning of relayWarnings) {
+        console.warn(`  Warning [${warning.code}]: ${warning.message}`);
+        if (warning.recommendation) console.warn(`  Recommendation: ${warning.recommendation}`);
+      }
+      if (process.env.EASYCODEX_NO_TERMINAL_QR !== '1') {
+        console.log('  Scan this QR with your phone camera to open EasyCodex and import the WebSocket URL and API key:');
+        qrcode.generate(qrPayload, { small: true });
+      }
+      if (shouldLogConnectSecrets()) {
+        console.log(`\n  QR payload: ${qrPayload}\n`);
+        console.log(`  Deep link: ${deepLink}\n`);
+      } else {
+        console.log('\n  QR payload and deep link are hidden because they contain the relay API key.');
+        console.log('  Set EASYCODEX_LOG_CONNECT_SECRETS=1 only for temporary troubleshooting.\n');
+      }
+      emitDesktopRelayEvent('ready', {
+        status: 'ok',
+        sessionId: relaySessionId,
+        workspaceRoot: getPrimaryWorkspaceRoot(),
+        reposRoot: getReposRoot(),
+        connectedClients: getConnectedAuthenticatedCount(),
+        notificationClients: getRegisteredClientCount(),
+        notificationTokens: getRegisteredTokenCount(),
+        lastClientLanguage,
+        warnings: relayWarnings,
+      });
+      startCodexStateWatcher();
+      void runUpdateCheck('startup').catch((err) => {
+        console.warn('[update] Startup update check failed:', err);
+      });
+      resolve();
+    });
   });
-  startCodexStateWatcher();
-  void runUpdateCheck('startup').catch((err) => {
-    console.warn('[update] Startup update check failed:', err);
-  });
+}
+
+void startRelayServer().catch((err) => {
+  console.error('[relay] Failed to start:', err);
+  process.exitCode = 1;
 });

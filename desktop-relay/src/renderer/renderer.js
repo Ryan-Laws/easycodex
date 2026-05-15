@@ -461,6 +461,7 @@ let selectedThreadId = null;
 let taskFilter = 'active';
 let taskSearch = '';
 let agents = [];
+let activeThreads = [];
 let historyThreads = [];
 let pendingRequestsByAgent = new Map();
 const gitContextByCwd = new Map();
@@ -579,7 +580,57 @@ function isAgentBusy(agent) {
 }
 
 function selectedThread() {
-  return historyThreads.find((thread) => thread.id === selectedThreadId) || null;
+  return activeThreads.find((thread) => thread.id === selectedThreadId)
+    || historyThreads.find((thread) => thread.id === selectedThreadId)
+    || null;
+}
+
+function mergeThreadById(list, thread) {
+  if (!thread?.id) return list;
+  let found = false;
+  const next = list.map((entry) => {
+    if (entry.id !== thread.id) return entry;
+    found = true;
+    return { ...entry, ...thread };
+  });
+  if (!found) next.unshift(thread);
+  return next;
+}
+
+function isActiveThreadStatus(status) {
+  return [
+    'initializing',
+    'resuming',
+    'working',
+    'running',
+    'active',
+    'in_progress',
+    'inprogress',
+    'in-progress',
+    'pending',
+    'processing',
+    'queued',
+    'starting',
+    'streaming',
+  ].includes(String(status || '').trim().toLowerCase());
+}
+
+function shouldShowActiveThread(thread) {
+  return isActiveThreadStatus(thread?.status) || Number(thread?.queuedFollowUpCount || 0) > 0;
+}
+
+function agentThreadIds() {
+  return new Set(agents.map((agent) => agent.codexThreadId || agent.threadId).filter(Boolean));
+}
+
+function visibleActiveItems() {
+  const runningThreadIds = agentThreadIds();
+  return [
+    ...agents.map((agent) => ({ ...agent, __kind: 'agent' })),
+    ...activeThreads
+      .filter((thread) => !runningThreadIds.has(thread.id))
+      .map((thread) => ({ ...thread, __kind: 'thread' })),
+  ];
 }
 
 function diffSummary(diff) {
@@ -746,6 +797,9 @@ function handleRelayStream(entry) {
   if (entry.event === 'agents/changed' || entry.event === 'codex/threads_changed') {
     refreshTasks().catch((error) => appendLog(`Task list refresh failed: ${error.message || error}`));
   }
+  if (entry.event === 'codex/threads_changed' && selectedThreadId) {
+    refreshSelectedThread().catch((error) => appendLog(`Thread refresh failed: ${error.message || error}`));
+  }
   if (entry.event === 'agent/requested') rememberPendingRequest(entry.agentId, entry.data);
   if (entry.event === 'agent/request_resolved') resolvePendingRequest(entry.agentId, entry.data?.requestId);
   scheduleAgentRefresh(entry.agentId);
@@ -806,43 +860,84 @@ async function refreshAgent(agentId) {
   renderWorkbench();
 }
 
+async function refreshSelectedThread() {
+  const threadId = selectedThreadId;
+  if (!threadId || relaySocketState !== 'online') return;
+  const detail = await relaySend('read_codex_thread', { threadId });
+  const update = (entry) => (entry.id === threadId ? { ...entry, ...detail } : entry);
+  activeThreads = activeThreads.map(update);
+  historyThreads = historyThreads.map(update);
+  if (!activeThreads.some((entry) => entry.id === threadId) && !historyThreads.some((entry) => entry.id === threadId)) {
+    activeThreads.unshift(detail);
+  }
+  renderWorkbench();
+}
+
 async function refreshTasks() {
   if (relaySocketState !== 'online') {
     renderWorkbench();
     return;
   }
-  agents = await relaySend('list_agents');
+  const selectedThreadSnapshot = selectedThread();
+  const [nextAgents, activeResult] = await Promise.all([
+    relaySend('list_agents'),
+    relaySend('list_codex_threads', { all: true, limit: 80, activeOnly: true }).catch((error) => {
+      appendLog(`Active thread load failed: ${error.message || error}`);
+      return { data: [] };
+    }),
+  ]);
+  agents = nextAgents;
   for (const agent of agents) {
     if (Array.isArray(agent.pendingRequests)) pendingRequestsByAgent.set(agent.id, agent.pendingRequests);
   }
+  const runningThreadIds = agentThreadIds();
+  activeThreads = (activeResult?.data || [])
+    .filter((thread) => thread?.id && !runningThreadIds.has(thread.id) && shouldShowActiveThread(thread))
+    .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0));
   if (taskFilter === 'history') await refreshHistory();
   if (selectedAgentId && !agents.some((agent) => agent.id === selectedAgentId)) selectedAgentId = agents[0]?.id || null;
+  if (selectedThreadId && !selectedThread() && selectedThreadSnapshot) {
+    historyThreads = mergeThreadById(historyThreads, selectedThreadSnapshot);
+  }
+  if (selectedThreadId && !selectedThread()) selectedThreadId = null;
   if (!selectedAgentId && !selectedThreadId && agents[0]) selectedAgentId = agents[0].id;
+  if (!selectedAgentId && !selectedThreadId && activeThreads[0]) selectedThreadId = activeThreads[0].id;
   renderWorkbench();
+  if (selectedThreadId && !(selectedThread()?.messages?.length)) {
+    refreshSelectedThread().catch((error) => appendLog(`Thread detail load failed: ${error.message || error}`));
+  }
 }
 
 async function refreshHistory() {
+  const selectedThreadSnapshot = selectedThread();
   const result = await relaySend('list_codex_threads', { all: true, limit: 80 });
-  const runningThreadIds = new Set(agents.map((agent) => agent.codexThreadId).filter(Boolean));
+  const runningThreadIds = new Set([
+    ...agents.map((agent) => agent.codexThreadId).filter(Boolean),
+    ...activeThreads.map((thread) => thread.id).filter(Boolean),
+  ]);
   historyThreads = (result?.data || []).filter((thread) => !runningThreadIds.has(thread.id));
+  if (selectedThreadId && selectedThreadSnapshot && !historyThreads.some((thread) => thread.id === selectedThreadId)) {
+    historyThreads = mergeThreadById(historyThreads, selectedThreadSnapshot);
+  }
 }
 
 function renderTaskList() {
   const isHistory = taskFilter === 'history';
-  const items = filterTasks(isHistory ? historyThreads : agents, isHistory);
+  const items = filterTasks(isHistory ? historyThreads.map((thread) => ({ ...thread, __kind: 'history' })) : visibleActiveItems(), isHistory);
   if (!items.length) {
     elements.taskList.innerHTML = `<div class="empty-state">${taskSearch ? '没有匹配的任务' : `暂无${isHistory ? '历史任务' : '运行中任务'}`}</div>`;
     return;
   }
   elements.taskList.innerHTML = items.map((item) => {
-    const id = isHistory ? item.id : item.id;
-    const active = isHistory ? selectedThreadId === id : selectedAgentId === id;
+    const id = item.id;
+    const kind = item.__kind || (isHistory ? 'history' : 'agent');
+    const active = kind === 'agent' ? selectedAgentId === id : selectedThreadId === id;
     const title = item.name || item.preview || 'Codex task';
     const status = item.queuedFollowUpCount > 0 ? 'pending' : String(item.status || '');
-    const preview = isHistory ? String(item.preview || item.activityLabel || '可恢复历史任务') : taskPreview(item);
-    const meta = isHistory ? shortPath(item.cwd || item.projectRoot) : shortPath(item.cwd);
+    const preview = kind === 'agent' ? taskPreview(item) : String(item.activityLabel || item.preview || (kind === 'history' ? '可恢复历史任务' : 'Codex 正在更新'));
+    const meta = shortPath(item.cwd || item.projectRoot);
     return `
-      <button class="task-card ${active ? 'active' : ''}" data-id="${escapeHtml(id)}" data-kind="${isHistory ? 'history' : 'agent'}" type="button">
+      <button class="task-card ${active ? 'active' : ''}" data-id="${escapeHtml(id)}" data-kind="${escapeHtml(kind)}" type="button">
         <span class="task-title-line">
           <span class="task-title">${escapeHtml(title)}</span>
           <span class="status-pill ${escapeHtml(status)}">${escapeHtml(isHistory ? statusLabel(item.status) : statusLabel(item.status))}</span>
@@ -956,7 +1051,9 @@ function renderSelectedTask() {
   if (thread) {
     elements.selectedTaskMeta.textContent = `${statusLabel(thread.status)} / ${shortPath(thread.cwd)}`;
     elements.selectedTaskTitle.textContent = thread.name || thread.preview || '历史任务';
-    elements.selectedTaskSubtitle.textContent = '这是 Codex 历史线程，恢复后可以继续对话。';
+    elements.selectedTaskSubtitle.textContent = taskFilter === 'active'
+      ? (thread.activityLabel || '这是正在变化的 Codex 线程，恢复后可以从工作台继续对话。')
+      : '这是 Codex 历史线程，恢复后可以继续对话。';
     renderApproval(null);
     renderMessages(thread.messages || []);
     renderDetails(null, thread);
@@ -1283,14 +1380,18 @@ elements.taskList.addEventListener('click', async (event) => {
   const card = target?.closest('.task-card');
   if (!card) return;
   const id = card.dataset.id;
-  if (card.dataset.kind === 'history') {
+  if (card.dataset.kind === 'history' || card.dataset.kind === 'thread') {
     selectedAgentId = null;
     selectedThreadId = id;
-    const thread = historyThreads.find((entry) => entry.id === id);
+    const thread = selectedThread();
     if (thread && !thread.messages) {
       try {
         const detail = await relaySend('read_codex_thread', { threadId: id });
-        historyThreads = historyThreads.map((entry) => (entry.id === id ? { ...entry, ...detail } : entry));
+        if (activeThreads.some((entry) => entry.id === id)) {
+          activeThreads = mergeThreadById(activeThreads, detail);
+        } else {
+          historyThreads = mergeThreadById(historyThreads, detail);
+        }
       } catch (error) {
         appendLog(`Thread read failed: ${error.message || error}`);
       }

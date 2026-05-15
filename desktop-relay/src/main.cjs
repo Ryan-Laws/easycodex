@@ -11,6 +11,8 @@ const QRCode = require('qrcode');
 
 const isDev = !app.isPackaged;
 const isSmokeTest = process.argv.includes('--smoke-test');
+const rendererDistIndex = path.join(__dirname, 'renderer', 'dist', 'index.html');
+const legacyRendererIndex = path.join(__dirname, 'renderer', 'index.html');
 const sourceRoot = isDev ? path.resolve(__dirname, '..', '..') : process.resourcesPath;
 const sourceRelayDir = isDev ? path.join(sourceRoot, 'agent-relay') : path.join(process.resourcesPath, 'agent-relay');
 const configDir = path.join(os.homedir(), '.easycodex');
@@ -41,6 +43,8 @@ let tray = null;
 let lastHealth = { online: false };
 let relayRunning = false;
 let allowQuit = false;
+let enteringLightMode = false;
+let lightModeStartPromise = null;
 let relayEventData = null;
 let relayOutputBuffer = '';
 let relayLogClientIds = new Set();
@@ -379,6 +383,7 @@ function loadDesktopConfig() {
     languageMode: config.languageMode === 'manual' ? 'manual' : 'follow-phone',
     language: supportedLanguages.includes(config.language) ? config.language : 'system',
     updateChannel: supportedUpdateChannels.includes(config.updateChannel) ? config.updateChannel : 'stable',
+    lightMode: config.lightMode === true,
     guideSeen: config.guideSeen === true,
   };
 }
@@ -674,6 +679,13 @@ function launchInstallerAfterQuit(targetPath) {
     });
     child.unref();
   } else {
+    if (process.platform === 'linux' && resolvedTarget.toLowerCase().endsWith('.appimage')) {
+      try {
+        fs.chmodSync(resolvedTarget, 0o755);
+      } catch (error) {
+        appendLog(`Failed to mark AppImage executable: ${error.message || error}`);
+      }
+    }
     shell.openPath(resolvedTarget).catch((error) => appendLog(`Failed to open installer: ${error.message || error}`));
   }
   allowQuit = true;
@@ -789,8 +801,9 @@ function looksLikeEasyCodexRelayHealth(health) {
 async function checkPortStatus(input) {
   const port = validatePort(input);
   const available = await checkPortAvailable(port);
+  const processes = portProcessDetails(port);
   if (available) {
-    return { available: true, reclaimable: false, occupiedByRelay: false };
+    return { available: true, reclaimable: false, occupiedByRelay: false, processes };
   }
 
   const health = await healthRequestHost('127.0.0.1', port, loadApiKey());
@@ -799,6 +812,7 @@ async function checkPortStatus(input) {
     available: false,
     reclaimable: occupiedByRelay,
     occupiedByRelay,
+    processes,
     pid: null,
   };
 }
@@ -830,16 +844,117 @@ function listeningPidsForPort(port) {
       .filter((pid) => Number.isInteger(pid) && pid > 0);
   }
 
-  const result = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
+  const lsofResult = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
     stdio: ['ignore', 'pipe', 'ignore'],
     encoding: 'utf8',
     timeout: 5000,
   });
-  if (result.error || result.status !== 0) return [];
-  return String(result.stdout || '')
+  const lsofPids = String(lsofResult.stdout || '')
     .split(/\r?\n/)
     .map((line) => Number.parseInt(line.trim(), 10))
     .filter((pid) => Number.isInteger(pid) && pid > 0);
+  if (!lsofResult.error && lsofResult.status === 0 && lsofPids.length > 0) return Array.from(new Set(lsofPids));
+
+  const ssResult = spawnSync('ss', ['-H', '-ltnp', `sport = :${port}`], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  const ssPids = Array.from(String(ssResult.stdout || '').matchAll(/pid=(\d+)/g))
+    .map((match) => Number.parseInt(match[1], 10))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+  if (!ssResult.error && ssResult.status === 0 && ssPids.length > 0) return Array.from(new Set(ssPids));
+
+  const netstatResult = spawnSync('netstat', ['-ltnp'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  const netstatPids = String(netstatResult.stdout || '')
+    .split(/\r?\n/)
+    .filter((line) => line.includes(`:${port} `) || line.includes(`:${port}\t`))
+    .map((line) => Number.parseInt(line.trim().split(/\s+/).at(-1)?.split('/')[0] || '', 10))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+  if (!netstatResult.error && netstatResult.status === 0 && netstatPids.length > 0) return Array.from(new Set(netstatPids));
+
+  return [];
+}
+
+function readProcessField(pid, field) {
+  const result = spawnSync('ps', ['-p', String(pid), '-o', `${field}=`], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  if (result.error || result.status !== 0) return '';
+  return String(result.stdout || '').trim();
+}
+
+function linuxProcessExePath(pid) {
+  if (process.platform !== 'linux') return '';
+  try {
+    return fs.readlinkSync(`/proc/${pid}/exe`);
+  } catch {
+    return '';
+  }
+}
+
+function processDetailsForPids(pids) {
+  const uniquePids = Array.from(new Set((pids || []).filter((pid) => Number.isInteger(pid) && pid > 0)));
+  if (uniquePids.length === 0) return [];
+  if (process.platform === 'win32') {
+    const powershell = powershellCommand();
+    if (!powershell) return uniquePids.map((pid) => ({ pid, name: `PID ${pid}`, path: '', commandLine: '' }));
+    const idList = uniquePids.join(',');
+    const script = `
+$ids = @(${idList});
+Get-CimInstance Win32_Process | Where-Object { $ids -contains $_.ProcessId } | ForEach-Object {
+  [PSCustomObject]@{
+    pid = $_.ProcessId
+    name = $_.Name
+    path = $_.ExecutablePath
+    commandLine = $_.CommandLine
+  }
+} | ConvertTo-Json -Compress
+`;
+    const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+    });
+    if (result.error || result.status !== 0 || !String(result.stdout || '').trim()) {
+      return uniquePids.map((pid) => ({ pid, name: `PID ${pid}`, path: '', commandLine: '' }));
+    }
+    try {
+      const parsed = JSON.parse(String(result.stdout || '').trim());
+      return (Array.isArray(parsed) ? parsed : [parsed]).map((entry) => ({
+        pid: Number(entry.pid || entry.ProcessId),
+        name: String(entry.name || entry.Name || '').trim() || `PID ${entry.pid || entry.ProcessId}`,
+        path: String(entry.path || entry.ExecutablePath || '').trim(),
+        commandLine: String(entry.commandLine || entry.CommandLine || '').trim(),
+      })).filter((entry) => Number.isInteger(entry.pid) && entry.pid > 0);
+    } catch {
+      return uniquePids.map((pid) => ({ pid, name: `PID ${pid}`, path: '', commandLine: '' }));
+    }
+  }
+
+  return uniquePids.map((pid) => {
+    const commandPath = readProcessField(pid, 'comm');
+    const commandLine = readProcessField(pid, 'args');
+    const executablePath = linuxProcessExePath(pid) || (path.isAbsolute(commandPath) ? commandPath : '');
+    const name = path.basename(commandPath || commandLine.split(/\s+/)[0] || '') || `PID ${pid}`;
+    return { pid, name, path: executablePath, commandLine };
+  });
+}
+
+function portProcessDetails(port) {
+  const pids = listeningPidsForPort(port).filter((pid) => pid !== process.pid);
+  return processDetailsForPids(pids).map((entry) => {
+    const text = `${entry.name} ${entry.path} ${entry.commandLine}`.toLowerCase();
+    const isEasyCodexRelay = text.includes('easycodex') || text.includes('agent-relay') || text.includes('desktop-relay');
+    return { ...entry, isEasyCodexRelay };
+  });
 }
 
 async function waitForPortAvailable(port, timeoutMs = 5000) {
@@ -871,6 +986,26 @@ async function stopExternalRelayOnPort(port) {
   }
 
   return waitForPortAvailable(port);
+}
+
+async function stopProcessOnPort(input) {
+  const port = validatePort(input?.port);
+  const pid = Number(input?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error('Invalid process id.');
+  if (pid === process.pid) throw new Error('Cannot stop the desktop app process.');
+  if (relayProcess?.pid === pid) throw new Error('Use Stop to stop the current EasyCodex relay.');
+
+  const listening = listeningPidsForPort(port);
+  if (!listening.includes(pid)) throw new Error(`PID ${pid} is no longer listening on port ${port}.`);
+
+  appendLog(`Stopping PID ${pid} on port ${port}.`);
+  try {
+    process.kill(pid);
+  } catch (error) {
+    throw new Error(`Failed to stop PID ${pid}: ${error.message || error}`);
+  }
+  await waitForPortAvailable(port, 5000);
+  return checkPortStatus(port);
 }
 
 function normalizeLanguage(value) {
@@ -989,6 +1124,7 @@ async function appState() {
     health: mergeRelayEventHealth(lastHealth),
     languageMode: config.languageMode,
     language: config.language,
+    lightMode: config.lightMode,
     updateChannel: config.updateChannel,
     supportedUpdateChannels,
     effectiveLanguage: effectiveLanguage(config, mergeRelayEventHealth(lastHealth)),
@@ -1012,6 +1148,55 @@ async function broadcastState() {
 
 function appendLog(line) {
   send('log', String(line));
+}
+
+function ensureBackgroundServices() {
+  startHealthPolling();
+  if (!updateState.checking && !updateState.info && !updateState.error) {
+    setTimeout(() => {
+      void checkForUpdates('startup').catch(() => {});
+    }, 800);
+  }
+}
+
+function lightModeStartInput() {
+  const config = loadDesktopConfig();
+  return {
+    port: config.port,
+    workspace: config.workspace,
+    codexPath: config.codexPath,
+  };
+}
+
+async function ensureRelayStartedForLightMode(reason) {
+  if (relayProcess) return;
+  if (lightModeStartPromise) return lightModeStartPromise;
+  appendLog(`Lightweight mode requested; starting relay before hiding window (${reason}).`);
+  lightModeStartPromise = startRelay(lightModeStartInput(), { skipAutoEnterLightMode: true })
+    .finally(() => {
+      lightModeStartPromise = null;
+    });
+  return lightModeStartPromise;
+}
+
+async function enterLightMode(reason = 'manual') {
+  saveDesktopConfig({ lightMode: true });
+  ensureBackgroundServices();
+  try {
+    await ensureRelayStartedForLightMode(reason);
+  } catch (error) {
+    appendLog(`Lightweight mode could not start relay: ${error.message || error}`);
+    if (tray) tray.setToolTip('EasyCodex Relay - relay not running');
+    refreshTrayMenu();
+    throw error;
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    appendLog('Entering lightweight mode: renderer window is closed, relay core stays in tray.');
+    enteringLightMode = true;
+    mainWindow.destroy();
+  }
+  if (tray) tray.setToolTip('EasyCodex Relay - lightweight mode');
+  refreshTrayMenu();
 }
 
 function mergeRelayEventHealth(health) {
@@ -1211,7 +1396,7 @@ async function installAndBuild() {
   await broadcastState();
 }
 
-async function startRelay(input) {
+async function startRelay(input, options = {}) {
   if (relayProcess) return;
   const port = validatePort(input?.port);
   const workspace = validateWorkspace(input?.workspace);
@@ -1290,6 +1475,11 @@ async function startRelay(input) {
     await broadcastState();
   });
   await broadcastState();
+  if (!options.skipAutoEnterLightMode && loadDesktopConfig().lightMode && mainWindow && !mainWindow.isDestroyed()) {
+    setTimeout(() => {
+      void enterLightMode('relay-started').catch(() => {});
+    }, 350);
+  }
 }
 
 async function stopRelay() {
@@ -1314,6 +1504,11 @@ async function stopRelay() {
 
 async function createWindow() {
   Menu.setApplicationMenu(null);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -1332,7 +1527,16 @@ async function createWindow() {
     },
   });
   mainWindow.on('close', async (event) => {
-    if (allowQuit || isSmokeTest) return;
+    if (allowQuit || isSmokeTest || enteringLightMode) return;
+    if (loadDesktopConfig().lightMode) {
+      event.preventDefault();
+      try {
+        await enterLightMode('window-close');
+      } catch (error) {
+        await broadcastState();
+      }
+      return;
+    }
     event.preventDefault();
     const closeText = closeDialogText();
     const choice = await dialog.showMessageBox(mainWindow, {
@@ -1351,21 +1555,37 @@ async function createWindow() {
     }
     mainWindow.hide();
   });
-  mainWindow.on('closed', () => { mainWindow = null; });
-  await mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  startHealthPolling();
-  setTimeout(() => {
-    void checkForUpdates('startup').catch(() => {});
-  }, 800);
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    enteringLightMode = false;
+    refreshTrayMenu();
+  });
+  await mainWindow.loadFile(fs.existsSync(rendererDistIndex) ? rendererDistIndex : legacyRendererIndex);
+  ensureBackgroundServices();
+  refreshTrayMenu();
   if (isSmokeTest) setTimeout(() => app.quit(), 1200);
 }
 
 function createTray() {
   const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
   tray = new Tray(icon);
-  tray.setToolTip('EasyCodex Relay');
+  tray.setToolTip(loadDesktopConfig().lightMode ? 'EasyCodex Relay - lightweight mode' : 'EasyCodex Relay');
+  refreshTrayMenu();
+  tray.on('click', showMainWindow);
+  tray.on('double-click', showMainWindow);
+}
+
+function refreshTrayMenu() {
+  if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open EasyCodex Relay', click: showMainWindow },
+    {
+      label: 'Enter lightweight mode',
+      enabled: Boolean(mainWindow && !mainWindow.isDestroyed()),
+      click: () => {
+        void enterLightMode('tray-menu').catch(() => {});
+      },
+    },
     { type: 'separator' },
     {
       label: 'Quit',
@@ -1375,21 +1595,32 @@ function createTray() {
       },
     },
   ]));
-  tray.on('double-click', showMainWindow);
 }
 
 function showMainWindow() {
+  if (tray) tray.setToolTip('EasyCodex Relay');
   if (!mainWindow) {
-    createWindow();
+    void createWindow();
     return;
   }
   mainWindow.show();
   mainWindow.focus();
+  refreshTrayMenu();
 }
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   createTray();
-  createWindow();
+  if (loadDesktopConfig().lightMode && !isSmokeTest) {
+    ensureBackgroundServices();
+    void ensureRelayStartedForLightMode('startup').catch(async (error) => {
+      console.error('[desktop-relay] Lightweight startup failed:', error);
+      await createWindow();
+      appendLog(`Lightweight startup failed: ${error.message || error}`);
+    });
+  } else {
+    createWindow();
+  }
 });
 
 app.on('second-instance', () => {
@@ -1397,6 +1628,7 @@ app.on('second-instance', () => {
 });
 
 app.on('window-all-closed', () => {
+  if (enteringLightMode || loadDesktopConfig().lightMode) return;
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -1429,6 +1661,10 @@ ipcMain.handle('stop-relay', async () => {
   await stopRelay();
   return appState();
 });
+ipcMain.handle('enter-light-mode', async () => {
+  await enterLightMode('ipc');
+  return appState();
+});
 ipcMain.handle('refresh-api-key', async () => {
   writeJson(configPath, { apiKey: generateApiKey() });
   appendLog('Generated a new relay API key.');
@@ -1451,6 +1687,7 @@ ipcMain.handle('save-config', async (_event, input) => {
   }
   if (input?.languageMode === 'manual' || input?.languageMode === 'follow-phone') next.languageMode = input.languageMode;
   if (supportedLanguages.includes(input?.language)) next.language = input.language;
+  if (Object.prototype.hasOwnProperty.call(input || {}, 'lightMode')) next.lightMode = input.lightMode === true;
   if (supportedUpdateChannels.includes(input?.updateChannel)) {
     next.updateChannel = input.updateChannel;
     updateState = { checking: false, applying: false, info: null, error: '' };
@@ -1468,12 +1705,23 @@ ipcMain.handle('preview-port', async (_event, input) => {
     portAvailable: portStatus.available,
     portReclaimable: portStatus.reclaimable,
     portOccupiedByRelay: portStatus.occupiedByRelay,
+    processes: portStatus.processes,
     qrDataUrl: await QRCode.toDataURL(details.connectUrl, {
       margin: 1,
       width: 360,
       color: { dark: '#1d251f', light: '#ffffff' },
     }),
     ...details,
+  };
+});
+ipcMain.handle('stop-port-process', async (_event, input) => {
+  const status = await stopProcessOnPort(input || {});
+  await broadcastState();
+  return {
+    portAvailable: status.available,
+    portReclaimable: status.reclaimable,
+    portOccupiedByRelay: status.occupiedByRelay,
+    processes: status.processes,
   };
 });
 ipcMain.handle('window-minimize', () => {
