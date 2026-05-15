@@ -21,6 +21,11 @@ class EasyCodexConnectionService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private lateinit var controller: EasyCodexController
     private var lastNotificationText = ""
+    private val connectionStateListener = object : EasyCodexController.ConnectionStateListener {
+        override fun onConnectionStateChanged(status: String, text: String) {
+            main.post { updateForegroundNotificationIfChanged(force = true) }
+        }
+    }
     private val notificationUpdater = object : Runnable {
         override fun run() {
             updateForegroundNotificationIfChanged(force = false)
@@ -33,6 +38,7 @@ class EasyCodexConnectionService : Service() {
         controller = EasyCodexControllerProvider.get(applicationContext)
         lastNotificationText = foregroundNotificationText()
         startForegroundCompat(buildNotification(lastNotificationText))
+        controller.addConnectionStateListener(connectionStateListener)
         main.postDelayed(notificationUpdater, BACKGROUND_CONNECTION_UPDATE_MS)
     }
 
@@ -48,6 +54,7 @@ class EasyCodexConnectionService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        controller.removeConnectionStateListener(connectionStateListener)
         main.removeCallbacks(notificationUpdater)
         super.onDestroy()
     }

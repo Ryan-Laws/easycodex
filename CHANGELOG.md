@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.1.3 - 2026-05-15
+
+### Added
+
+- Added the refreshed desktop relay workbench with a Vite/Preact renderer, task history, live conversation controls, and file-change context.
+- Added Android attachment limit coverage and updated Android backup/data extraction configuration.
+
+### Fixed
+
+- Improved relay task synchronization, Codex RPC handling, and session orchestration for mobile task refresh and command flow reliability.
+- Tightened Android connection, conversation, project picker, CLI console, and settings behavior for phone-sized workflows.
+
+### Improved
+
+- Expanded English and Chinese project documentation for the current Android app, desktop relay, and agent relay behavior.
+
 ## 0.1.2 - 2026-05-15
 
 ### Added

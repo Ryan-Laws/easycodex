@@ -27,6 +27,7 @@ fun parseEasyCodexConnectionUri(raw: String?): EasyCodexConnectionConfig? {
     if (!relayUrl.startsWith("ws://", ignoreCase = true) && !relayUrl.startsWith("wss://", ignoreCase = true)) {
         return null
     }
+    if (validateRelayEndpoint(relayUrl, "") != null) return null
 
     return EasyCodexConnectionConfig(relayUrl = relayUrl, apiKey = apiKey)
 }

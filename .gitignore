@@ -73,6 +73,10 @@ yarn-debug.*
 yarn-error.*
 pnpm-debug.*
 *.log
+easycodex-*.txt
+adb-*.png
+easycodex-*.png
+easycodex-*.xml
 
 # macOS
 .DS_Store

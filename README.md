@@ -14,9 +14,9 @@
     <img alt="Windows" src="https://img.shields.io/badge/Windows-relay%20app-0078D4?logo=windows&logoColor=white&style=flat-square">
     <img alt="Android" src="https://img.shields.io/badge/Android-mobile%20APK-3DDC84?logo=android&logoColor=white&style=flat-square">
     <img alt="macOS" src="https://img.shields.io/badge/macOS-relay%20app-000000?logo=apple&logoColor=white&style=flat-square">
+    <img alt="Linux-relay" src="https://img.shields.io/badge/Linux-relay%20app-FCC624?logo=linux&logoColor=black&style=flat-square">
     <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-Android-7F52FF?logo=kotlin&logoColor=white&style=flat-square">
     <img alt="Electron" src="https://img.shields.io/badge/Electron-desktop%20relay-47848F?logo=electron&logoColor=white&style=flat-square">
-    <a href="https://visitor-badge.laobi.icu/"><img alt="Visitors" src="https://visitor-badge.laobi.icu/badge?page_id=Ryan-Laws.easycodex"></a>
   </p>
   <p>
     <a href="https://github.com/Ryan-Laws/easycodex/releases/latest"><strong>Download the latest EasyCodex release</strong></a>
@@ -25,15 +25,13 @@
   </p>
 </div>
 
-EasyCodex turns Codex into a local agent workspace you can control from both your desktop and your Android phone. The desktop relay runs beside your repositories, starts and supervises `codex app-server`, and exposes a secure QR/deep-link pairing flow so the phone can follow and steer the same work without moving code or credentials to a hosted service.
+EasyCodex lets you control local Codex work from a desktop relay app and an Android phone. The relay runs on your computer beside your repositories, starts and supervises `codex app-server`, and exposes a secure QR/deep-link pairing flow so the phone can follow and steer the same work without moving source code or credentials to a hosted service.
 
-The app is now more than a remote chat surface: it can create and resume Codex sessions, show live task history, stream conversation updates, handle approval prompts, inspect files and Git state, work with branches and worktrees, keep task lists in sync as Codex threads change, and open Codex CLI consoles from the phone. Recent work also adds a richer desktop relay workbench, update channels, safer packaged updates, better active/resumable thread separation, and more reliable mobile connection behavior.
+The current app is a full control room: create and resume Codex sessions, stream conversation updates, answer approvals and user-input prompts, send attachments, review plans and diffs, commit selected files, browse projects and worktrees, archive tasks, run multi-window Codex CLI consoles, receive notifications, and keep task lists synced as Codex thread state changes.
 
-The public release includes ready-to-use Windows, macOS, and Linux relay builds plus an Android APK. You do not need to clone the repository just to try the product.
+## Install
 
-## Install EasyCodex
-
-Download the current release from the [latest EasyCodex release](https://github.com/Ryan-Laws/easycodex/releases/latest). On GitHub, you can also open the repository's **Releases** page from the right sidebar and choose the newest EasyCodex release.
+Download the current release from the [latest EasyCodex release](https://github.com/Ryan-Laws/easycodex/releases/latest).
 
 | Platform | Download | What it is for |
 | --- | --- | --- |
@@ -48,52 +46,49 @@ Download the current release from the [latest EasyCodex release](https://github.
 ## Quick Start
 
 1. Install the Codex CLI on your computer and make sure it is authenticated.
-2. Install and open **EasyCodex Relay** on Windows or macOS.
-3. Click the relay start button in the desktop app. It will show the relay status, connection URL, API key, and QR code.
-4. Install the `EasyCodex.Mobile.*.apk` asset from the latest release on your Android phone.
-5. Scan the QR code with the phone or open the connection link from the app.
-6. Pick a workspace, create or resume a Codex session, and control the agent from your phone.
+2. Install and open **EasyCodex Relay** on your desktop.
+3. Choose a default workspace, confirm the port/API key, and start the relay.
+4. Install `EasyCodex.Mobile.*.apk` on your Android phone.
+5. Scan the QR code or open the `easycodex://connect` deep link.
+6. Pick a workspace or worktree, then create or resume a Codex task.
 
-The phone does not run Codex directly. It connects to the desktop relay over WebSocket, and the relay launches `codex app-server` locally beside your repositories. The mobile top bar also includes Codex CLI consoles that send one-shot prompts to separate `codex exec` processes through the same authenticated relay.
+The phone does not run Codex. It connects to the relay over an authenticated WebSocket. The relay launches `codex app-server` for agent sessions and `codex exec` for mobile CLI windows.
 
 ## What You Can Do
 
-- Start, resume, interrupt, and stop Codex agent sessions.
-- Open Codex CLI mode from the phone and run multiple `codex exec` windows in selected workspaces.
-- Stream Codex responses in real time from your phone.
-- Queue messages while an agent is busy.
-- Review mobile approval prompts before local actions run.
-- Browse workspace files, inspect Git status, view diffs, and work with branches and worktrees.
-- Receive local relay events and optional mobile notifications when work finishes.
-- Pair quickly by QR code or `easycodex://connect` deep link.
-
-## Tech Stack
-
-| Area | Technology |
-| --- | --- |
-| Android app | Kotlin, native Android, Jetpack Compose, Material 3, OkHttp, Google Code Scanner |
-| Desktop relay | Electron, electron-builder, bundled local relay launcher |
-| Agent relay | Node.js 18+, TypeScript, Express, `ws`, `simple-git`, Codex `app-server` JSON-RPC |
-| Developer tooling | PowerShell-friendly Node.js scripts and GitHub Actions release builds |
+- Start, resume, interrupt, stop, and archive Codex tasks.
+- See running agents, active Codex threads, historical threads, queued follow-ups, and unread completed work.
+- Send text, images, and files from the phone; attachments are stored under the selected workspace in `.easycodex-attachments/`.
+- Review plans before execution and ask Codex to optimize them.
+- Inspect Git status/diff, preview changed files, and commit selected files.
+- Browse allowed workspaces, trusted directories, relay-managed repos, and Git worktrees.
+- Answer Codex approval prompts and structured user-input prompts.
+- Open multiple mobile CLI windows backed by separate `codex exec` runs.
+- Choose model, reasoning effort, service tier, cwd, sandbox mode, and update channel where supported.
+- Receive local app notifications and optional mobile push notifications.
+- Use the desktop relay workbench to monitor tasks without opening the phone.
 
 ## Architecture
 
 ```text
-Android app <-> EasyCodex Relay <-> codex app-server <-> Codex thread
+Android app / Desktop workbench
+        <-> Agent Relay
+        <-> codex app-server / codex exec
+        <-> Codex thread state
 ```
 
-The relay is local-first. It authenticates mobile clients with a relay API key, starts and supervises Codex processes, translates Codex JSON-RPC events, and exposes explicit file/Git/workspace actions to the app.
+The relay authenticates clients with a local API key, validates workspace paths, starts Codex processes, translates Codex JSON-RPC events into stable app messages, and exposes explicit file/Git/workspace actions.
 
 ## Requirements
 
-- A Windows or macOS computer for the desktop relay
+- A desktop computer for the relay
 - An Android phone or emulator for the mobile app
-- OpenAI Codex CLI installed and authenticated on the computer
+- Codex CLI installed and authenticated on the desktop computer
 - Phone and computer on the same trusted network, or connected through a private network such as Tailscale
 
 ## Build From Source
 
-Most users should install from the release page. Use these commands only if you are developing EasyCodex itself.
+Most users should install from the release page. Use these commands when developing EasyCodex itself.
 
 ```powershell
 # Desktop relay
@@ -117,27 +112,26 @@ gradle assembleDebug
 EasyCodex/
 ├── mobile/          Native Android app
 ├── agent-relay/     Node.js Agent Relay for Codex
-├── desktop-relay/   Electron Windows/macOS relay desktop app
+├── desktop-relay/   Electron desktop relay app
 └── scripts/         CLI and local setup helpers
 ```
 
 ## Security Model
 
 - The relay requires an API key for WebSocket clients and health checks.
-- Treat relay access as powerful: it can read workspace files, inspect Git state, and launch Codex in a working directory.
+- Treat relay access as powerful: it can read workspace files, inspect Git state, commit selected files, and launch Codex in a working directory.
+- Workspace access is limited to known/trusted roots; the relay refuses obvious system/profile/application-data roots.
 - Prefer a trusted LAN or private network for day-to-day use.
 - Never commit API keys, relay keys, OpenAI tokens, local agent state, or private environment files.
 
 ## Documentation
 
+- [文档.md](文档.md) is the Chinese project overview.
+- [View.md](View.md) maps Android and desktop user-facing views.
+- [AGENT.md](AGENT.md) describes relay-managed Codex agents, WebSocket actions, stream events, and runtime behavior.
 - [APP.md](APP.md) explains the app architecture and local runtime model.
-- [AGENT.md](AGENT.md) describes relay-managed Codex agents, WebSocket actions, and runtime behavior.
-- [RELEASE.md](RELEASE.md) documents the CI/CD release process, Android signing requirements, and launch smoke tests.
-- [desktop-relay/README.md](desktop-relay/README.md) covers packaging and release builds for the desktop relay.
-
-## Community
-
-- [LinuxDo](https://linux.do/) - a friendly community for developers and open source users.
+- [RELEASE.md](RELEASE.md) documents CI/CD release builds, signing, and smoke tests.
+- [desktop-relay/README.md](desktop-relay/README.md) covers desktop relay packaging.
 
 ## License
 

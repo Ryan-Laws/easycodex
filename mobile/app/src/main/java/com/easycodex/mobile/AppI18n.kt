@@ -131,6 +131,7 @@ class AppStrings {
     lateinit var easyCodexAgents: String
     lateinit var home: String
     lateinit var noAgents: String
+    lateinit var noTasks: String
     lateinit var searchTasksOrProjects: String
     lateinit var noMatchingTasks: String
     lateinit var taskActionsContentDescription: String
@@ -462,6 +463,7 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     easyCodexAgents = "手机远程控制 Codex"
     home = "总首页"
     noAgents = "还没有智能体"
+    noTasks = "暂无任务"
     searchTasksOrProjects = "搜索任务或项目"
     noMatchingTasks = "没有匹配的任务"
     taskActionsContentDescription = "任务操作"
@@ -736,6 +738,7 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     easyCodexAgents = "Android remote control for Codex"
     home = "Home"
     noAgents = "No agents yet"
+    noTasks = "No tasks yet"
     searchTasksOrProjects = "Search tasks or projects"
     noMatchingTasks = "No matching tasks"
     taskActionsContentDescription = "Task actions"

@@ -15,11 +15,18 @@ import {
   codexModelListCall,
   codexTurnStartCall,
   codexTurnInterruptCall,
+  CodexTurnInputItem,
   parseRpcFrame,
   isRpcEvent,
   isRpcReply,
   RpcReply,
 } from './codex-rpc';
+
+export interface MessageAttachmentInput {
+  name?: string;
+  path?: string;
+  mimeType?: string | null;
+}
 import { notifyMobileClients } from './notifier';
 
 interface AgentInfo {
@@ -43,7 +50,7 @@ interface AgentInfo {
   messageItemIds: Map<string, number>;
   fileSnapshots: Map<string, { exists: boolean; content: string | null }>;
   toolCalls: Map<string, { name: string; text: string }>;
-  turnQueue: { text: string; timestamp: number }[];
+  turnQueue: { text: string; timestamp: number; attachments: MessageAttachmentInput[] }[];
   queueDraining: boolean;
   process: ChildProcess;
   buffer: string;
@@ -75,7 +82,7 @@ const MOBILE_DETAIL_TEXT_LIMIT = Number(process.env.EASY_CODEX_MOBILE_DETAIL_TEX
 const MOBILE_THREAD_TURN_PAGE_LIMIT = Number(process.env.EASY_CODEX_MOBILE_THREAD_TURN_PAGE_LIMIT || 50);
 const MOBILE_THREAD_TURN_MAX_PAGES = Number(process.env.EASY_CODEX_MOBILE_THREAD_TURN_MAX_PAGES || 5);
 const STOPPED_THREAD_OVERRIDE_TTL_MS = 6 * 60 * 60 * 1000;
-const CODEX_SESSION_ACTIVE_GRACE_MS = Number(process.env.EASY_CODEX_SESSION_ACTIVE_GRACE_MS || 20000);
+const CODEX_SESSION_ACTIVE_GRACE_MS = Number(process.env.EASY_CODEX_SESSION_ACTIVE_GRACE_MS || 120000);
 const MOBILE_TRUNCATED_NOTICE = '\n\n[EasyCodex mobile truncated this long output. Use the desktop relay/Codex session for the full text.]';
 const PLAN_MODE_PREFIX = '请先进入计划模式处理下面的需求。';
 const PLAN_MODE_DEMAND_MARKER = '需求：';
@@ -209,6 +216,7 @@ function mobileTextLimit(type: string): number {
 
 function truncateForMobile(text: string, type: string): string {
   const limit = mobileTextLimit(type);
+  if (/!\[[^\]]*]\(\s*data:image\//i.test(text)) return text;
   if (!text || text.length <= limit || text.endsWith(MOBILE_TRUNCATED_NOTICE)) return text;
   return `${text.slice(0, limit).trimEnd()}${MOBILE_TRUNCATED_NOTICE}`;
 }
@@ -623,14 +631,69 @@ function parseBooleanEnv(value: string | undefined): boolean {
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
 }
 
+function dataImageMimeType(encoded: string): string {
+  const clean = encoded.trim();
+  if (clean.startsWith('/9j/')) return 'image/jpeg';
+  if (clean.startsWith('R0lG')) return 'image/gif';
+  if (clean.startsWith('UklGR')) return 'image/webp';
+  if (clean.startsWith('Qk')) return 'image/bmp';
+  return 'image/png';
+}
+
+function markdownImageSource(value: unknown): string {
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return markdownImageSource(record.url ?? record.path ?? record.data ?? record.base64);
+  }
+  const text = valueToText(value);
+  if (!text) return '';
+  if (/^data:image\//i.test(text) || /^https?:\/\//i.test(text) || /^file:\/\//i.test(text)) return text;
+  if (/^[A-Za-z]:[\\/]/.test(text) || text.startsWith('\\\\') || text.startsWith('/')) return text;
+  return `data:${dataImageMimeType(text)};base64,${text}`;
+}
+
+function markdownImageLine(source: unknown, alt = 'image'): string {
+  const clean = markdownImageSource(source);
+  return clean ? `![${alt}](${clean})` : '';
+}
+
+function imageItemToMarkdown(item: Record<string, unknown>): string {
+  const source = item.path
+    ?? item.url
+    ?? item.image_url
+    ?? item.imageUrl
+    ?? item.output
+    ?? item.result
+    ?? item.data
+    ?? item.base64;
+  return markdownImageLine(source, String(item.alt || item.name || 'image'));
+}
+
+function contentItemToText(entry: unknown): string {
+  if (typeof entry === 'string') return entry;
+  if (!entry || typeof entry !== 'object') return '';
+  const record = entry as Record<string, unknown>;
+  const type = String(record.type || '').toLowerCase();
+  if (type.includes('image')) {
+    return markdownImageLine(record.image_url ?? record.imageUrl ?? record.url ?? record.path ?? record.data ?? record.base64);
+  }
+  return valueToText(record.text ?? record.message ?? record.content);
+}
+
 function contentItemsToText(content: unknown): string {
   if (!Array.isArray(content)) return '';
   return content
-    .map((entry) => {
-      if (!entry || typeof entry !== 'object') return '';
-      const text = (entry as Record<string, unknown>).text;
-      return typeof text === 'string' ? text : '';
-    })
+    .map(contentItemToText)
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function payloadImagesToMarkdown(payload: Record<string, unknown>): string {
+  const images = Array.isArray(payload.images) ? payload.images : [];
+  const localImages = Array.isArray(payload.local_images) ? payload.local_images : [];
+  return [...images, ...localImages]
+    .map((entry) => markdownImageLine(entry))
     .filter(Boolean)
     .join('\n')
     .trim();
@@ -640,12 +703,7 @@ function valueToText(value: unknown): string {
   if (typeof value === 'string') return value.trim();
   if (Array.isArray(value)) {
     return value
-      .map((entry) => {
-        if (typeof entry === 'string') return entry;
-        if (!entry || typeof entry !== 'object') return '';
-        const record = entry as Record<string, unknown>;
-        return valueToText(record.text ?? record.message ?? record.content);
-      })
+      .map(contentItemToText)
       .filter(Boolean)
       .join('\n')
       .trim();
@@ -825,7 +883,9 @@ function turnsToMessages(thread: Record<string, unknown> | undefined) {
     const timestamp = toTimestampMs(record.timestamp ?? payload.timestamp, baseTimestamp + index);
 
     if (eventType === 'event_msg' && payloadType === 'user_message') {
-      const text = valueToText(payload.message ?? payload.text ?? payload.content);
+      const text = [valueToText(payload.message ?? payload.text ?? payload.content), payloadImagesToMarkdown(payload)]
+        .filter(Boolean)
+        .join('\n');
       if (text) messages.push({ role: 'user', type: 'user', text, timestamp });
       index += 1;
       continue;
@@ -1030,6 +1090,8 @@ function sessionActivityLabel(topType: string, payload: Record<string, unknown>)
   }
   if (topType === 'event_msg') {
     switch (payloadType) {
+      case 'token_count':
+        return '正在运行中，AI 正在处理上下文';
       case 'agent_message':
         return '正在生成回复';
       case 'exec_command_begin':
@@ -1084,6 +1146,14 @@ function readCodexSessionRuntimeState(sessionPath: unknown): CodexSessionRuntime
         sawActiveEvent = true;
         if (lifecycle !== 'terminal') activityLabel = activeLabel;
       }
+      if (topType === 'turn_context') {
+        sawActiveEvent = true;
+        if (lifecycle !== 'terminal') {
+          lifecycle = 'started';
+          activityLabel = activityLabel || '正在运行中，AI 正在接手任务';
+        }
+        continue;
+      }
       if (topType === 'event_msg' && payloadType === 'task_started') {
         lifecycle = 'started';
         activityLabel = '正在运行中，AI 正在接手任务';
@@ -1129,6 +1199,47 @@ function isWithinBase(base: string, targetPath: string): boolean {
   const resolvedBase = process.platform === 'win32' ? resolvedBaseRaw.toLowerCase() : resolvedBaseRaw;
   const resolved = process.platform === 'win32' ? resolvedRaw.toLowerCase() : resolvedRaw;
   return resolved === resolvedBase || resolved.startsWith(`${resolvedBase}${path.sep}`);
+}
+
+function normalizeMessageAttachments(value: unknown): MessageAttachmentInput[] {
+  if (!Array.isArray(value)) return [];
+  const attachments: MessageAttachmentInput[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+    const cleanPath = typeof record.path === 'string' ? record.path.trim() : '';
+    if (!cleanPath) continue;
+    const cleanName = typeof record.name === 'string' ? record.name.trim() : '';
+    const cleanMimeType = typeof record.mimeType === 'string' ? record.mimeType.trim() : '';
+    attachments.push({
+      name: cleanName || path.basename(cleanPath),
+      path: cleanPath,
+      mimeType: cleanMimeType || null,
+    });
+  }
+  return attachments;
+}
+
+function turnInputForMessage(cwd: string, text: string, attachments: MessageAttachmentInput[]): CodexTurnInputItem[] {
+  const input: CodexTurnInputItem[] = [];
+  const cleanText = text.trim();
+  if (cleanText) input.push({ type: 'text', text: cleanText });
+
+  const resolvedCwd = path.resolve(cwd || process.cwd());
+  for (const attachment of attachments) {
+    const attachmentPath = typeof attachment.path === 'string' ? attachment.path.trim() : '';
+    const mimeType = typeof attachment.mimeType === 'string' ? attachment.mimeType.trim().toLowerCase() : '';
+    if (!attachmentPath || !mimeType.startsWith('image/')) continue;
+    if (/^https?:\/\//i.test(attachmentPath)) {
+      input.push({ type: 'image', url: attachmentPath });
+      continue;
+    }
+    const resolvedPath = path.resolve(resolvedCwd, attachmentPath);
+    if (!isWithinBase(resolvedCwd, resolvedPath)) continue;
+    input.push({ type: 'localImage', path: resolvedPath });
+  }
+
+  return input.length > 0 ? input : [{ type: 'text', text }];
 }
 
 function findStringField(value: unknown, keys: string[], depth = 0): string | null {
@@ -1598,7 +1709,11 @@ function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Re
     return { ...item, type: 'command', command: text, text };
   }
 
-  if (type === 'imageView' || type === 'imageGeneration' || type === 'enteredReviewMode' || type === 'exitedReviewMode' || type === 'contextCompaction') {
+  if (type === 'imageView' || type === 'imageGeneration') {
+    return { ...item, type: 'status', text: imageItemToMarkdown(item) || formatJsonDetail(item) || type };
+  }
+
+  if (type === 'enteredReviewMode' || type === 'exitedReviewMode' || type === 'contextCompaction') {
     return { ...item, type: 'status', text: formatJsonDetail(item) || type };
   }
 
@@ -1960,17 +2075,18 @@ export class SessionOrchestrator {
     }
   }
 
-  async sendMessage(agentId: string, text: string): Promise<void> {
+  async sendMessage(agentId: string, text: string, attachments: MessageAttachmentInput[] = []): Promise<void> {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error('Agent not found');
     if (!agent.threadId) throw new Error('No active thread');
+    const safeAttachments = normalizeMessageAttachments(attachments);
 
     console.log(`\n${BLUE}${BOLD}[${agent.name}]${RESET} ${BOLD}User:${RESET} ${text.slice(0, 100)}${text.length > 100 ? '...' : ''}`);
 
     const timestamp = Date.now();
     agent.messages.push({ role: 'user', type: 'user', text, timestamp });
     if (agent.status === 'working' || agent.currentTurnId || agent.turnQueue.length > 0) {
-      agent.turnQueue.push({ text, timestamp });
+      agent.turnQueue.push({ text, timestamp, attachments: safeAttachments });
       this.broadcast(agent.id, 'turn/queued', {
         position: agent.turnQueue.length,
         queueLength: agent.turnQueue.length,
@@ -1979,16 +2095,17 @@ export class SessionOrchestrator {
       return;
     }
 
-    await this.startTurn(agent, text);
+    await this.startTurn(agent, text, safeAttachments);
   }
 
-  private async startTurn(agent: AgentInfo, text: string): Promise<void> {
+  private async startTurn(agent: AgentInfo, text: string, attachments: MessageAttachmentInput[] = []): Promise<void> {
     const threadId = agent.threadId;
     if (!threadId) throw new Error('No active thread');
     agent.status = 'working';
     const promptText = agent.systemPrompt?.trim()
       ? `${agent.systemPrompt.trim()}\n\n${text}`
       : text;
+    const input = turnInputForMessage(agent.cwd, promptText, attachments);
     const turnReq = codexTurnStartCall(threadId, promptText, {
       model: agent.model,
       effort: agent.reasoningEffort,
@@ -1997,6 +2114,7 @@ export class SessionOrchestrator {
       includeServiceTier: this.capabilities.supportsServiceTier,
       approvalPolicy: agent.approvalPolicy,
       cwd: agent.cwd,
+      input,
     });
     try {
       let res = await this.sendRequest(agent, turnReq);
@@ -2011,6 +2129,7 @@ export class SessionOrchestrator {
             cwd: agent.cwd,
             includeEffort: !this.isReasoningEffortError(message),
             includeServiceTier: false,
+            input,
           }));
         }
       }
@@ -2038,7 +2157,7 @@ export class SessionOrchestrator {
       queueLength: agent.turnQueue.length,
       timestamp: Date.now(),
     });
-    this.startTurn(agent, next.text)
+    this.startTurn(agent, next.text, next.attachments)
       .catch((err) => {
         agent.status = 'error';
         agent.currentTurnId = null;
@@ -2426,19 +2545,8 @@ export class SessionOrchestrator {
       const visibleThreadIds = new Set(visibleThreads.data.map((thread) => thread.id).filter(Boolean));
       const visibleAgents = agents.filter((agent) => {
         if (!agent.codexThreadId?.trim()) return true;
-        return visibleThreadIds.has(agent.codexThreadId);
+        return visibleThreadIds.has(agent.codexThreadId) || agent.status !== 'stopped';
       });
-      const visibleAgentIds = new Set(visibleAgents.map((agent) => agent.id));
-      const hiddenAgents = agents.filter((agent) => !visibleAgentIds.has(agent.id));
-      for (const hiddenAgent of hiddenAgents) {
-        const runningAgent = this.agents.get(hiddenAgent.id);
-        if (!runningAgent) continue;
-        console.log(`[agents] Hiding archived or non-visible Codex thread ${hiddenAgent.codexThreadId} (${hiddenAgent.name})`);
-        try { runningAgent.process.kill(); } catch {}
-        runningAgent.status = 'stopped';
-        this.agents.delete(hiddenAgent.id);
-      }
-      if (hiddenAgents.length > 0) this.persistAgentsToDisk();
       return visibleAgents;
     } catch (err) {
       console.warn('[agents] Failed to filter agents by Codex thread state:', err);

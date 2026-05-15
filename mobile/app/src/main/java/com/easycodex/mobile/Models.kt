@@ -142,6 +142,8 @@ data class CliConsoleWindow(
     val cwd: String = DEFAULT_AGENT_CWD,
     val model: String = DEFAULT_AGENT_MODEL,
     val reasoningEffort: String = DEFAULT_REASONING_EFFORT,
+    val sandboxMode: String = "workspace-write",
+    val skipGitRepoCheck: Boolean = true,
     val version: String = "",
     val running: Boolean = false,
     val busy: Boolean = false,
@@ -225,6 +227,12 @@ data class PendingStreamDelta(
     val agentId: String,
     val itemId: String,
     var type: String,
+    val text: StringBuilder = StringBuilder(),
+)
+
+data class PendingCliOutput(
+    val windowId: String,
+    val role: String,
     val text: StringBuilder = StringBuilder(),
 )
 

@@ -16,12 +16,10 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.view.HapticFeedbackConstants
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -30,6 +28,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.selection.toggleable
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -47,10 +46,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -103,6 +100,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -634,8 +633,12 @@ fun SettingsApp(onClose: () -> Unit) {
                     transitionSpec = {
                         val forward = initialState == null && targetState != null
                         val offset = if (forward) 72 else -72
-                        (slideInHorizontally { offset } + fadeIn())
-                            .togetherWith(slideOutHorizontally { -offset } + fadeOut())
+                        (slideInHorizontally(animationSpec = EasyCodexMotion.spatialTween()) { offset } +
+                            fadeIn(animationSpec = EasyCodexMotion.normalTween()))
+                            .togetherWith(
+                                slideOutHorizontally(animationSpec = EasyCodexMotion.exitTween()) { -offset } +
+                                    fadeOut(animationSpec = EasyCodexMotion.fastTween()),
+                            )
                     },
                     label = "settingsDestination",
                 ) { activeDestination ->
@@ -1349,7 +1352,7 @@ private fun SettingsMenuItem(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(18.dp))
-            .clickable(onClick = onClick),
+            .clickable(role = Role.Button, onClick = onClick),
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.68f)),
@@ -1467,10 +1470,18 @@ private fun SwitchSettingRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
 ) {
+    val hapticView = LocalView.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) },
+            .toggleable(
+                value = checked,
+                role = Role.Switch,
+                onValueChange = {
+                    hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    onCheckedChange(it)
+                },
+            ),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1478,52 +1489,7 @@ private fun SwitchSettingRow(
             Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        SmoothSettingsSwitch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}
-
-@Composable
-private fun SmoothSettingsSwitch(
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-) {
-    val trackColor by animateColorAsState(
-        targetValue = if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest,
-        animationSpec = spring(stiffness = 420f, dampingRatio = 0.86f),
-        label = "settingsSwitchTrack",
-    )
-    val thumbColor by animateColorAsState(
-        targetValue = if (checked) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-        animationSpec = spring(stiffness = 420f, dampingRatio = 0.86f),
-        label = "settingsSwitchThumb",
-    )
-    val thumbOffset by animateDpAsState(
-        targetValue = if (checked) 22.dp else 2.dp,
-        animationSpec = spring(stiffness = 520f, dampingRatio = 0.78f),
-        label = "settingsSwitchThumbOffset",
-    )
-    Surface(
-        modifier = Modifier
-            .width(52.dp)
-            .height(32.dp)
-            .clickable { onCheckedChange(!checked) },
-        shape = RoundedCornerShape(16.dp),
-        color = trackColor,
-        tonalElevation = if (checked) 2.dp else 0.dp,
-    ) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            Surface(
-                modifier = Modifier
-                    .offset(x = thumbOffset)
-                    .size(28.dp),
-                shape = CircleShape,
-                color = thumbColor,
-                shadowElevation = 2.dp,
-            ) {}
-        }
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 
@@ -1657,6 +1623,7 @@ private class SettingsRelayClient(
         .build()
     private val main = Handler(Looper.getMainLooper())
     private val pending = ConcurrentHashMap<String, (JSONObject?, String?) -> Unit>()
+    private val pendingTimeoutRunnables = ConcurrentHashMap<String, Runnable>()
     private var socket: WebSocket? = null
     private var requestCounter = 0
 
@@ -1750,22 +1717,28 @@ private class SettingsRelayClient(
             callback(null, "连接已关闭")
             return
         }
-        main.postDelayed({
+        val timeoutRunnable = Runnable {
+            pendingTimeoutRunnables.remove(requestId)
             val timeoutCallback = pending.remove(requestId)
             timeoutCallback?.invoke(null, "请求本地中继超时")
-        }, SETTINGS_RELAY_REQUEST_TIMEOUT_MS)
+        }
+        pendingTimeoutRunnables[requestId] = timeoutRunnable
+        main.postDelayed(timeoutRunnable, SETTINGS_RELAY_REQUEST_TIMEOUT_MS)
     }
 
     private fun handleMessage(raw: String) {
         val msg = runCatching { JSONObject(raw) }.getOrNull() ?: return
         val requestId = msg.optString("requestId")
         if (requestId.isBlank()) return
+        pendingTimeoutRunnables.remove(requestId)?.let { main.removeCallbacks(it) }
         val callback = pending.remove(requestId) ?: return
         if (msg.optString("type") == "error") callback(null, msg.optString("error", "请求失败"))
         else callback(msg, null)
     }
 
     private fun failPending(error: String) {
+        pendingTimeoutRunnables.values.forEach { main.removeCallbacks(it) }
+        pendingTimeoutRunnables.clear()
         val callbacks = pending.values.toList()
         pending.clear()
         callbacks.forEach { it(null, error) }

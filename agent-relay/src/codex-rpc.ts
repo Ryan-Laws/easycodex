@@ -34,6 +34,11 @@ export interface RpcEvent {
 
 export type RpcFrame = RpcReply | RpcEvent;
 
+export type CodexTurnInputItem =
+  | { type: 'text'; text: string }
+  | { type: 'image'; url: string }
+  | { type: 'localImage'; path: string };
+
 export function parseRpcFrame(line: string): RpcFrame | null {
   try {
     return JSON.parse(line);
@@ -154,11 +159,12 @@ export function codexTurnStartCall(
     includeServiceTier?: boolean;
     approvalPolicy?: string;
     cwd?: string;
+    input?: CodexTurnInputItem[];
   } = {},
 ): string {
   const params: Record<string, unknown> = {
     threadId,
-    input: [{ type: 'text', text }],
+    input: options.input && options.input.length > 0 ? options.input : [{ type: 'text', text }],
   };
   withOptionalValues(params, [
     ['model', options.model],
