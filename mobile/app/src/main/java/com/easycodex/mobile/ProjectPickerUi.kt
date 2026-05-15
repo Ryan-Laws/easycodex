@@ -130,24 +130,22 @@ fun AgentDrawer(
         debouncedQuery = query
     }
     val normalizedQuery = debouncedQuery.trim().lowercase(Locale.ROOT)
-    val drawerAgents by remember {
-        derivedStateOf {
-            val alertAgentIds = alerts.mapTo(mutableSetOf()) { it.agentId }
-            agents.mapIndexed { index, agent ->
-                DrawerAgentItem(
-                    id = agent.id,
-                    position = index,
-                    name = agent.name,
-                    projectPath = cleanNullablePath(agent.projectRoot)
-                        ?: cleanNullablePath(agent.cwd)
-                        ?: CONVERSATION_PROJECT_PATH,
-                    status = agent.status,
-                    activity = agent.activity,
-                    updatedAt = agent.updatedAt,
-                    pinned = agent.pinned,
-                    hasAlert = agent.id in alertAgentIds,
-                )
-            }
+    val drawerAgents = remember(agents, alerts) {
+        val alertAgentIds = alerts.mapTo(mutableSetOf()) { it.agentId }
+        agents.mapIndexed { index, agent ->
+            DrawerAgentItem(
+                id = agent.id,
+                position = index,
+                name = agent.name,
+                projectPath = cleanNullablePath(agent.projectRoot)
+                    ?: cleanNullablePath(agent.cwd)
+                    ?: CONVERSATION_PROJECT_PATH,
+                status = agent.status,
+                activity = agent.activity,
+                updatedAt = agent.updatedAt,
+                pinned = agent.pinned,
+                hasAlert = agent.id in alertAgentIds,
+            )
         }
     }
     val visibleAgents = remember(drawerAgents, normalizedQuery) {

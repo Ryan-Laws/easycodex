@@ -455,10 +455,10 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
         showCliMode = false
     }
 
-    LaunchedEffect(drawerState.currentValue, drawerState.targetValue) {
+    LaunchedEffect(drawerState.currentValue, drawerState.targetValue, controller.agentsRevision) {
         val drawerVisible = drawerState.currentValue != DrawerValue.Closed || drawerState.targetValue != DrawerValue.Closed
         if (drawerVisible) {
-            if (drawerAgentsSnapshot == null) captureDrawerSnapshot()
+            captureDrawerSnapshot()
         } else {
             delay(120)
             drawerAgentsSnapshot = null

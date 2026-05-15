@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.4 - 2026-05-16
+
+### Fixed
+
+- Fixed the Android task drawer so synced relay and Codex thread updates refresh visible project task counts instead of staying stuck at zero tasks.
+- Refreshed the drawer snapshot while it is open so newly synced tasks appear without closing and reopening the menu.
+
 ## 0.1.3 - 2026-05-15
 
 ### Added
