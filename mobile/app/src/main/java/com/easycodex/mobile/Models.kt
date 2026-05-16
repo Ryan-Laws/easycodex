@@ -8,6 +8,7 @@ data class AgentMessage(
     val itemId: String? = null,
     val streaming: Boolean = false,
     val attachments: List<AttachmentDraft> = emptyList(),
+    val durationMs: Long? = null,
 )
 
 data class Agent(
@@ -89,6 +90,8 @@ data class AgentUserInputRequest(
 data class PlanReview(
     val agentId: String,
     val message: AgentMessage,
+    val taskName: String = "",
+    val projectPath: String = "",
 )
 
 data class RuntimeCapabilities(
@@ -144,6 +147,16 @@ data class CliConsoleWindow(
     val reasoningEffort: String = DEFAULT_REASONING_EFFORT,
     val sandboxMode: String = "workspace-write",
     val skipGitRepoCheck: Boolean = true,
+    val mode: String = "exec",
+    val sessionId: String = "",
+    val reviewTarget: String = "",
+    val profile: String = "",
+    val images: List<String> = emptyList(),
+    val addDirs: List<String> = emptyList(),
+    val jsonOutput: Boolean = false,
+    val ephemeral: Boolean = false,
+    val ignoreRules: Boolean = false,
+    val truncated: Boolean = false,
     val version: String = "",
     val running: Boolean = false,
     val busy: Boolean = false,
@@ -239,6 +252,7 @@ data class PendingCliOutput(
 data class FileChangeLiveStat(
     var additions: Int = 0,
     var deletions: Int = 0,
+    val paths: MutableSet<String> = linkedSetOf(),
 )
 
 data class CommandOutputLiveStat(

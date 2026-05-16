@@ -44,12 +44,30 @@ import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 
-private const val PLAN_REVIEW_PREVIEW_LINE_LIMIT = 80
-private const val PLAN_REVIEW_PREVIEW_CHAR_LIMIT = 8_000
+@Composable
+private fun FilePathLine(path: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        FileTypeIcon(path)
+        Text(
+            path,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
 @Composable
 fun ConnectionBanner(
     status: String,
@@ -185,7 +203,18 @@ fun UserInputRequestDialog(
                                     FilterChip(
                                         selected = selected,
                                         onClick = { answers = answers + (question.id to option.label) },
-                                        label = { Text(option.label) },
+                                        label = {
+                                            Column {
+                                                Text(option.label)
+                                                if (option.description.isNotBlank()) {
+                                                    Text(
+                                                        option.description,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    )
+                                                }
+                                            }
+                                        },
                                     )
                                 }
                             }
@@ -197,6 +226,7 @@ fun UserInputRequestDialog(
                                 modifier = Modifier.fillMaxWidth(),
                                 minLines = 2,
                                 label = { Text("输入回答") },
+                                visualTransformation = if (question.isSecret) PasswordVisualTransformation() else VisualTransformation.None,
                             )
                         }
                     }
@@ -223,16 +253,33 @@ fun UserInputRequestDialog(
 fun PlanReviewDialog(
     review: PlanReview,
     onDismiss: () -> Unit,
-    onOptimize: () -> Unit,
+    onOptimize: (String) -> Unit,
     onStart: () -> Unit,
 ) {
+    var adjustmentText by remember(review.agentId, review.message.stableKey()) { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("是否开始这个计划？") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "你可以先单独查看完整计划，也可以让 EasyCodex 继续优化后再执行。",
+                    "任务：${review.taskName.ifBlank { "未命名任务" }}",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (review.projectPath.isNotBlank()) {
+                    Text(
+                        review.projectPath,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Text(
+                    "你可以直接开始，也可以写一句希望怎么调整。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -250,6 +297,15 @@ fun PlanReviewDialog(
                             .padding(12.dp),
                     )
                 }
+                OutlinedTextField(
+                    value = adjustmentText,
+                    onValueChange = { adjustmentText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    maxLines = 4,
+                    label = { Text("补充调整要求") },
+                    placeholder = { Text("例如：先问我更多问题，或把测试步骤写清楚") },
+                )
             }
         },
         confirmButton = {
@@ -259,8 +315,8 @@ fun PlanReviewDialog(
         },
         dismissButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onOptimize) {
-                    Text("优化计划")
+                TextButton(onClick = { onOptimize(adjustmentText) }) {
+                    Text("让他补充/调整")
                 }
                 TextButton(onClick = onDismiss) {
                     Text("稍后")
@@ -272,44 +328,13 @@ fun PlanReviewDialog(
 
 @Composable
 private fun PlanReviewPreview(text: String, modifier: Modifier = Modifier) {
-    val preview = remember(text) { planPreviewMarkdown(text) }
+    val planText = remember(text) { planDisplayText(text).ifBlank { "计划内容为空。" } }
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        MarkdownMessageContent(preview.text, previewLongContent = false)
-        if (preview.truncated) {
-            Text(
-                "计划内容较长，移动端仅显示前 ${preview.lineCount} 行摘要。",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
+        MarkdownMessageContent(planText)
     }
-}
-
-private data class PlanPreviewMarkdown(
-    val text: String,
-    val lineCount: Int,
-    val truncated: Boolean,
-)
-
-private fun planPreviewMarkdown(text: String): PlanPreviewMarkdown {
-    var totalChars = 0
-    var truncated = false
-    val lines = mutableListOf<String>()
-    for (line in text.lineSequence()) {
-        if (lines.size >= PLAN_REVIEW_PREVIEW_LINE_LIMIT || totalChars >= PLAN_REVIEW_PREVIEW_CHAR_LIMIT) {
-            truncated = true
-            break
-        }
-        val normalized = line.trimEnd()
-        totalChars += normalized.length
-        lines.add(normalized)
-    }
-    val previewText = lines.joinToString("\n").trim().ifBlank { "计划内容为空。" }
-    return PlanPreviewMarkdown(previewText, lines.count { it.isNotBlank() }, truncated)
 }
 
 @Composable
@@ -367,7 +392,7 @@ fun DiffReviewDialog(
                                 fontWeight = FontWeight.SemiBold,
                             )
                             status.files.take(8).forEach { file ->
-                                Text(file, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                FilePathLine(file)
                             }
                         }
                     }
@@ -384,6 +409,7 @@ fun DiffReviewDialog(
                             FilterChip(
                                 selected = review.selectedFile == file.path,
                                 onClick = { onSelectFile(file.path) },
+                                leadingIcon = { FileTypeIcon(file.path, modifier = Modifier.size(18.dp)) },
                                 label = { Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             )
                         }
@@ -458,7 +484,7 @@ fun DiffReviewDialog(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             commitDraft.files.take(6).forEach { file ->
-                                Text(file, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                FilePathLine(file)
                             }
                             if (commitDraft.files.size > 6) {
                                 Text(
@@ -502,7 +528,7 @@ fun DiffReviewDialog(
                     Text(commitDraft.message)
                     Text(strings.commitFilesCount(commitDraft.files.size))
                     commitDraft.files.take(10).forEach { file ->
-                        Text(file, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        FilePathLine(file)
                     }
                 }
             },

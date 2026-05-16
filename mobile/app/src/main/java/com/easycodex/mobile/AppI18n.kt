@@ -29,6 +29,8 @@ class AppStrings {
     lateinit var connectionSecurity: String
     lateinit var connectionSecurityDetail: String
     lateinit var clearConnectionConfig: String
+    lateinit var confirmClearConnectionTitle: String
+    lateinit var confirmClearConnectionBody: String
     lateinit var connectionConfigCleared: String
     lateinit var scanQrCode: String
     lateinit var saveSettings: String
@@ -93,8 +95,13 @@ class AppStrings {
     lateinit var dataAndSecurity: String
     lateinit var dataAndSecurityDetail: String
     lateinit var clearLocalApiKey: String
+    lateinit var confirmClearApiKeyTitle: String
+    lateinit var confirmClearApiKeyBody: String
     lateinit var apiKeyCleared: String
     lateinit var unsynced: String
+    lateinit var websocketUnavailable: String
+    lateinit var relayRequestTimeout: String
+    lateinit var requestFailed: String
     lateinit var syncRelayNotifications: String
     lateinit var allowNotificationPermission: String
     lateinit var notificationsDisabled: String
@@ -141,6 +148,7 @@ class AppStrings {
     lateinit var archiveRunningTaskBody: String
     lateinit var confirmArchiveTask: String
     lateinit var taskArchived: String
+    lateinit var taskRemovedLocally: String
     lateinit var taskArchiveFailed: (String) -> String
     lateinit var runDirectly: String
     lateinit var planFirst: String
@@ -151,6 +159,35 @@ class AppStrings {
     lateinit var viewFullDiff: String
     lateinit var interrupt: String
     lateinit var interruptFailed: (String) -> String
+    lateinit var runtimeSettings: String
+    lateinit var quickReplies: String
+    lateinit var quickRepliesCollapsed: String
+    lateinit var commonPrompts: String
+    lateinit var planReady: String
+    lateinit var planPreparing: String
+    lateinit var planMessageFallback: String
+    lateinit var planReviewAction: String
+    lateinit var commandLabel: String
+    lateinit var commandOutputLabel: String
+    lateinit var fileChangeLabel: String
+    lateinit var subAgentLabel: String
+    lateinit var planLabel: String
+    lateinit var thinkingLabel: String
+    lateinit var statusLabel: String
+    lateinit var detailGroupCommands: (Boolean, Int) -> String
+    lateinit var detailGroupFilesChanged: (Int) -> String
+    lateinit var detailGroupTools: (Boolean, Int) -> String
+    lateinit var filesChangedCount: (Int) -> String
+    lateinit var detailsCollapse: String
+    lateinit var detailsExpand: String
+    lateinit var commandProcessed: String
+    lateinit var commandProcessedWithDuration: (String) -> String
+    lateinit var taskProcessedWithDuration: (String) -> String
+    lateinit var commandStarted: String
+    lateinit var commandRan: (String) -> String
+    lateinit var commandDefaultTitle: String
+    lateinit var processed: String
+    lateinit var copyCode: String
     lateinit var diffReview: String
     lateinit var readingGitStatusAndDiff: String
     lateinit var fileDiff: String
@@ -249,6 +286,15 @@ class AppStrings {
     lateinit var nextPage: String
     lateinit var startVoiceInput: String
     lateinit var tapToStartVoiceInput: String
+    lateinit var voiceInputPrompt: String
+    lateinit var quickReplyInvestigatePlan: String
+    lateinit var quickReplyFixAndTest: String
+    lateinit var quickReplyExplainLastError: String
+    lateinit var quickReplyContinueLastTask: String
+    lateinit var queuedFollowUpDetail: String
+    lateinit var queuedFollowUpEmpty: String
+    lateinit var queuedFollowUpsMore: (Int) -> String
+    lateinit var guideAction: String
     lateinit var createEasyCodexSession: String
     lateinit var name: String
     lateinit var projectPathDesktop: String
@@ -361,6 +407,8 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     connectionSecurity = "连接安全"
     connectionSecurityDetail = "ws:// 仅允许本机、模拟器或局域网地址；公网中继请使用 wss://。"
     clearConnectionConfig = "清除连接配置"
+    confirmClearConnectionTitle = "清除连接配置？"
+    confirmClearConnectionBody = "这会移除已保存的中继地址和 API Key，并重置连接目标。"
     connectionConfigCleared = "已清除连接配置"
     scanQrCode = "扫描二维码"
     saveSettings = "保存设置"
@@ -425,8 +473,13 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     dataAndSecurity = "数据与安全"
     dataAndSecurityDetail = "中继地址、API Key 和默认会话参数保存在 Android 应用私有存储。"
     clearLocalApiKey = "清除本机 API Key"
+    confirmClearApiKeyTitle = "清除本机 API Key？"
+    confirmClearApiKeyBody = "清除后需要重新扫码或手动填写 API Key 才能连接本地中继。"
     apiKeyCleared = "API Key 已清除"
     unsynced = "未同步"
+    websocketUnavailable = "WebSocket 不可用"
+    relayRequestTimeout = "请求本地中继超时"
+    requestFailed = "请求失败"
     syncRelayNotifications = "正在同步中继通知设置"
     allowNotificationPermission = "请先允许通知权限"
     notificationsDisabled = "通知权限未开启，无法发送测试通知"
@@ -473,6 +526,7 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     archiveRunningTaskBody = "此任务仍在运行。归档会先停止任务，然后从手机端和 Codex 任务列表中移除。"
     confirmArchiveTask = "归档"
     taskArchived = "任务已归档"
+    taskRemovedLocally = "任务已从手机端移除"
     taskArchiveFailed = { "归档任务失败：$it" }
     runDirectly = "直接执行"
     planFirst = "先计划"
@@ -483,6 +537,35 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     viewFullDiff = "查看完整 diff"
     interrupt = "中断"
     interruptFailed = { "中断失败：$it" }
+    runtimeSettings = "运行设置"
+    quickReplies = "快速回答"
+    quickRepliesCollapsed = "收起"
+    commonPrompts = "常用提示"
+    planReady = "计划已生成"
+    planPreparing = "正在整理计划"
+    planMessageFallback = "可以单独查看完整计划。"
+    planReviewAction = "查看、优化或开始计划"
+    commandLabel = "命令"
+    commandOutputLabel = "命令输出"
+    fileChangeLabel = "文件改动"
+    subAgentLabel = "子代理"
+    planLabel = "计划"
+    thinkingLabel = "思考"
+    statusLabel = "状态"
+    detailGroupCommands = { running, count -> if (running) "正在运行 $count 条命令" else "已运行 $count 条命令" }
+    detailGroupFilesChanged = { "$it 个文件已更改" }
+    detailGroupTools = { running, count -> if (running) "正在处理 $count 条细节" else "已处理 $count 条细节" }
+    filesChangedCount = { "$it 个文件已更改" }
+    detailsCollapse = "收起细节"
+    detailsExpand = "展开细节"
+    commandProcessed = "已处理"
+    commandProcessedWithDuration = { "已处理 $it" }
+    taskProcessedWithDuration = { "已处理 $it" }
+    commandStarted = "已开始"
+    commandRan = { "已运行 $it" }
+    commandDefaultTitle = "命令"
+    processed = "已处理"
+    copyCode = "复制代码"
     diffReview = "改动验收"
     readingGitStatusAndDiff = "正在读取 Git 状态和 diff"
     fileDiff = "文件 diff"
@@ -581,6 +664,15 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     nextPage = "下一页"
     startVoiceInput = "开始语音输入"
     tapToStartVoiceInput = "点击开始语音输入"
+    voiceInputPrompt = "说出要发送给 EasyCodex 的内容"
+    quickReplyInvestigatePlan = "先调查，再给修复计划"
+    quickReplyFixAndTest = "修复并测试"
+    quickReplyExplainLastError = "基于上次任务解释报错"
+    quickReplyContinueLastTask = "继续上次任务"
+    queuedFollowUpDetail = "排队任务详情"
+    queuedFollowUpEmpty = "任务内容为空。"
+    queuedFollowUpsMore = { "另有 $it 个排队任务" }
+    guideAction = "引导"
     createEasyCodexSession = "新建 EasyCodex 会话"
     name = "名称"
     projectPathDesktop = "项目路径（电脑端）"
@@ -636,6 +728,8 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     connectionSecurity = "Connection security"
     connectionSecurityDetail = "ws:// is allowed only for localhost, emulator, or LAN addresses. Use wss:// for public relays."
     clearConnectionConfig = "Clear connection"
+    confirmClearConnectionTitle = "Clear connection config?"
+    confirmClearConnectionBody = "This removes the saved relay URL and API Key, then resets the connection target."
     connectionConfigCleared = "Connection config cleared"
     scanQrCode = "Scan QR code"
     saveSettings = "Save settings"
@@ -700,8 +794,13 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     dataAndSecurity = "Data and security"
     dataAndSecurityDetail = "Relay URL, API Key, and default session settings are stored in Android app-private storage."
     clearLocalApiKey = "Clear local API Key"
+    confirmClearApiKeyTitle = "Clear local API Key?"
+    confirmClearApiKeyBody = "After clearing it, scan a QR code or enter the API Key again before connecting to the relay."
     apiKeyCleared = "API Key cleared"
     unsynced = "Not synced"
+    websocketUnavailable = "WebSocket is unavailable"
+    relayRequestTimeout = "Relay request timed out"
+    requestFailed = "Request failed"
     syncRelayNotifications = "Syncing relay notification settings"
     allowNotificationPermission = "Allow notification permission first"
     notificationsDisabled = "Notification permission is disabled, so a test notification cannot be sent"
@@ -748,6 +847,7 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     archiveRunningTaskBody = "This task is still running. Archiving it will stop the task and remove it from the mobile and Codex task lists."
     confirmArchiveTask = "Archive"
     taskArchived = "Task archived"
+    taskRemovedLocally = "Task removed from this phone"
     taskArchiveFailed = { "Failed to archive task: $it" }
     runDirectly = "Run now"
     planFirst = "Plan first"
@@ -758,6 +858,35 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     viewFullDiff = "View full diff"
     interrupt = "Interrupt"
     interruptFailed = { "Interrupt failed: $it" }
+    runtimeSettings = "Runtime settings"
+    quickReplies = "Quick replies"
+    quickRepliesCollapsed = "Collapse"
+    commonPrompts = "Common prompts"
+    planReady = "Plan ready"
+    planPreparing = "Preparing plan"
+    planMessageFallback = "You can open the full plan separately."
+    planReviewAction = "Review, refine, or start plan"
+    commandLabel = "Command"
+    commandOutputLabel = "Command output"
+    fileChangeLabel = "File change"
+    subAgentLabel = "Subagent"
+    planLabel = "Plan"
+    thinkingLabel = "Thinking"
+    statusLabel = "Status"
+    detailGroupCommands = { running, count -> if (running) "Running $count commands" else "Ran $count commands" }
+    detailGroupFilesChanged = { count -> if (count == 1) "1 file changed" else "$count files changed" }
+    detailGroupTools = { running, count -> if (running) "Processing $count details" else "Processed $count details" }
+    filesChangedCount = { count -> if (count == 1) "1 file changed" else "$count files changed" }
+    detailsCollapse = "Collapse details"
+    detailsExpand = "Expand details"
+    commandProcessed = "Processed"
+    commandProcessedWithDuration = { "Processed $it" }
+    taskProcessedWithDuration = { "Processed $it" }
+    commandStarted = "Started"
+    commandRan = { "Ran $it" }
+    commandDefaultTitle = "Command"
+    processed = "Processed"
+    copyCode = "Copy code"
     diffReview = "Review changes"
     readingGitStatusAndDiff = "Reading Git status and diff"
     fileDiff = "File diff"
@@ -856,6 +985,15 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     nextPage = "Next"
     startVoiceInput = "Start voice input"
     tapToStartVoiceInput = "Tap to start voice input"
+    voiceInputPrompt = "Say what you want to send to EasyCodex"
+    quickReplyInvestigatePlan = "Investigate first, then propose a fix plan"
+    quickReplyFixAndTest = "Fix and test"
+    quickReplyExplainLastError = "Explain the last error"
+    quickReplyContinueLastTask = "Continue the last task"
+    queuedFollowUpDetail = "Queued task details"
+    queuedFollowUpEmpty = "Task content is empty."
+    queuedFollowUpsMore = { count -> if (count == 1) "1 more queued task" else "$count more queued tasks" }
+    guideAction = "Guide"
     createEasyCodexSession = "New EasyCodex session"
     name = "Name"
     projectPathDesktop = "Project path (desktop)"

@@ -72,9 +72,9 @@ Agent and message actions:
 | `send_message` | Send a turn to an agent, or queue it while busy. Supports attachments. |
 | `interrupt` | Interrupt the current turn. |
 | `respond_agent_request` | Approve or deny a Codex approval/tool request. |
-| `respond_agent_user_input` | Answer a Codex user-input request produced by `request_user_input`. |
+| `respond_agent_user_input` | Answer a Codex user-input request produced by `request_user_input`; payload `answers` is keyed by question id and relay formats each value as `{ answers: string[] }` for Codex. |
 | `stop_agent` | Stop a running agent process. |
-| `archive_codex_thread` | Archive a Codex thread and optionally stop/remove its running agent. |
+| `archive_codex_thread` | Archive a Codex thread. If a relay-managed agent is still running for that thread, the relay first marks it stopped, kills the process, removes it from local state, then sends Codex `thread/archive`. |
 | `update_agent_model` | Change the in-memory model for an agent. |
 | `update_agent_config` | Change model, cwd, approval policy, system prompt, service tier, or reasoning effort. |
 
@@ -95,7 +95,7 @@ CLI actions:
 | Action | Purpose |
 | --- | --- |
 | `cli_start` | Prepare a CLI window and return Codex version/runtime metadata. |
-| `cli_run` | Run one `codex exec` prompt for a window. Supports cwd, model, reasoning effort, sandbox mode, and skip-git-repo-check. |
+| `cli_run` | Run one `codex exec` command for a window. Supports cwd, model, reasoning effort, sandbox mode, skip-git-repo-check, `mode` (`exec`, `resume`, `review`), `sessionId`, `reviewTarget`, `profile`, `images`, `addDirs`, `jsonOutput`, `ephemeral`, and `ignoreRules`. |
 | `cli_stop` | Stop the active CLI run for a window. |
 
 Workspace and attachment actions:

@@ -1,10 +1,11 @@
 {
   "name": "easycodex-agent-relay",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
+    "test": "node --import tsx --test test/*.test.ts",
     "start": "node dist/server.js"
   },
   "dependencies": {

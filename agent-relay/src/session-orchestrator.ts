@@ -46,7 +46,8 @@ interface AgentInfo {
   codexThreadId: string | null;
   codexPath: string | null;
   source: string | null;
-  messages: { role: string; type: string; text: string; timestamp: number; _itemId?: string }[];
+  projectless: boolean;
+  messages: { role: string; type: string; text: string; timestamp: number; _itemId?: string; durationMs?: number }[];
   messageItemIds: Map<string, number>;
   fileSnapshots: Map<string, { exists: boolean; content: string | null }>;
   toolCalls: Map<string, { name: string; text: string }>;
@@ -56,6 +57,25 @@ interface AgentInfo {
   buffer: string;
   pendingResponses: Map<number | string, (res: RpcReply) => void>;
   pendingAgentRequests: Map<string, { id: number | string; method: string; params: Record<string, unknown>; timestamp: number }>;
+}
+
+export interface LocallyArchivableAgent {
+  id: string;
+  status: string;
+  process: { kill: () => unknown };
+}
+
+export function stopAgentLocallyForArchive<T extends LocallyArchivableAgent>(
+  agent: T,
+  agents: Map<string, T>,
+  markStopped: (agent: T) => void,
+  persist: () => void,
+): void {
+  markStopped(agent);
+  try { agent.process.kill(); } catch {}
+  agent.status = 'stopped';
+  agents.delete(agent.id);
+  persist();
 }
 
 type BroadcastFn = (agentId: string, event: string, data: unknown) => void;
@@ -90,7 +110,7 @@ const CONTEXT_PLACEHOLDER = '已加载项目上下文。';
 const DEFAULT_SERVICE_TIER = 'default';
 const USER_INPUT_REQUEST_METHOD = 'item/tool/requestUserInput';
 
-interface CodexSessionRuntimeState {
+export interface CodexSessionRuntimeState {
   running: boolean;
   updatedAt: number;
   activityLabel: string | null;
@@ -139,6 +159,7 @@ interface PersistedAgent {
   reasoningEffort?: string;
   systemPrompt?: string;
   codexThreadId?: string;
+  projectless?: boolean;
 }
 
 export interface CodexThreadSummary {
@@ -194,7 +215,7 @@ export interface CodexThreadDetail extends CodexThreadSummary {
   serviceTier: string;
   reasoningEffort: string;
   activityLabel?: string | null;
-  messages: { role: string; type: string; text: string; timestamp: number; _itemId?: string }[];
+  messages: { role: string; type: string; text: string; timestamp: number; _itemId?: string; durationMs?: number }[];
 }
 
 export interface CodexSidebarSnapshot {
@@ -226,6 +247,17 @@ function diffSummary(text: string): { files: string[]; additions: number; deleti
   let additions = 0;
   let deletions = 0;
   for (const line of text.split(/\r?\n/)) {
+    const summary = line.trim().match(/^[-•]\s+(.+?)(?:\s+\(?\+(\d+)\s+-(\d+)\)?)?$/);
+    if (summary?.[1]) {
+      const normalized = normalizeFilePath(summary[1]);
+      if (normalized && (normalized.includes('/') || normalized.includes('\\') || normalized.includes('.'))) {
+        files.add(normalized);
+        additions += Number(summary[2] || 0);
+        deletions += Number(summary[3] || 0);
+        continue;
+      }
+    }
+
     if (line.startsWith('+') && !line.startsWith('+++')) additions += 1;
     if (line.startsWith('-') && !line.startsWith('---')) deletions += 1;
 
@@ -421,6 +453,10 @@ function codexArchivedThreadIds(): Set<string> {
   }
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function booleanField(value: Record<string, unknown>, keys: string[]): boolean {
   return keys.some((key) => value[key] === true);
 }
@@ -476,6 +512,29 @@ function readCodexDesktopState(): Record<string, unknown> | null {
     console.warn('[codex-state] Failed to read desktop state:', err);
     return null;
   }
+}
+
+function writeCodexDesktopState(state: Record<string, unknown>): void {
+  try {
+    fs.mkdirSync(path.dirname(CODEX_GLOBAL_STATE_PATH), { recursive: true });
+    fs.writeFileSync(CODEX_GLOBAL_STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[codex-state] Failed to write desktop state:', err);
+  }
+}
+
+function markCodexProjectlessThread(threadId: string): void {
+  const cleanThreadId = threadId.trim();
+  if (!cleanThreadId) return;
+  const state = readCodexDesktopState() || {};
+  const ids = new Set(stringArray(state['projectless-thread-ids']));
+  ids.add(cleanThreadId);
+  state['projectless-thread-ids'] = Array.from(ids);
+  const rawHints = state['thread-workspace-root-hints'];
+  if (rawHints && typeof rawHints === 'object' && !Array.isArray(rawHints)) {
+    delete (rawHints as Record<string, unknown>)[cleanThreadId];
+  }
+  writeCodexDesktopState(state);
 }
 
 function codexDesktopAtomState(): Record<string, unknown> | null {
@@ -742,6 +801,7 @@ function turnsToMessages(thread: Record<string, unknown> | undefined) {
     const turnRecord = turn as Record<string, unknown>;
     const turnStartedAt = toTimestampMs(turnRecord.startedAt, baseTimestamp + index);
     const turnCompletedAt = toTimestampMs(turnRecord.completedAt, turnStartedAt);
+    const turnDurationMs = turnCompletedAt > turnStartedAt ? turnCompletedAt - turnStartedAt : undefined;
     const itemTimestamp = (record: Record<string, unknown>, type: string) => {
       const fallback = type === 'userMessage' ? turnStartedAt : turnCompletedAt;
       return toTimestampMs(record.timestamp ?? record.createdAt ?? record.updatedAt, fallback) + index;
@@ -749,6 +809,7 @@ function turnsToMessages(thread: Record<string, unknown> | undefined) {
     const items = Array.isArray(turnRecord.items)
       ? (turnRecord.items as unknown[])
       : [];
+    let latestAgentMessageIndex = -1;
 
     for (const item of items) {
       if (!item || typeof item !== 'object') continue;
@@ -768,6 +829,7 @@ function turnsToMessages(thread: Record<string, unknown> | undefined) {
         const text = typeof record.text === 'string' ? record.text : '';
         if (text) {
           messages.push({ role: 'agent', type: 'agent', text, timestamp: itemTimestamp(record, type) });
+          latestAgentMessageIndex = messages.length - 1;
           index += 1;
         }
         continue;
@@ -858,6 +920,12 @@ function turnsToMessages(thread: Record<string, unknown> | undefined) {
         });
         index += 1;
       }
+    }
+    if (latestAgentMessageIndex >= 0 && turnDurationMs) {
+      messages[latestAgentMessageIndex] = {
+        ...messages[latestAgentMessageIndex],
+        durationMs: turnDurationMs,
+      };
     }
   }
 
@@ -951,7 +1019,7 @@ function turnsToMessages(thread: Record<string, unknown> | undefined) {
     }
 
     if (eventType === 'event_msg' && payloadType === 'patch_apply_begin') {
-      messages.push({ role: 'agent', type: 'command', text: 'apply_patch', timestamp });
+      messages.push({ role: 'agent', type: 'file_change', text: formatPatchProgressText(payload), timestamp });
       index += 1;
       continue;
     }
@@ -1111,6 +1179,79 @@ function sessionActivityLabel(topType: string, payload: Record<string, unknown>)
   return null;
 }
 
+export function inferCodexSessionRuntimeState(
+  lines: string[],
+  options: { now?: number; mtimeMs?: number; activeGraceMs?: number } = {},
+): CodexSessionRuntimeState | null {
+  let lifecycle: 'started' | 'terminal' | null = null;
+  let updatedAt = 0;
+  let activityLabel: string | null = null;
+  let sawActiveEvent = false;
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const record = objectRecord(parsed);
+    if (!record) continue;
+    const topType = usableString(record.type);
+    const payload = sessionEventPayload(record);
+    const payloadType = usableString(payload.type);
+    const timestamp = toTimestampMs(record.timestamp, updatedAt);
+    if (timestamp > 0) updatedAt = Math.max(updatedAt, timestamp);
+
+    const activeLabel = sessionActivityLabel(topType, payload);
+    if (activeLabel) {
+      sawActiveEvent = true;
+      if (lifecycle === 'terminal') lifecycle = 'started';
+      activityLabel = activeLabel;
+    }
+    if (topType === 'turn_context') {
+      sawActiveEvent = true;
+      lifecycle = 'started';
+      activityLabel = activityLabel || '正在运行中，AI 正在接手任务';
+      continue;
+    }
+    if (topType === 'event_msg' && payloadType === 'task_started') {
+      lifecycle = 'started';
+      activityLabel = '正在运行中，AI 正在接手任务';
+      continue;
+    }
+    if (
+      topType === 'event_msg'
+      && ['task_complete', 'task_failed', 'turn_aborted', 'error'].includes(payloadType)
+    ) {
+      lifecycle = 'terminal';
+      activityLabel = null;
+      continue;
+    }
+    if (lifecycle === 'started') {
+      activityLabel = activeLabel || activityLabel;
+    }
+  }
+
+  const now = options.now ?? Date.now();
+  const mtimeMs = options.mtimeMs ?? 0;
+  const activeGraceMs = options.activeGraceMs ?? CODEX_SESSION_ACTIVE_GRACE_MS;
+  const recentlyActive = sawActiveEvent && lifecycle !== 'terminal' && now - mtimeMs <= activeGraceMs;
+  return lifecycle
+    ? {
+        running: lifecycle === 'started',
+        updatedAt,
+        activityLabel: lifecycle === 'started' ? activityLabel : null,
+      }
+    : sawActiveEvent
+      ? {
+          running: recentlyActive,
+          updatedAt,
+          activityLabel: recentlyActive ? activityLabel : null,
+        }
+      : null;
+}
+
 function readCodexSessionRuntimeState(sessionPath: unknown): CodexSessionRuntimeState | null {
   const cleanPath = usablePathString(sessionPath);
   if (!cleanPath) return null;
@@ -1121,71 +1262,7 @@ function readCodexSessionRuntimeState(sessionPath: unknown): CodexSessionRuntime
     if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.state;
 
     const lines = fs.readFileSync(cleanPath, 'utf8').split(/\r?\n/);
-    let lifecycle: 'started' | 'terminal' | null = null;
-    let updatedAt = 0;
-    let activityLabel: string | null = null;
-    let sawActiveEvent = false;
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const record = objectRecord(parsed);
-      if (!record) continue;
-      const topType = usableString(record.type);
-      const payload = sessionEventPayload(record);
-      const payloadType = usableString(payload.type);
-      const timestamp = toTimestampMs(record.timestamp, updatedAt);
-      if (timestamp > 0) updatedAt = Math.max(updatedAt, timestamp);
-
-      const activeLabel = sessionActivityLabel(topType, payload);
-      if (activeLabel) {
-        sawActiveEvent = true;
-        if (lifecycle !== 'terminal') activityLabel = activeLabel;
-      }
-      if (topType === 'turn_context') {
-        sawActiveEvent = true;
-        if (lifecycle !== 'terminal') {
-          lifecycle = 'started';
-          activityLabel = activityLabel || '正在运行中，AI 正在接手任务';
-        }
-        continue;
-      }
-      if (topType === 'event_msg' && payloadType === 'task_started') {
-        lifecycle = 'started';
-        activityLabel = '正在运行中，AI 正在接手任务';
-        continue;
-      }
-      if (
-        topType === 'event_msg'
-        && ['task_complete', 'task_failed', 'turn_aborted', 'error'].includes(payloadType)
-      ) {
-        lifecycle = 'terminal';
-        activityLabel = null;
-        continue;
-      }
-      if (lifecycle === 'started') {
-        activityLabel = activeLabel || activityLabel;
-      }
-    }
-
-    const recentlyActive = sawActiveEvent && lifecycle !== 'terminal' && Date.now() - stat.mtimeMs <= CODEX_SESSION_ACTIVE_GRACE_MS;
-    const state = lifecycle
-      ? {
-          running: lifecycle === 'started',
-          updatedAt,
-          activityLabel: lifecycle === 'started' ? activityLabel : null,
-        }
-      : sawActiveEvent
-        ? {
-            running: recentlyActive,
-            updatedAt,
-            activityLabel: recentlyActive ? activityLabel : null,
-          }
-        : null;
+    const state = inferCodexSessionRuntimeState(lines, { mtimeMs: stat.mtimeMs });
     sessionRuntimeCache.set(cleanPath, { size: stat.size, mtimeMs: stat.mtimeMs, state });
     return state;
   } catch {
@@ -1437,6 +1514,57 @@ function patchTargetFiles(patchText: string): string[] {
   return uniqueValues(files);
 }
 
+function summaryTargetFiles(text: string): string[] {
+  const files: string[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const bullet = line.match(/^[-•]\s+(.+?)(?:\s+\(?\+\d+\s+-\d+\)?)?$/);
+    const explicit = line.match(/^(?:file|path|target|filename|filePath):\s+(.+)$/i);
+    const candidate = bullet?.[1] || explicit?.[1] || '';
+    if (!candidate) continue;
+    const normalized = normalizeFilePath(candidate);
+    if (normalized && (normalized.includes('/') || normalized.includes('\\') || /\.[A-Za-z0-9]{1,8}$/.test(normalized))) {
+      files.push(normalized);
+    }
+  }
+  return uniqueValues(files);
+}
+
+function changeTargetFiles(changes: unknown): string[] {
+  if (!changes) return [];
+  if (Array.isArray(changes)) {
+    return uniqueValues(changes
+      .map((change) => change && typeof change === 'object'
+        ? normalizeFilePath(valueToText((change as Record<string, unknown>).path))
+        : '')
+      .filter(Boolean));
+  }
+  if (typeof changes === 'object') {
+    return uniqueValues(Object.keys(changes as Record<string, unknown>).map(normalizeFilePath).filter(Boolean));
+  }
+  return [];
+}
+
+function patchProgressTargetFiles(payload: Record<string, unknown>, toolText = ''): string[] {
+  const args = itemArguments(payload);
+  const patchText = extractPatchText(args, payload) || extractPatchText(null, { input: toolText });
+  const directPath = extractFilePathFromItem(payload);
+  return uniqueValues([
+    ...(directPath ? [normalizeFilePath(directPath)] : []),
+    ...changeTargetFiles(payload.changes),
+    ...(patchText ? patchTargetFiles(patchText) : []),
+    ...(toolText ? summaryTargetFiles(toolText) : []),
+  ]);
+}
+
+function formatPatchProgressText(payload: Record<string, unknown>, toolText = ''): string {
+  const files = patchProgressTargetFiles(payload, toolText);
+  if (!files.length) return '正在编辑文件';
+  const lines = files.slice(0, 8).map((filePath) => `- ${filePath}`);
+  if (files.length > lines.length) lines.push(`- 另有 ${files.length - lines.length} 个文件`);
+  return `正在编辑文件\n${lines.join('\n')}`;
+}
+
 function formatApplyPatchText(args: Record<string, unknown> | null, item: Record<string, unknown>): string {
   const patchText = extractPatchText(args, item);
   if (!patchText) return 'apply_patch';
@@ -1647,6 +1775,19 @@ function appendUniqueAgentMessage(agent: AgentInfo, text: string, type: string) 
   const last = [...agent.messages].reverse().find((message) => message.role === 'agent' && message.type === type);
   if (last?.text.trim() === text.trim()) return;
   agent.messages.push({ role: 'agent', type, text, timestamp: Date.now() });
+}
+
+function recentMatchingUserMessageIndex(agent: AgentInfo, text: string, now = Date.now()): number {
+  const cleanText = text.trim();
+  if (!cleanText) return -1;
+  for (let index = agent.messages.length - 1; index >= 0; index -= 1) {
+    const message = agent.messages[index];
+    if (now - message.timestamp > 30_000) break;
+    if (message.role === 'user' && message.type === 'user' && message.text.trim() === cleanText) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Record<string, unknown> | null {
@@ -1883,10 +2024,12 @@ export class SessionOrchestrator {
       serviceTier?: string;
       reasoningEffort?: string;
       codexThreadId?: string;
+      projectless?: boolean;
     },
   ): Promise<Omit<AgentInfo, 'process' | 'buffer' | 'pendingResponses' | 'pendingAgentRequests' | 'messageItemIds' | 'fileSnapshots' | 'toolCalls' | 'turnQueue' | 'queueDraining'>> {
     const id = agentId || uuid();
     const requestedCodexThreadId = options?.codexThreadId?.trim() || undefined;
+    const projectless = options?.projectless === true && !requestedCodexThreadId;
     const existingThreadAgent = requestedCodexThreadId ? this.findAgentByCodexThreadId(requestedCodexThreadId) : null;
     if (existingThreadAgent) {
       console.log(`[agents] Reusing running agent ${existingThreadAgent.id} for Codex thread ${requestedCodexThreadId}`);
@@ -1904,7 +2047,7 @@ export class SessionOrchestrator {
       id,
       name,
       model,
-      cwd,
+      cwd: projectless ? '' : cwd,
       approvalPolicy,
       serviceTier: normalizeServiceTier(options?.serviceTier),
       reasoningEffort: options?.reasoningEffort || 'medium',
@@ -1917,6 +2060,7 @@ export class SessionOrchestrator {
       codexThreadId: requestedCodexThreadId || null,
       codexPath: null,
       source: null,
+      projectless,
       messages: [],
       messageItemIds: new Map(),
       fileSnapshots: new Map(),
@@ -2011,7 +2155,7 @@ export class SessionOrchestrator {
           agent,
           codexThreadStartCall(
             model,
-            cwd,
+            projectless ? undefined : cwd,
             approvalPolicy,
             codexServiceTierParam(agent.serviceTier),
             this.capabilities.supportsServiceTier,
@@ -2028,7 +2172,7 @@ export class SessionOrchestrator {
               approvalPolicy,
               includeServiceTier: false,
             }))
-            : await this.sendRequest(agent, codexThreadStartCall(model, cwd, approvalPolicy, undefined, false));
+            : await this.sendRequest(agent, codexThreadStartCall(model, projectless ? undefined : cwd, approvalPolicy, undefined, false));
           if (retryRes.error) {
             throw new Error(`${options?.codexThreadId ? 'Thread resume' : 'Thread start'} failed: ${retryRes.error.message}`);
           }
@@ -2041,6 +2185,7 @@ export class SessionOrchestrator {
       const thread = threadData.thread as Record<string, unknown> | undefined;
       agent.threadId = (thread?.id as string) || (threadData.threadId as string) || null;
       agent.codexThreadId = agent.threadId;
+      if (projectless && agent.threadId) markCodexProjectlessThread(agent.threadId);
       this.clearCodexThreadStopped(agent.threadId);
       if (agent.threadId) {
         const duplicate = this.findAgentByCodexThreadId(agent.threadId, agent.id);
@@ -2050,7 +2195,7 @@ export class SessionOrchestrator {
       }
       agent.codexPath = typeof thread?.path === 'string' ? thread.path : null;
       agent.source = typeof thread?.source === 'string' ? thread.source : null;
-      agent.cwd = (typeof threadData.cwd === 'string' ? threadData.cwd : cwd) || cwd;
+      agent.cwd = projectless ? '' : ((typeof threadData.cwd === 'string' ? threadData.cwd : cwd) || cwd);
       agent.model = (typeof threadData.model === 'string' ? threadData.model : model) || model;
       agent.approvalPolicy = (typeof threadData.approvalPolicy === 'string' ? threadData.approvalPolicy : approvalPolicy) || approvalPolicy;
       agent.serviceTier = normalizeServiceTier(
@@ -2249,16 +2394,56 @@ export class SessionOrchestrator {
 
     const agent = (agentId && this.agents.get(agentId))
       || Array.from(this.agents.values()).find((entry) => entry.codexThreadId === normalizedThreadId || entry.threadId === normalizedThreadId);
+
     if (agent) {
-      try { agent.process.kill(); } catch {}
-      agent.status = 'stopped';
-      this.agents.delete(agent.id);
-      this.clearCodexThreadStopped(normalizedThreadId);
-      this.persistAgentsToDisk();
+      stopAgentLocallyForArchive(
+        agent,
+        this.agents,
+        (entry) => this.markCodexThreadStopped(entry),
+        () => this.persistAgentsToDisk(),
+      );
     }
 
     const response = await this.sendOneOffRequest(codexThreadArchiveCall(normalizedThreadId));
     if (response.error) throw new Error(response.error.message);
+
+    const archived = await this.confirmCodexThreadArchived(normalizedThreadId);
+    if (!archived) {
+      throw new Error('Codex did not confirm that the thread was archived. Please refresh Codex and try again.');
+    }
+
+    if (agent) this.clearCodexThreadStopped(normalizedThreadId);
+  }
+
+  private async confirmCodexThreadArchived(threadId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (codexArchivedThreadIds().has(threadId)) return true;
+      const listed = await this.isThreadInArchivedList(threadId);
+      if (listed) return true;
+      if (attempt < 4) await delay(200);
+    }
+    return false;
+  }
+
+  private async isThreadInArchivedList(threadId: string): Promise<boolean> {
+    let cursor: string | null = null;
+    let page = 0;
+    do {
+      const response = await this.sendOneOffRequest(codexThreadListCall({
+        limit: 100,
+        cursor: cursor || undefined,
+        archived: true,
+      }));
+      if (response.error) return false;
+      const result = response.result as Record<string, unknown>;
+      const data = Array.isArray(result?.data) ? result.data : [];
+      if (data.some((entry) => usableString((entry as Record<string, unknown>)?.id) === threadId)) return true;
+      cursor = typeof result?.nextCursor === 'string' && result.nextCursor.trim()
+        ? result.nextCursor
+        : null;
+      page += 1;
+    } while (cursor && page < 10);
+    return false;
   }
 
   updateModel(agentId: string, model: string): void {
@@ -2368,6 +2553,7 @@ export class SessionOrchestrator {
     for (const pinnedThreadId of pinnedThreadIds) {
       const thread = threadById.get(pinnedThreadId) || await this.readPinnedCodexThreadSummary(pinnedThreadId);
       if (!thread) continue;
+      if (!shouldShowCodexThread(thread, archivedThreadIds)) continue;
       pinnedThreads.push(normalizeThreadSummary(
         thread,
         codexThreadProjectRoot(thread, visibleWorkspaceRoots, workspaceRootHints, projectlessThreadIds),
@@ -2568,7 +2754,8 @@ export class SessionOrchestrator {
       name: agent.name,
       model: agent.model,
       cwd: agent.cwd,
-      projectRoot: codexDesktopProjectRootForCwd(agent.cwd),
+      projectRoot: agent.projectless ? null : codexDesktopProjectRootForCwd(agent.cwd),
+      projectless: agent.projectless,
       approvalPolicy: agent.approvalPolicy,
       serviceTier: agent.serviceTier,
       reasoningEffort: agent.reasoningEffort,
@@ -2709,6 +2896,7 @@ export class SessionOrchestrator {
           reasoningEffort: agent.reasoningEffort,
           systemPrompt: agent.systemPrompt,
           codexThreadId: agent.codexThreadId || undefined,
+          projectless: agent.projectless || undefined,
         }));
       fs.writeFileSync(AGENTS_STATE_PATH, JSON.stringify(payload, null, 2), 'utf8');
     } catch (err) {
@@ -2736,6 +2924,7 @@ export class SessionOrchestrator {
               serviceTier: entry.serviceTier,
               reasoningEffort: entry.reasoningEffort,
               codexThreadId: entry.codexThreadId,
+              projectless: entry.projectless,
             },
           );
         } catch (err) {
@@ -3246,9 +3435,21 @@ export class SessionOrchestrator {
             const role = item.role === 'user' ? 'user' : 'agent';
             const text = valueToText(item.content ?? item.message ?? item.text);
             if (text) {
-              agent.messages.push({ role, type: role === 'user' ? 'user' : 'agent', text, timestamp: Date.now() });
+              const timestamp = Date.now();
+              const itemId = itemIdentifier(item) || `message_${timestamp}`;
+              if (role === 'user') {
+                const existingIndex = recentMatchingUserMessageIndex(agent, text, timestamp);
+                if (existingIndex >= 0) {
+                  agent.messageItemIds.set(itemId, existingIndex);
+                } else {
+                  agent.messageItemIds.set(itemId, agent.messages.length);
+                  agent.messages.push({ role: 'user', type: 'user', text, timestamp, _itemId: itemId });
+                }
+              } else {
+                agent.messages.push({ role, type: 'agent', text, timestamp, _itemId: itemId });
+              }
               this.broadcast(agent.id, 'item/completed', {
-                item: { id: itemIdentifier(item) || `message_${Date.now()}`, type: role === 'user' ? 'userMessage' : 'agentMessage', text },
+                item: { id: itemId, type: role === 'user' ? 'userMessage' : 'agentMessage', text },
               });
             }
           }
@@ -3297,10 +3498,19 @@ export class SessionOrchestrator {
 
           if (type === 'patch_apply_begin') {
             const itemId = itemCallId(payload) || `patch_${Date.now()}`;
-            this.finalizeItemMessage(agent, itemId, 'apply_patch', 'command');
+            const toolText = agent.toolCalls.get(itemId)?.text || '';
+            const text = formatPatchProgressText(payload, toolText);
+            const files = patchProgressTargetFiles(payload, toolText);
+            this.finalizeItemMessage(agent, itemId, text, 'file_change');
             this.broadcast(agent.id, 'item/started', {
-              item: { id: itemId, type: 'command', command: 'apply_patch' },
+              item: {
+                id: itemId,
+                type: 'fileChange',
+                text,
+                path: files.length === 1 ? files[0] : undefined,
+              },
             });
+            this.broadcast(agent.id, 'item/fileChange/delta', { ...payload, itemId, delta: text });
             break;
           }
 

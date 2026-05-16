@@ -138,6 +138,38 @@ function mergeThreadsById(current, threads) {
   return next;
 }
 
+function removeThreadFromWorkbench(current, threadId) {
+  if (!threadId) return current;
+  const threadsById = { ...current.threadsById };
+  delete threadsById[threadId];
+  const activeThreadIds = current.activeThreadIds.filter((id) => id !== threadId);
+  const historyThreadIds = current.historyThreadIds.filter((id) => id !== threadId);
+  const loadingDetails = { ...current.loadingDetails };
+  delete loadingDetails[threadId];
+  const threadErrors = { ...current.threadErrors };
+  delete threadErrors[threadId];
+  let selectedTarget = current.selectedTarget;
+  const selected = parseTarget(selectedTarget);
+  if (selected.kind === 'thread' && selected.id === threadId) {
+    selectedTarget = current.agents[0]?.id
+      ? targetKey('agent', current.agents[0].id)
+      : activeThreadIds[0]
+        ? targetKey('thread', activeThreadIds[0])
+        : historyThreadIds[0]
+          ? targetKey('thread', historyThreadIds[0])
+          : null;
+  }
+  return {
+    ...current,
+    threadsById,
+    activeThreadIds,
+    historyThreadIds,
+    loadingDetails,
+    threadErrors,
+    selectedTarget,
+  };
+}
+
 function unique(values) {
   return Array.from(new Set(values.filter(Boolean)));
 }
@@ -529,7 +561,10 @@ function useRelayWorkbench(api, appendLog, currentState) {
     setWorkbench((current) => ({
       ...current,
       threadsById: mergeThreadsById(current.threadsById, threads),
-      historyThreadIds: unique([...threads.map((thread) => thread.id), ...current.historyThreadIds]),
+      historyThreadIds: threads
+        .map((thread) => thread.id)
+        .filter((id) => !current.activeThreadIds.includes(id))
+        .filter((id) => !current.agents.some((agent) => (agent.codexThreadId || agent.threadId) === id)),
     }));
   }, [relaySend]);
 
@@ -604,12 +639,18 @@ function useRelayWorkbench(api, appendLog, currentState) {
 
   const handleRelayStream = useCallback((entry) => {
     if (!entry || entry.type !== 'stream') return;
+    const archivedThreadId = entry.event === 'codex/threads_changed' && entry.data?.reason === 'thread_archived'
+      ? entry.data?.threadId
+      : '';
+    if (archivedThreadId) {
+      setWorkbench((current) => removeThreadFromWorkbench(current, archivedThreadId));
+    }
     if (entry.event === 'agents/changed' || entry.event === 'codex/threads_changed') {
       scheduleTaskRefresh();
     }
     if (entry.event === 'codex/threads_changed') {
       const parsed = parseTarget(workbenchRef.current.selectedTarget);
-      if (parsed.kind === 'thread' && parsed.id) {
+      if (parsed.kind === 'thread' && parsed.id && parsed.id !== archivedThreadId) {
         refreshSelectedThread(parsed.id).catch((error) => appendLog(`Thread refresh failed: ${error.message || error}`));
       }
     }
