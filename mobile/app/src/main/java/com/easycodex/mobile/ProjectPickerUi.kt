@@ -8,6 +8,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -107,11 +108,37 @@ private fun isPinnedProjectOption(path: String): Boolean {
 }
 
 @Composable
+private fun AdaptiveAgentDrawerSheet(
+    modifier: Modifier = Modifier,
+    permanent: Boolean,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (permanent) {
+        Surface(
+            modifier = modifier,
+            color = MaterialTheme.colorScheme.background,
+            contentColor = MaterialTheme.colorScheme.onBackground,
+        ) {
+            Column(Modifier.fillMaxSize(), content = content)
+        }
+    } else {
+        ModalDrawerSheet(
+            modifier = modifier,
+            drawerContainerColor = MaterialTheme.colorScheme.background,
+            drawerContentColor = MaterialTheme.colorScheme.onBackground,
+            content = content,
+        )
+    }
+}
+
+@Composable
 fun AgentDrawer(
     agents: List<Agent>,
     alerts: List<AgentAlert>,
     projectOptions: List<String>,
     activeAgentId: String?,
+    modifier: Modifier = Modifier,
+    permanent: Boolean = false,
     onHome: () -> Unit,
     onSelect: (String) -> Unit,
     onCreateInProject: (String) -> Unit,
@@ -130,24 +157,22 @@ fun AgentDrawer(
         debouncedQuery = query
     }
     val normalizedQuery = debouncedQuery.trim().lowercase(Locale.ROOT)
-    val drawerAgents by remember {
-        derivedStateOf {
-            val alertAgentIds = alerts.mapTo(mutableSetOf()) { it.agentId }
-            agents.mapIndexed { index, agent ->
-                DrawerAgentItem(
-                    id = agent.id,
-                    position = index,
-                    name = agent.name,
-                    projectPath = cleanNullablePath(agent.projectRoot)
-                        ?: cleanNullablePath(agent.cwd)
-                        ?: CONVERSATION_PROJECT_PATH,
-                    status = agent.status,
-                    activity = agent.activity,
-                    updatedAt = agent.updatedAt,
-                    pinned = agent.pinned,
-                    hasAlert = agent.id in alertAgentIds,
-                )
-            }
+    val drawerAgents = remember(agents, alerts) {
+        val alertAgentIds = alerts.mapTo(mutableSetOf()) { it.agentId }
+        agents.mapIndexed { index, agent ->
+            DrawerAgentItem(
+                id = agent.id,
+                position = index,
+                name = agent.name,
+                projectPath = cleanNullablePath(agent.projectRoot)
+                    ?: cleanNullablePath(agent.cwd)
+                    ?: CONVERSATION_PROJECT_PATH,
+                status = agent.status,
+                activity = agent.activity,
+                updatedAt = agent.updatedAt,
+                pinned = agent.pinned,
+                hasAlert = agent.id in alertAgentIds,
+            )
         }
     }
     val visibleAgents = remember(drawerAgents, normalizedQuery) {
@@ -194,9 +219,9 @@ fun AgentDrawer(
         collapsedProjectPaths = collapsedProjectPaths.intersect(projectPaths.toSet())
     }
 
-    ModalDrawerSheet(
-        drawerContainerColor = MaterialTheme.colorScheme.background,
-        drawerContentColor = MaterialTheme.colorScheme.onBackground,
+    AdaptiveAgentDrawerSheet(
+        modifier = modifier,
+        permanent = permanent,
     ) {
         Row(
             modifier = Modifier
@@ -284,7 +309,7 @@ fun AgentDrawer(
                 modifier = Modifier.padding(24.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            return@ModalDrawerSheet
+            return@AdaptiveAgentDrawerSheet
         }
         if (visibleAgents.isEmpty() && projectPaths.isEmpty()) {
             Text(
@@ -292,7 +317,7 @@ fun AgentDrawer(
                 modifier = Modifier.padding(24.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            return@ModalDrawerSheet
+            return@AdaptiveAgentDrawerSheet
         }
         LazyColumn(
             modifier = Modifier
@@ -691,6 +716,9 @@ fun HomeTaskScreen(
 ) {
     val strings = LocalAppStrings.current
     var showProjectPicker by remember { mutableStateOf(false) }
+    val draftProjectPath = cleanNullablePath(draftAgent.cwd)
+    val draftProjectLabel = draftProjectPath?.let(::projectNameFromCwd) ?: "空项目"
+    val draftProjectDetail = draftProjectPath ?: "不关联任何项目"
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 24.dp),
@@ -755,14 +783,14 @@ fun HomeTaskScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Text(
-                                projectNameFromCwd(draftAgent.cwd),
+                                draftProjectLabel,
                                 style = MaterialTheme.typography.bodyLarge,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Text(
-                                draftAgent.cwd,
+                                draftProjectDetail,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
@@ -777,7 +805,7 @@ fun HomeTaskScreen(
 
     if (showProjectPicker && canChangeProject) {
         DirectoryPickerDialog(
-            initialPath = draftAgent.cwd,
+            initialPath = draftProjectPath.orEmpty(),
             pinnedPaths = projectOptions,
             onBrowseDirectories = onBrowseDirectories,
             onSelect = {

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.1.5 - 2026-05-16
+
+### Added
+
+- Added relay CLI helper coverage and Android unit tests for command parsing, markdown rendering, file icons, message expansion, and plan review state.
+
+### Fixed
+
+- Improved mobile conversation, CLI console, session dialog, project picker, and settings interactions for richer phone control of Codex sessions.
+- Hardened relay session orchestration, Codex RPC handling, server routing, and desktop relay rendering for more reliable live task updates.
+
+### Changed
+
+- Removed the standalone code of conduct document and updated relay-agent documentation for the current behavior.
+
+## 0.1.4 - 2026-05-16
+
+### Fixed
+
+- Fixed the Android task drawer so synced relay and Codex thread updates refresh visible project task counts instead of staying stuck at zero tasks.
+- Refreshed the drawer snapshot while it is open so newly synced tasks appear without closing and reopening the menu.
+
 ## 0.1.3 - 2026-05-15
 
 ### Added

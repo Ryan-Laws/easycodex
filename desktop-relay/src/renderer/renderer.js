@@ -792,8 +792,24 @@ function resolvePendingRequest(agentId, requestId) {
   pendingRequestsByAgent.set(agentId, requests.filter((request) => request.requestId !== requestId));
 }
 
+function removeArchivedThread(threadId) {
+  if (!threadId) return;
+  activeThreads = activeThreads.filter((thread) => thread.id !== threadId);
+  historyThreads = historyThreads.filter((thread) => thread.id !== threadId);
+  if (selectedThreadId === threadId) {
+    selectedThreadId = null;
+    if (agents[0]) selectedAgentId = agents[0].id;
+    else if (activeThreads[0]) selectedThreadId = activeThreads[0].id;
+    else if (historyThreads[0]) selectedThreadId = historyThreads[0].id;
+  }
+}
+
 function handleRelayStream(entry) {
   if (!entry || entry.type !== 'stream') return;
+  if (entry.event === 'codex/threads_changed' && entry.data?.reason === 'thread_archived' && entry.data?.threadId) {
+    removeArchivedThread(entry.data.threadId);
+    renderWorkbench();
+  }
   if (entry.event === 'agents/changed' || entry.event === 'codex/threads_changed') {
     refreshTasks().catch((error) => appendLog(`Task list refresh failed: ${error.message || error}`));
   }
@@ -916,7 +932,7 @@ async function refreshHistory() {
     ...activeThreads.map((thread) => thread.id).filter(Boolean),
   ]);
   historyThreads = (result?.data || []).filter((thread) => !runningThreadIds.has(thread.id));
-  if (selectedThreadId && selectedThreadSnapshot && !historyThreads.some((thread) => thread.id === selectedThreadId)) {
+  if (selectedThreadId && selectedThreadSnapshot && result?.data?.some((thread) => thread.id === selectedThreadId) && !historyThreads.some((thread) => thread.id === selectedThreadId)) {
     historyThreads = mergeThreadById(historyThreads, selectedThreadSnapshot);
   }
 }

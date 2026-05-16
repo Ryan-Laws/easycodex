@@ -22,6 +22,13 @@ import {
   getNotificationHistory,
   type NotificationLevel,
 } from './notifier';
+import {
+  buildCliArgs,
+  cleanCliSandboxMode,
+  replayStreamHistory,
+  type CliRunOptions,
+  type StreamHistoryEntry,
+} from './cli-helpers';
 
 const PORT = Number(process.env.PORT || 3001);
 const CONFIG_DIR = path.join(os.homedir(), '.easycodex');
@@ -37,16 +44,6 @@ interface ClientSession {
   clientId: string | null;
   connectedAt: number;
   remoteAddress: string;
-}
-
-interface StreamHistoryEntry {
-  type: 'stream';
-  sessionId: string;
-  seq: number;
-  timestamp: number;
-  agentId: string;
-  event: string;
-  data: unknown;
 }
 
 interface PendingStreamBatch {
@@ -65,6 +62,8 @@ interface CliRun {
   commandLine: string;
   process: ChildProcess;
   startedAt: number;
+  jsonOutput: boolean;
+  jsonBuffer: string;
 }
 
 interface RelayWarning {
@@ -560,44 +559,88 @@ function codexCliVersion(): string {
   }
 }
 
-function cleanCliSandboxMode(value: unknown): string {
-  const clean = typeof value === 'string' ? value.trim() : '';
-  return ['read-only', 'workspace-write', 'danger-full-access'].includes(clean) ? clean : 'workspace-write';
+function cliJsonText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object') return '';
+  const record = value as Record<string, unknown>;
+  for (const key of ['text', 'delta', 'message', 'content', 'summary', 'preview']) {
+    const text = cliJsonText(record[key]);
+    if (text) return text;
+  }
+  for (const key of ['item', 'payload', 'data', 'msg']) {
+    const text = cliJsonText(record[key]);
+    if (text) return text;
+  }
+  return '';
 }
 
-function startCliRun(
-  windowId: string,
-  cwd: string,
-  prompt: string,
-  model?: string,
-  reasoningEffort?: string,
-  sandboxMode?: string,
-  skipGitRepoCheck = true,
-): CliRun {
+function cliJsonTitle(value: Record<string, unknown>): string {
+  for (const key of ['type', 'event', 'kind', 'role']) {
+    const text = typeof value[key] === 'string' ? value[key].trim() : '';
+    if (text) return text;
+  }
+  return 'event';
+}
+
+function handleCliJsonLine(run: CliRun, rawLine: string) {
+  const line = rawLine.trim();
+  if (!line) return;
+  try {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    const text = cliJsonText(parsed);
+    const title = cliJsonTitle(parsed);
+    const isFinal = /final|completed|done|last/i.test(title);
+    broadcast('cli', isFinal ? 'cli/final' : text ? 'cli/output' : 'cli/status', {
+      windowId: run.windowId,
+      runId: run.id,
+      cwd: run.cwd,
+      stream: 'stdout',
+      chunk: text || line,
+      finalText: isFinal ? text : undefined,
+      kind: title,
+      title,
+      structured: true,
+      timestamp: Date.now(),
+    });
+  } catch {
+    broadcast('cli', 'cli/output', {
+      windowId: run.windowId,
+      runId: run.id,
+      stream: 'stdout',
+      chunk: `${rawLine}\n`,
+      structured: false,
+      timestamp: Date.now(),
+    });
+  }
+}
+
+function handleCliJsonChunk(run: CliRun, chunk: Buffer) {
+  run.jsonBuffer += chunk.toString('utf8');
+  const lines = run.jsonBuffer.split(/\r?\n/);
+  run.jsonBuffer = lines.pop() || '';
+  lines.forEach((line) => handleCliJsonLine(run, line));
+}
+
+function startCliRun(options: CliRunOptions): CliRun {
+  const windowId = options.windowId;
+  const cwd = options.cwd;
+  const prompt = options.prompt;
   const safeWindowId = windowId.trim() || crypto.randomUUID();
   if (activeCliRuns.has(safeWindowId)) {
     throw new Error('This Codex CLI window is already running. Stop it or wait for it to finish.');
   }
   const trimmedPrompt = prompt.trim();
-  if (!trimmedPrompt) throw new Error('prompt is required');
   const safeCwd = resolveWorkspaceCwd(cwd || getPrimaryWorkspaceRoot());
   const runId = crypto.randomUUID();
-  const cleanModel = typeof model === 'string' ? model.trim() : '';
-  const cleanReasoning = typeof reasoningEffort === 'string' ? reasoningEffort.trim() : '';
-  const cleanSandbox = cleanCliSandboxMode(sandboxMode);
-  const args = [
-    'exec',
-    '--cd',
+  const { args, mode } = buildCliArgs(
+    { ...options, prompt: trimmedPrompt },
     safeCwd,
-    '--sandbox',
-    cleanSandbox,
-    '--color',
-    'never',
-  ];
-  if (skipGitRepoCheck) args.push('--skip-git-repo-check');
-  if (cleanModel) args.push('--model', cleanModel);
-  if (cleanReasoning) args.push('-c', `model_reasoning_effort=${JSON.stringify(cleanReasoning)}`);
-  args.push(trimmedPrompt);
+    (image) => resolveWithinCwd(safeCwd, image),
+    (dir) => resolveWorkspaceCwd(dir),
+  );
+  const cleanModel = typeof options.model === 'string' ? options.model.trim() : '';
+  const cleanReasoning = typeof options.reasoningEffort === 'string' ? options.reasoningEffort.trim() : '';
+  const cleanSandbox = cleanCliSandboxMode(options.sandboxMode);
   const invocation = codexCliInvocation(args);
   const commandLine = codexCliCommandLine(args);
   const child = spawn(invocation.command, invocation.args, {
@@ -614,6 +657,8 @@ function startCliRun(
     commandLine,
     process: child,
     startedAt: Date.now(),
+    jsonOutput: options.jsonOutput === true,
+    jsonBuffer: '',
   };
   activeCliRuns.set(safeWindowId, run);
   broadcast('cli', 'cli/started', {
@@ -621,13 +666,19 @@ function startCliRun(
     runId,
     cwd: safeCwd,
     command: commandLine,
+    mode,
     model: cleanModel,
     reasoningEffort: cleanReasoning,
     sandboxMode: cleanSandbox,
-    skipGitRepoCheck,
+    skipGitRepoCheck: options.skipGitRepoCheck !== false,
+    structured: run.jsonOutput,
     timestamp: run.startedAt,
   });
   child.stdout?.on('data', (chunk: Buffer) => {
+    if (run.jsonOutput) {
+      handleCliJsonChunk(run, chunk);
+      return;
+    }
     broadcast('cli', 'cli/output', {
       windowId: safeWindowId,
       runId,
@@ -656,6 +707,10 @@ function startCliRun(
     });
   });
   child.on('close', (code, signal) => {
+    if (run.jsonOutput && run.jsonBuffer.trim()) {
+      handleCliJsonLine(run, run.jsonBuffer);
+      run.jsonBuffer = '';
+    }
     if (activeCliRuns.get(safeWindowId)?.id === runId) activeCliRuns.delete(safeWindowId);
     broadcast('cli', 'cli/exited', {
       windowId: safeWindowId,
@@ -705,6 +760,19 @@ const activeCliRuns = new Map<string, CliRun>();
 const customWorkspaceRoots = new Set<string>();
 const relayWarnings: RelayWarning[] = [];
 const pendingStreamBatches = new Map<string, PendingStreamBatch>();
+
+function cliWindowRecentEvents(windowId: string, limit = 120): StreamHistoryEntry[] {
+  const cleanWindowId = windowId.trim();
+  if (!cleanWindowId) return [];
+  flushStreamBatches('cli');
+  return streamHistory
+    .filter((entry) => {
+      if (entry.agentId !== 'cli' || !entry.event.startsWith('cli/')) return false;
+      const data = entry.data as Record<string, unknown> | null;
+      return data != null && typeof data === 'object' && data.windowId === cleanWindowId;
+    })
+    .slice(-Math.max(1, Math.min(limit, 500)));
+}
 
 function getConnectedAuthenticatedCount(): number {
   let count = 0;
@@ -1249,12 +1317,30 @@ wss.on('connection', (ws, req) => {
             running: running != null,
             runId: running?.id || null,
             command: running?.commandLine || null,
+            events: running && typeof windowId === 'string' ? cliWindowRecentEvents(windowId, 160) : [],
           });
           break;
         }
 
         case 'cli_run': {
-          const { windowId, cwd, prompt, model, reasoningEffort, sandboxMode, skipGitRepoCheck } = params as {
+          const {
+            windowId,
+            cwd,
+            prompt,
+            model,
+            reasoningEffort,
+            sandboxMode,
+            skipGitRepoCheck,
+            mode,
+            sessionId,
+            reviewTarget,
+            profile,
+            images,
+            addDirs,
+            jsonOutput,
+            ephemeral,
+            ignoreRules,
+          } = params as {
             windowId?: string;
             cwd?: string;
             prompt?: string;
@@ -1262,16 +1348,34 @@ wss.on('connection', (ws, req) => {
             reasoningEffort?: string;
             sandboxMode?: string;
             skipGitRepoCheck?: boolean;
+            mode?: string;
+            sessionId?: string;
+            reviewTarget?: string;
+            profile?: string;
+            images?: unknown;
+            addDirs?: unknown;
+            jsonOutput?: boolean;
+            ephemeral?: boolean;
+            ignoreRules?: boolean;
           };
-          const run = startCliRun(
-            windowId || '',
-            cwd || getPrimaryWorkspaceRoot(),
-            prompt || '',
+          const run = startCliRun({
+            windowId: windowId || '',
+            cwd: cwd || getPrimaryWorkspaceRoot(),
+            prompt: prompt || '',
             model,
             reasoningEffort,
             sandboxMode,
-            skipGitRepoCheck !== false,
-          );
+            skipGitRepoCheck: skipGitRepoCheck !== false,
+            mode,
+            sessionId,
+            reviewTarget,
+            profile,
+            images,
+            addDirs,
+            jsonOutput,
+            ephemeral,
+            ignoreRules,
+          });
           reply({ ok: true, windowId: run.windowId, runId: run.id, cwd: run.cwd });
           break;
         }
@@ -1296,10 +1400,11 @@ wss.on('connection', (ws, req) => {
             codexThreadId,
             firstMessage,
             attachments,
+            projectless,
           } = params as {
             name: string;
             model: string;
-            cwd: string;
+            cwd?: string;
             approvalPolicy?: string;
             systemPrompt?: string;
             agentId?: string;
@@ -1308,9 +1413,11 @@ wss.on('connection', (ws, req) => {
             codexThreadId?: string;
             firstMessage?: string;
             attachments?: MessageAttachmentInput[];
+            projectless?: boolean;
           };
-          const resolvedCwd = resolveWorkspaceCwd(cwd);
-          await maybeAutoPullRepo(resolvedCwd);
+          const isProjectless = projectless === true;
+          const resolvedCwd = resolveWorkspaceCwd(isProjectless ? getPrimaryWorkspaceRoot() : cwd);
+          if (!isProjectless) await maybeAutoPullRepo(resolvedCwd);
           const agent = await manager.createAgent(
             name || 'Agent',
             model || 'gpt-5.5',
@@ -1322,6 +1429,7 @@ wss.on('connection', (ws, req) => {
               serviceTier,
               reasoningEffort,
               codexThreadId,
+              projectless: isProjectless,
             },
           );
           if (typeof firstMessage === 'string' && firstMessage.trim()) {
@@ -1340,18 +1448,8 @@ wss.on('connection', (ws, req) => {
 
         case 'replay_stream': {
           const { afterSeq, limit, sessionId } = params as { afterSeq?: number; limit?: number; sessionId?: string };
-          const safeAfterSeq = typeof afterSeq === 'number' && Number.isFinite(afterSeq) ? afterSeq : 0;
-          const safeLimit = Math.min(Math.max(typeof limit === 'number' ? limit : 1000, 1), STREAM_HISTORY_LIMIT);
-          const sameSession = sessionId === relaySessionId;
-          const events = streamHistory
-            .filter((entry) => !sameSession || entry.seq > safeAfterSeq)
-            .slice(-safeLimit);
-          reply({
-            sessionId: relaySessionId,
-            events,
-            latestSeq: streamHistory[streamHistory.length - 1]?.seq || safeAfterSeq,
-            truncated: sameSession && streamHistory.length > events.length && events[0]?.seq > safeAfterSeq + 1,
-          });
+          flushStreamBatches();
+          reply(replayStreamHistory(streamHistory, relaySessionId, { afterSeq, limit, sessionId }, STREAM_HISTORY_LIMIT));
           break;
         }
 
@@ -1897,7 +1995,9 @@ async function startRelayServer(): Promise<void> {
   });
 }
 
-void startRelayServer().catch((err) => {
-  console.error('[relay] Failed to start:', err);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  void startRelayServer().catch((err) => {
+    console.error('[relay] Failed to start:', err);
+    process.exitCode = 1;
+  });
+}

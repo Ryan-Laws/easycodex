@@ -116,6 +116,7 @@ export function codexThreadListCall(params: {
   limit?: number;
   cursor?: string;
   cwd?: string;
+  archived?: boolean;
 } = {}): string {
   return rpcCall('thread/list', params);
 }

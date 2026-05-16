@@ -47,7 +47,12 @@ private const val CONTEXT_PLACEHOLDER_FOR_DISPLAY = "已加载项目上下文。
 private const val USER_INPUT_REQUEST_METHOD = "item/tool/requestUserInput"
 private const val WORKING_STATUS_DOWNGRADE_GRACE_MS = 4_500L
 private const val RECENT_UNREAD_TASK_WINDOW_MS = 2 * 60 * 60 * 1000L
+private const val PROPOSED_PLAN_OPEN_TAG = "<proposed_plan>"
+private const val PROPOSED_PLAN_CLOSE_TAG = "</proposed_plan>"
 private val PENDING_CODEX_THREAD_NAMES = setOf(
+    "easycodex",
+    "easycodex task",
+    "easycodex 任务",
     "null",
     "new",
     "new task",
@@ -63,6 +68,64 @@ internal fun isAttachmentSizeOverLimit(size: Long?, maxBytes: Int = MAX_ATTACHME
     return size != null && size > maxBytes
 }
 
+internal fun shouldQueueFollowUpOnCurrentAgent(agent: Agent): Boolean {
+    return agent.isBusy()
+}
+
+internal fun userInputRequestQuestionText(params: JSONObject?): String {
+    val questions = params?.optJSONArray("questions") ?: return params?.optString("message").orEmpty()
+    return formatUserInputQuestionText(
+        buildList {
+            for (index in 0 until questions.length()) {
+                val question = questions.optJSONObject(index) ?: continue
+                add(question.optString("header") to question.optString("question"))
+            }
+        },
+    )
+}
+
+internal fun formatUserInputQuestionText(questions: List<Pair<String, String>>): String {
+    return buildList {
+        for ((header, prompt) in questions) {
+            val line = listOf(header, prompt).filter { it.isNotBlank() }.joinToString("：")
+            if (line.isNotBlank()) add(line)
+        }
+    }.joinToString("\n")
+}
+
+internal fun planStartAnswersForRequest(request: AgentUserInputRequest): Map<String, String>? {
+    if (request.questions.isEmpty()) return null
+    val answers = mutableMapOf<String, String>()
+    for (question in request.questions) {
+        val answer = planStartAnswerForQuestion(question) ?: return null
+        answers[question.id] = answer
+    }
+    return answers.takeIf { it.isNotEmpty() }
+}
+
+internal fun planStartAnswerForQuestion(question: AgentUserInputQuestion): String? {
+    val preferredLabels = listOf(
+        PLAN_START_PROMPT,
+        "开始任务",
+        "开始计划",
+        "开始执行",
+    )
+    for (preferred in preferredLabels) {
+        question.options.firstOrNull { it.label.trim() == preferred }?.let { return it.label }
+    }
+    question.options.firstOrNull { option ->
+        val label = option.label.trim()
+        label.contains("开始任务") ||
+            label.contains("开始计划") ||
+            label.contains("开始执行") ||
+            label.contains("start", ignoreCase = true)
+    }?.let { return it.label }
+
+    val promptText = listOf(question.header, question.question).joinToString("\n")
+    val asksToStart = promptText.contains("开始") || promptText.contains("start", ignoreCase = true)
+    return if (question.options.isEmpty() && asksToStart) PLAN_START_PROMPT else null
+}
+
 internal fun readAttachmentBytesWithinLimit(input: InputStream, maxBytes: Int = MAX_ATTACHMENT_BYTES): ByteArray? {
     val output = ByteArrayOutputStream()
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -75,6 +138,205 @@ internal fun readAttachmentBytesWithinLimit(input: InputStream, maxBytes: Int = 
         output.write(buffer, 0, read)
     }
     return output.toByteArray()
+}
+
+internal fun isCompletePlanText(text: String): Boolean {
+    val trimmed = text.trim()
+    if (trimmed.isBlank()) return false
+    val normalized = trimmed.lowercase(Locale.ROOT)
+    val incompleteMarkers = listOf(
+        "计划内容为空",
+        "详细内容已省略",
+        "内容已省略",
+        "plan updated.",
+        "执行计划已更新。",
+        "正在规划",
+        "准备继续执行",
+        "easycodex mobile truncated",
+    )
+    if (incompleteMarkers.any { it in normalized }) return false
+
+    val openIndex = normalized.indexOf(PROPOSED_PLAN_OPEN_TAG)
+    val closeIndex = normalized.indexOf(PROPOSED_PLAN_CLOSE_TAG)
+    if (openIndex >= 0 || closeIndex >= 0) {
+        if (openIndex < 0 || closeIndex <= openIndex + PROPOSED_PLAN_OPEN_TAG.length) return false
+        return trimmed.substring(
+            openIndex + PROPOSED_PLAN_OPEN_TAG.length,
+            closeIndex,
+        ).isNotBlank()
+    }
+
+    return trimmed.lineSequence().any { line ->
+        val value = line.trimStart()
+        value.startsWith("- [ ] ") ||
+            value.startsWith("- [x] ", ignoreCase = true) ||
+            value.startsWith("- [~] ")
+    }
+}
+
+internal fun proposedPlanBody(text: String): String? {
+    val normalized = text.lowercase(Locale.ROOT)
+    val openIndex = normalized.indexOf(PROPOSED_PLAN_OPEN_TAG)
+    val closeIndex = normalized.indexOf(PROPOSED_PLAN_CLOSE_TAG)
+    if (openIndex < 0 || closeIndex <= openIndex + PROPOSED_PLAN_OPEN_TAG.length) return null
+    return text.substring(openIndex + PROPOSED_PLAN_OPEN_TAG.length, closeIndex).trim().takeIf { it.isNotBlank() }
+}
+
+internal fun planDisplayText(text: String): String {
+    return proposedPlanBody(text) ?: text.trim()
+}
+
+internal fun normalizedAgentMessageType(role: String, type: String, text: String): String {
+    return if (type == "agent" && role == "agent" && isCompletePlanText(text) && proposedPlanBody(text) != null) {
+        "plan"
+    } else {
+        type
+    }
+}
+
+internal fun isActionablePlanMessage(message: AgentMessage): Boolean {
+    return normalizedAgentMessageType(message.role, message.type, message.text) == "plan" &&
+        !message.streaming &&
+        isCompletePlanText(message.text)
+}
+
+internal data class CliCommandDraft(
+    val mode: String,
+    val sessionId: String,
+    val reviewTarget: String,
+    val profile: String,
+    val images: List<String>,
+    val addDirs: List<String>,
+    val jsonOutput: Boolean,
+    val ephemeral: Boolean,
+    val ignoreRules: Boolean,
+    val prompt: String,
+)
+
+internal fun splitCliInput(raw: String): List<String> {
+    val tokens = mutableListOf<String>()
+    val current = StringBuilder()
+    var quote: Char? = null
+    var index = 0
+    while (index < raw.length) {
+        val char = raw[index]
+        val next = raw.getOrNull(index + 1)
+        when {
+            char == '\\' && quote != null && (next == quote || next == '\\') -> {
+                current.append(next)
+                index += 1
+            }
+            quote != null && char == quote -> quote = null
+            quote == null && (char == '"' || char == '\'') -> quote = char
+            quote == null && char.isWhitespace() -> {
+                if (current.isNotEmpty()) {
+                    tokens.add(current.toString())
+                    current.clear()
+                }
+            }
+            else -> current.append(char)
+        }
+        index += 1
+    }
+    if (current.isNotEmpty()) tokens.add(current.toString())
+    return tokens
+}
+
+internal fun parseCliCommand(window: CliConsoleWindow): CliCommandDraft {
+    val raw = window.input.trim()
+    if (!raw.startsWith("/")) {
+        return CliCommandDraft(
+            mode = window.mode.ifBlank { "exec" },
+            sessionId = window.sessionId.trim(),
+            reviewTarget = window.reviewTarget.trim(),
+            profile = window.profile.trim(),
+            images = window.images,
+            addDirs = window.addDirs,
+            jsonOutput = window.jsonOutput,
+            ephemeral = window.ephemeral,
+            ignoreRules = window.ignoreRules,
+            prompt = raw,
+        )
+    }
+    val tokens = splitCliInput(raw)
+    var mode = "exec"
+    var sessionId = window.sessionId.trim()
+    var reviewTarget = window.reviewTarget.trim()
+    var profile = window.profile.trim()
+    val images = window.images.toMutableList()
+    val addDirs = window.addDirs.toMutableList()
+    var jsonOutput = window.jsonOutput
+    var ephemeral = window.ephemeral
+    var ignoreRules = window.ignoreRules
+    val promptParts = mutableListOf<String>()
+    var index = 0
+    while (index < tokens.size) {
+        when (val token = tokens[index]) {
+            "/resume" -> {
+                mode = "resume"
+                val next = tokens.getOrNull(index + 1)
+                if (next != null && !next.startsWith("/") && !next.startsWith("--")) {
+                    sessionId = next
+                    index += 1
+                } else if (sessionId.isBlank()) {
+                    sessionId = "last"
+                }
+            }
+            "/review" -> {
+                mode = "review"
+                if (reviewTarget.isBlank()) reviewTarget = "uncommitted"
+            }
+            "/json" -> jsonOutput = true
+            "/ephemeral" -> ephemeral = true
+            "/ignore-rules" -> ignoreRules = true
+            "/profile" -> {
+                tokens.getOrNull(index + 1)?.takeIf { !it.startsWith("/") && !it.startsWith("--") }?.let {
+                    profile = it
+                    index += 1
+                }
+            }
+            "/image" -> {
+                tokens.getOrNull(index + 1)?.takeIf { !it.startsWith("/") && !it.startsWith("--") }?.let {
+                    images.add(it)
+                    index += 1
+                }
+            }
+            "/add-dir" -> {
+                tokens.getOrNull(index + 1)?.takeIf { !it.startsWith("/") && !it.startsWith("--") }?.let {
+                    addDirs.add(it)
+                    index += 1
+                }
+            }
+            "--last" -> sessionId = "last"
+            "--uncommitted" -> reviewTarget = "uncommitted"
+            "--base" -> {
+                tokens.getOrNull(index + 1)?.takeIf { !it.startsWith("/") && !it.startsWith("--") }?.let {
+                    reviewTarget = "base:$it"
+                    index += 1
+                }
+            }
+            "--commit" -> {
+                tokens.getOrNull(index + 1)?.takeIf { !it.startsWith("/") && !it.startsWith("--") }?.let {
+                    reviewTarget = "commit:$it"
+                    index += 1
+                }
+            }
+            else -> promptParts.add(token)
+        }
+        index += 1
+    }
+    return CliCommandDraft(
+        mode = mode,
+        sessionId = sessionId,
+        reviewTarget = reviewTarget,
+        profile = profile,
+        images = images.distinct().take(12),
+        addDirs = addDirs.distinct().take(12),
+        jsonOutput = jsonOutput,
+        ephemeral = ephemeral,
+        ignoreRules = ignoreRules,
+        prompt = promptParts.joinToString(" "),
+    )
 }
 
 class EasyCodexController(private val context: android.content.Context) {
@@ -118,6 +380,11 @@ class EasyCodexController(private val context: android.content.Context) {
     private val pendingCliOutputs = linkedMapOf<String, PendingCliOutput>()
     private val fileChangeLiveStats = ConcurrentHashMap<String, FileChangeLiveStat>()
     private val commandOutputLiveStats = ConcurrentHashMap<String, CommandOutputLiveStat>()
+    private val pendingPlanReviewCandidates = ConcurrentHashMap<String, PlanReviewCandidate>()
+    private val activeTurnSerials = ConcurrentHashMap<String, Long>()
+    private val completedTurnSerials = ConcurrentHashMap<String, Long>()
+    private val activeTurnStartedAt = ConcurrentHashMap<String, Long>()
+    private val autoPromptedPlanKeys = mutableSetOf<String>()
     private var streamDeltaFlushRunnable: Runnable? = null
     private var cliOutputFlushRunnable: Runnable? = null
     private var relayDetailRefreshRunnable: Runnable? = null
@@ -137,6 +404,7 @@ class EasyCodexController(private val context: android.content.Context) {
     private var diffReviewRequestCounter = 0
     private val pendingOutboundMessages = ConcurrentHashMap<String, MutableList<AgentMessage>>()
     private val pendingAgentStatusIds = ConcurrentHashMap<String, String>()
+    private val pendingQuickReplies = mutableListOf<PendingQuickReply>()
 
     var relayUrl by mutableStateOf(prefs.getString(PREF_RELAY_URL, DEFAULT_RELAY_URL) ?: DEFAULT_RELAY_URL)
     var apiKey by mutableStateOf(prefs.getString(PREF_API_KEY, "") ?: "")
@@ -170,7 +438,7 @@ class EasyCodexController(private val context: android.content.Context) {
             notifyConnectionStateChanged()
         }
     var activeAgentId by mutableStateOf<String?>(null)
-    var draftProjectCwd by mutableStateOf<String?>(defaultCwd.ifBlank { DEFAULT_AGENT_CWD })
+    var draftProjectCwd by mutableStateOf<String?>(null)
     var draftProjectLocked by mutableStateOf(false)
     var draftModel by mutableStateOf(defaultModel.ifBlank { DEFAULT_AGENT_MODEL })
     var draftReasoningEffort by mutableStateOf(defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT })
@@ -213,7 +481,6 @@ class EasyCodexController(private val context: android.content.Context) {
         private set
     var planReview by mutableStateOf<PlanReview?>(null)
         private set
-    private var lastPromptedPlanKey: String? = null
     private var projectOptionsCacheRevision = -1
     private var projectOptionsCacheDraftCwd: String? = null
     private var projectOptionsCacheDefaultCwd = ""
@@ -249,13 +516,14 @@ class EasyCodexController(private val context: android.content.Context) {
 
     val draftAgent: Agent?
         get() {
-            val cwd = draftProjectCwd ?: return null
+            if (activeAgentId != null) return null
+            val cwd = draftProjectCwd.orEmpty()
             return Agent(
                 id = "draft_project_task",
-                name = if (draftProjectLocked) projectNameFromCwd(cwd) else strings.homeSubtitle,
+                name = if (draftProjectLocked && cwd.isNotBlank()) projectNameFromCwd(cwd) else strings.homeSubtitle,
                 model = draftModel.ifBlank { defaultModel.ifBlank { DEFAULT_AGENT_MODEL } },
                 cwd = cwd,
-                projectRoot = cwd,
+                projectRoot = cleanNullablePath(cwd),
                 status = strings.homeSubtitle,
                 serviceTier = normalizeServiceTier(draftServiceTier.ifBlank { defaultServiceTier.ifBlank { DEFAULT_SERVICE_TIER } }),
                 reasoningEffort = draftReasoningEffort.ifBlank { defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT } },
@@ -313,9 +581,6 @@ class EasyCodexController(private val context: android.content.Context) {
             ?: DEFAULT_AGENT_MODEL
         defaultCwd = prefs.getString(PREF_DEFAULT_CWD, DEFAULT_AGENT_CWD)?.trim().orEmpty()
             .ifBlank { DEFAULT_AGENT_CWD }
-        if (activeAgentId == null && draftProjectCwd.isNullOrBlank()) {
-            draftProjectCwd = defaultCwd
-        }
         defaultReasoningEffort = prefs.getString(PREF_DEFAULT_REASONING_EFFORT, DEFAULT_REASONING_EFFORT)
             ?.ifBlank { DEFAULT_REASONING_EFFORT }
             ?: DEFAULT_REASONING_EFFORT
@@ -393,6 +658,7 @@ class EasyCodexController(private val context: android.content.Context) {
                         refreshRuntimeOptions()
                         refreshAgents()
                         replayMissedStream()
+                        flushPendingQuickReplies()
                     } else {
                         connectionStatus = "disconnected"
                         statusText = localizedConnectionError(error)
@@ -507,9 +773,7 @@ class EasyCodexController(private val context: android.content.Context) {
         activeAgentId = null
         notificationLevelState = null
         draftProjectLocked = false
-        if (draftProjectCwd.isNullOrBlank()) {
-            draftProjectCwd = defaultCwd.ifBlank { DEFAULT_AGENT_CWD }
-        }
+        draftProjectCwd = null
     }
 
     fun selectAgent(agentId: String) {
@@ -557,6 +821,7 @@ class EasyCodexController(private val context: android.content.Context) {
                 return@send
             }
             val payload = data?.optJSONObject("data") ?: JSONObject()
+            val replayed = replayCliEvents(payload.optJSONArray("events"), active.id)
             updateCliWindow(active.id) { window ->
                 window.copy(
                     cwd = payload.optString("cwd", requestedCwd).ifBlank { requestedCwd },
@@ -570,7 +835,7 @@ class EasyCodexController(private val context: android.content.Context) {
                     runId = payload.optString("runId").takeIf { it.isNotBlank() && it != "null" },
                 )
             }
-            if (cliWindow(active.id).lines.isEmpty()) {
+            if (!replayed && cliWindow(active.id).lines.isEmpty()) {
                 appendCliLine("status", "Codex CLI 已就绪。当前目录：${cliWindow(active.id).cwd}")
             }
         }
@@ -616,9 +881,9 @@ class EasyCodexController(private val context: android.content.Context) {
 
     fun sendCliCommand() {
         val window = cliConsole.activeWindow
-        val prompt = window.input.trim()
-        if (prompt.isBlank() || window.busy) return
-        appendCliLine("user", prompt)
+        val draft = parseCliCommand(window)
+        if (draft.prompt.isBlank() && draft.mode == "exec" || window.busy) return
+        appendCliLine("user", window.input.trim())
         updateCliWindow(window.id) { it.copy(input = "", busy = true, running = true) }
         send(
             "cli_run",
@@ -629,7 +894,16 @@ class EasyCodexController(private val context: android.content.Context) {
                 "reasoningEffort" to window.reasoningEffort.ifBlank { defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT } },
                 "sandboxMode" to window.sandboxMode.ifBlank { "workspace-write" },
                 "skipGitRepoCheck" to window.skipGitRepoCheck,
-                "prompt" to prompt,
+                "mode" to draft.mode,
+                "sessionId" to draft.sessionId,
+                "reviewTarget" to draft.reviewTarget,
+                "profile" to draft.profile,
+                "images" to draft.images,
+                "addDirs" to draft.addDirs,
+                "jsonOutput" to draft.jsonOutput,
+                "ephemeral" to draft.ephemeral,
+                "ignoreRules" to draft.ignoreRules,
+                "prompt" to draft.prompt,
             ),
         ) { data, error ->
             if (error != null) {
@@ -667,6 +941,15 @@ class EasyCodexController(private val context: android.content.Context) {
             reasoningEffort = active.reasoningEffort,
             sandboxMode = active.sandboxMode,
             skipGitRepoCheck = active.skipGitRepoCheck,
+            mode = active.mode,
+            sessionId = active.sessionId,
+            reviewTarget = active.reviewTarget,
+            profile = active.profile,
+            images = active.images,
+            addDirs = active.addDirs,
+            jsonOutput = active.jsonOutput,
+            ephemeral = active.ephemeral,
+            ignoreRules = active.ignoreRules,
             version = active.version,
         )
         cliConsole = cliConsole.copy(activeWindowId = next.id, windows = cliConsole.windows + next)
@@ -692,14 +975,14 @@ class EasyCodexController(private val context: android.content.Context) {
                     statusText = strings.taskArchiveFailed(error)
                     return@send
                 }
-                hideAgentLocally(agent, persistHidden = false)
+                removeArchivedCodexThread(threadId, agentId)
                 statusText = strings.taskArchived
             }
             return
         }
 
         hideAgentLocally(agent)
-        statusText = strings.taskArchived
+        statusText = strings.taskRemovedLocally
         if (!agent.resumable || agent.isBusy()) {
             send("stop_agent", mapOf("agentId" to agentId)) { _, error ->
                 if (error != null && !error.contains("not found", ignoreCase = true)) {
@@ -731,6 +1014,36 @@ class EasyCodexController(private val context: android.content.Context) {
         userInputRequests.removeAll { it.agentId == agentId }
         alerts.removeAll { it.agentId == agentId }
         notificationLevelState = notificationLevelState?.takeUnless { it.agentId == agentId }
+    }
+
+    private fun removeArchivedCodexThread(threadId: String, agentId: String? = null) {
+        val normalizedThreadId = threadId.trim()
+        if (normalizedThreadId.isBlank()) return
+        val idsToRemove = buildSet {
+            add("codex_$normalizedThreadId")
+            add(normalizedThreadId)
+            agentId?.takeIf { it.isNotBlank() }?.let(::add)
+            agents
+                .filter { it.codexThreadId == normalizedThreadId }
+                .mapTo(this) { it.id }
+        }
+        idsToRemove.forEach(::removeLocalAgent)
+        detailedCodexThreads.remove(normalizedThreadId)
+        latestThreadDetailRequests.remove(normalizedThreadId)
+        threadDetailsInFlight.remove(normalizedThreadId)
+        threadDetailRetryCounts.remove(normalizedThreadId)
+        threadDetailRetryRunnables.remove(normalizedThreadId)?.let { main.removeCallbacks(it) }
+        streamingAgentIds.remove(normalizedThreadId)
+        streamingAgentIds.remove("codex_$normalizedThreadId")
+        idsToRemove.forEach { id ->
+            streamingAgentIds.remove(id)
+            pendingOutboundMessages.remove(id)
+            clearPendingAgentStatus(id)
+            approvalRequests.removeAll { it.agentId == id }
+            userInputRequests.removeAll { it.agentId == id }
+            alerts.removeAll { it.agentId == id }
+        }
+        notificationLevelState = notificationLevelState?.takeUnless { it.agentId in idsToRemove }
     }
 
     fun startProjectDraft(cwd: String) {
@@ -827,7 +1140,7 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     fun updateActiveModel(model: String) {
-        if (draftProjectCwd != null) {
+        if (activeAgentId == null) {
             draftModel = model
             val speedTiers = serviceTierOptionsFor(draftAgent)
             draftServiceTier = if (draftServiceTier in speedTiers) draftServiceTier else DEFAULT_SERVICE_TIER
@@ -840,7 +1153,7 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     fun updateActiveReasoningEffort(reasoningEffort: String) {
-        if (draftProjectCwd != null) {
+        if (activeAgentId == null) {
             draftReasoningEffort = reasoningEffort
             return
         }
@@ -848,7 +1161,7 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     fun updateActiveServiceTier(serviceTier: String) {
-        if (draftProjectCwd != null) {
+        if (activeAgentId == null) {
             draftServiceTier = normalizeServiceTier(serviceTier)
             return
         }
@@ -886,6 +1199,7 @@ class EasyCodexController(private val context: android.content.Context) {
         cwd: String,
         reasoningEffort: String = defaultReasoningEffort,
         serviceTier: String = defaultServiceTier,
+        projectless: Boolean = false,
         firstMessage: String? = null,
         firstDisplayMessage: String? = null,
         firstAttachments: List<AttachmentDraft> = emptyList(),
@@ -893,7 +1207,7 @@ class EasyCodexController(private val context: android.content.Context) {
         isBusy = true
         val effectiveName = name.ifBlank { "EasyCodex" }
         val effectiveModel = model.ifBlank { defaultModel.ifBlank { DEFAULT_AGENT_MODEL } }
-        val effectiveCwd = cwd.ifBlank { defaultCwd.ifBlank { DEFAULT_AGENT_CWD } }
+        val effectiveCwd = if (projectless) "" else cwd.ifBlank { defaultCwd.ifBlank { DEFAULT_AGENT_CWD } }
         val effectiveReasoningEffort = reasoningEffort.ifBlank { defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT } }
         val effectiveServiceTier = normalizeServiceTier(serviceTier.ifBlank { defaultServiceTier.ifBlank { DEFAULT_SERVICE_TIER } })
         val optimisticAgentId = firstMessage
@@ -908,7 +1222,7 @@ class EasyCodexController(private val context: android.content.Context) {
                 name = taskNameFromPrompt(optimisticText),
                 model = effectiveModel,
                 cwd = effectiveCwd,
-                projectRoot = effectiveCwd,
+                projectRoot = if (projectless) null else effectiveCwd,
                 status = "working",
                 serviceTier = effectiveServiceTier,
                 reasoningEffort = effectiveReasoningEffort,
@@ -943,6 +1257,7 @@ class EasyCodexController(private val context: android.content.Context) {
             "name" to effectiveName,
             "model" to effectiveModel,
             "cwd" to effectiveCwd,
+            "projectless" to projectless,
             "approvalPolicy" to "never",
         )
         if (runtimeCapabilities.supportsServiceTier) {
@@ -988,9 +1303,13 @@ class EasyCodexController(private val context: android.content.Context) {
                 draftProjectCwd = null
                 if (!firstMessage.isNullOrBlank()) {
                     if (inputText == firstMessage || inputText == restoreText) inputText = ""
+                    val acceptedDisplayText = simplifyUserMessageForDisplay(restoreText ?: firstMessage, "user", "user").trim()
+                    val acceptedTransportText = simplifyUserMessageForDisplay(firstMessage, "user", "user").trim()
                     val relayAlreadyAcceptedMessage = agent.messages.any { message ->
                         (message.role == "user" || message.type == "user") &&
-                            simplifyUserMessageForDisplay(message.text, message.role, message.type).trim() == firstMessage.trim()
+                            simplifyUserMessageForDisplay(message.text, message.role, message.type).trim().let { accepted ->
+                                accepted == acceptedDisplayText || accepted == acceptedTransportText
+                            }
                     }
                     if (!relayAlreadyAcceptedMessage) {
                         sendMessageToAgent(
@@ -1005,6 +1324,21 @@ class EasyCodexController(private val context: android.content.Context) {
         }
     }
 
+    fun clearCliWindow() {
+        updateActiveCliWindow { it.copy(lines = emptyList(), truncated = false) }
+    }
+
+    private fun replayCliEvents(events: JSONArray?, windowId: String): Boolean {
+        if (events == null || events.length() == 0 || cliWindow(windowId).lines.isNotEmpty()) return false
+        var replayed = false
+        for (index in 0 until events.length()) {
+            val event = events.optJSONObject(index) ?: continue
+            handleStreamEnvelope(event)
+            replayed = true
+        }
+        return replayed
+    }
+
     fun sendActiveMessage(planMode: Boolean = false) {
         val typedText = inputText.trim()
         val selectedAttachments = attachmentDrafts.toList()
@@ -1016,6 +1350,7 @@ class EasyCodexController(private val context: android.content.Context) {
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
         draftAgent?.let { draft ->
+            val projectless = draft.cwd.isBlank()
             attachmentDrafts.clear()
             createAgent(
                 name = taskNameFromPrompt(typedText.ifBlank { text }),
@@ -1023,6 +1358,7 @@ class EasyCodexController(private val context: android.content.Context) {
                 cwd = draft.cwd,
                 reasoningEffort = draft.reasoningEffort,
                 serviceTier = draft.serviceTier,
+                projectless = projectless,
                 firstMessage = transportText,
                 firstDisplayMessage = displayText,
                 firstAttachments = selectedAttachments,
@@ -1038,39 +1374,49 @@ class EasyCodexController(private val context: android.content.Context) {
         }
         inputText = ""
         attachmentDrafts.clear()
-        if (agent.isBusy()) {
-            createAgent(
-                name = taskNameFromPrompt(typedText.ifBlank { text }),
-                model = agent.model,
-                cwd = agent.cwd,
-                reasoningEffort = agent.reasoningEffort,
-                serviceTier = agent.serviceTier,
-                firstMessage = transportText,
-                firstDisplayMessage = displayText,
-                firstAttachments = selectedAttachments,
-            )
+        if (shouldQueueFollowUpOnCurrentAgent(agent)) {
+            sendMessageToAgent(agent.id, transportText, displayText, selectedAttachments)
             return
         }
         sendMessageToAgent(agent.id, transportText, displayText, selectedAttachments)
     }
 
     fun showPlanReview(agentId: String, message: AgentMessage) {
-        planReview = PlanReview(agentId, message)
-        lastPromptedPlanKey = "${agentId}:${message.stableKey()}"
+        val agent = agents.firstOrNull { it.id == agentId } ?: return
+        val latest = latestPlanMessage(agent, message.itemId) ?: message
+        planReview = PlanReview(
+            agentId = agentId,
+            message = latest,
+            taskName = agent.displayTaskName(),
+            projectPath = agent.displayProjectPath(),
+        )
     }
 
     fun dismissPlanReview() {
         planReview = null
     }
 
-    fun optimizePlan(review: PlanReview) {
+    fun optimizePlan(review: PlanReview, adjustment: String = "") {
         planReview = null
-        sendMessageToAgent(review.agentId, PLAN_OPTIMIZE_PROMPT, "优化这个计划")
+        val cleanAdjustment = adjustment.trim()
+        val prompt = if (cleanAdjustment.isBlank()) {
+            PLAN_OPTIMIZE_PROMPT
+        } else {
+            "$PLAN_OPTIMIZE_PROMPT\n\n我的补充要求：$cleanAdjustment"
+        }
+        sendMessageToAgent(review.agentId, prompt, if (cleanAdjustment.isBlank()) "优化这个计划" else "调整这个计划：$cleanAdjustment")
     }
 
     fun startPlan(review: PlanReview) {
         planReview = null
-        sendMessageToAgent(review.agentId, PLAN_START_PROMPT, "开始这个计划")
+        val pendingStartRequest = userInputRequests
+            .firstOrNull { it.agentId == review.agentId }
+            ?.let { request -> planStartAnswersForRequest(request)?.let { request to it } }
+        if (pendingStartRequest != null) {
+            respondUserInputRequest(pendingStartRequest.first, pendingStartRequest.second)
+            return
+        }
+        sendMessageToAgent(review.agentId, PLAN_START_PROMPT, PLAN_START_PROMPT)
     }
 
     fun appendToInput(value: String) {
@@ -1080,6 +1426,18 @@ class EasyCodexController(private val context: android.content.Context) {
             inputText.endsWith(" ") || inputText.endsWith("\n") -> inputText + value
             else -> "$inputText $value"
         }
+    }
+
+    fun sendQuickReply(agentId: String, text: String) {
+        val cleanText = text.trim()
+        if (agentId.isBlank() || cleanText.isBlank()) return
+        if (connectionStatus != "connected") {
+            queueQuickReply(agentId, cleanText)
+            connect()
+            statusText = "正在重连中继，快速回复会在连接恢复后发送"
+            return
+        }
+        deliverQuickReply(agentId, cleanText)
     }
 
     fun removeAttachmentDraft(path: String) {
@@ -1320,6 +1678,41 @@ class EasyCodexController(private val context: android.content.Context) {
         }
     }
 
+    private fun queueQuickReply(agentId: String, text: String) {
+        pendingQuickReplies.add(PendingQuickReply(agentId, text, System.currentTimeMillis()))
+        while (pendingQuickReplies.size > 20) pendingQuickReplies.removeAt(0)
+    }
+
+    private fun flushPendingQuickReplies() {
+        if (pendingQuickReplies.isEmpty() || connectionStatus != "connected") return
+        val replies = pendingQuickReplies.toList()
+        pendingQuickReplies.clear()
+        replies.forEach { deliverQuickReply(it.agentId, it.text) }
+    }
+
+    private fun deliverQuickReply(agentId: String, text: String) {
+        val agent = agents.firstOrNull { it.id == agentId }
+        if (agent != null) {
+            sendMessageToAgent(agent.id, text)
+            return
+        }
+        send(
+            "send_message",
+            mapOf(
+                "agentId" to agentId,
+                "text" to text,
+                "attachments" to emptyList<Map<String, Any?>>(),
+            ),
+        ) { _, error ->
+            if (error != null) {
+                statusText = "快速回复失败：$error"
+            } else {
+                statusText = "快速回复已发送"
+                refreshAgents()
+            }
+        }
+    }
+
     private fun refreshCodexThreads(runningAgents: List<Agent>, onComplete: () -> Unit = {}) {
         refreshCodexThreadsPage(runningAgents, emptyList(), emptySet(), emptyList(), null, onComplete)
     }
@@ -1390,9 +1783,6 @@ class EasyCodexController(private val context: android.content.Context) {
                 else -> null
             }
             refreshUnreadCompletedAlerts()
-            if (activeAgentId == null && draftProjectCwd.isNullOrBlank()) {
-                draftProjectCwd = defaultCwd.ifBlank { DEFAULT_AGENT_CWD }
-            }
             prefetchCodexThreadDetails(visibleRunningAgents + nextImported)
             refreshActiveCodexThreadDetail()
             onComplete()
@@ -2113,7 +2503,6 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     fun respondApprovalRequest(request: AgentApprovalRequest, approved: Boolean) {
-        approvalRequests.removeAll { it.id == request.id && it.agentId == request.agentId }
         send(
             "respond_agent_request",
             mapOf(
@@ -2123,12 +2512,15 @@ class EasyCodexController(private val context: android.content.Context) {
                 "reason" to if (approved) "Approved from EasyCodex mobile" else "Denied from EasyCodex mobile",
             ),
         ) { _, error ->
-            if (error != null) statusText = "审批响应失败：$error"
+            if (error != null) {
+                statusText = "审批响应失败：$error"
+            } else {
+                approvalRequests.removeAll { it.id == request.id && it.agentId == request.agentId }
+            }
         }
     }
 
     fun respondUserInputRequest(request: AgentUserInputRequest, answers: Map<String, String>) {
-        userInputRequests.removeAll { it.id == request.id && it.agentId == request.agentId }
         val payload = JSONObject()
         answers.forEach { (key, value) ->
             if (key.isNotBlank() && value.isNotBlank()) payload.put(key, value)
@@ -2141,7 +2533,11 @@ class EasyCodexController(private val context: android.content.Context) {
                 "answers" to payload,
             ),
         ) { _, error ->
-            if (error != null) statusText = "回答发送失败：$error"
+            if (error != null) {
+                statusText = "回答发送失败：$error"
+            } else {
+                userInputRequests.removeAll { it.id == request.id && it.agentId == request.agentId }
+            }
         }
     }
 
@@ -2341,6 +2737,9 @@ class EasyCodexController(private val context: android.content.Context) {
         }
         when (event) {
             "codex/threads_changed" -> {
+                if (data.optString("reason") == "thread_archived") {
+                    removeArchivedCodexThread(data.optString("threadId"), data.optString("agentId"))
+                }
                 scheduleRelayStateRefresh(immediate = true)
             }
             "agents/changed" -> {
@@ -2349,6 +2748,10 @@ class EasyCodexController(private val context: android.content.Context) {
             "turn/started" -> {
                 clearPendingAgentStatus(agentId)
                 streamingAgentIds.add(agentId)
+                val turnSerial = (activeTurnSerials[agentId] ?: completedTurnSerials[agentId] ?: 0L) + 1L
+                activeTurnSerials[agentId] = turnSerial
+                activeTurnStartedAt[agentId] = jsonTimestamp(data, "timestamp", System.currentTimeMillis())
+                pendingPlanReviewCandidates.remove(agentId)
                 updateAgent(agentId) { it.copy(status = "working", activity = "正在运行中，AI 正在接手任务", updatedAt = System.currentTimeMillis()) }
             }
             "turn/queued" -> {
@@ -2371,14 +2774,20 @@ class EasyCodexController(private val context: android.content.Context) {
             "turn/completed" -> {
                 clearPendingAgentStatus(agentId)
                 streamingAgentIds.remove(agentId)
+                completedTurnSerials[agentId] = activeTurnSerials[agentId] ?: ((completedTurnSerials[agentId] ?: 0L) + 1L)
                 val completedAt = System.currentTimeMillis()
+                val durationMs = turnDurationMs(data, agentId, completedAt)
                 updateAgent(agentId) { it.asIdle(status = "ready", updatedAt = completedAt) }
+                annotateLatestAgentMessageDuration(agentId, durationMs)
+                activeTurnStartedAt.remove(agentId)
+                maybePromptCompletedPlanReview(agentId)
                 recordAgentAlert(agentId, AgentAlertKind.Completed, data.optString("preview"))
                 scheduleAgentsRefresh()
             }
             "turn/failed" -> {
                 clearPendingAgentStatus(agentId)
                 streamingAgentIds.remove(agentId)
+                activeTurnStartedAt.remove(agentId)
                 val text = data.optJSONObject("error")?.optString("message") ?: "运行失败"
                 appendMessage(agentId, AgentMessage("agent", "status", text, System.currentTimeMillis()))
                 updateAgent(agentId) { it.asIdle(status = "error", updatedAt = System.currentTimeMillis()) }
@@ -2591,6 +3000,7 @@ class EasyCodexController(private val context: android.content.Context) {
 
     private fun handleCliStream(event: String, data: JSONObject) {
         val windowId = data.optString("windowId").takeIf { it.isNotBlank() } ?: cliConsole.activeWindowId
+        ensureCliWindow(windowId)
         when (event) {
             "cli/started" -> {
                 val runId = data.optString("runId").takeIf { it.isNotBlank() }
@@ -2606,6 +3016,8 @@ class EasyCodexController(private val context: android.content.Context) {
                         reasoningEffort = data.optString("reasoningEffort", current.reasoningEffort).ifBlank { current.reasoningEffort },
                         sandboxMode = data.optString("sandboxMode", current.sandboxMode).ifBlank { current.sandboxMode },
                         skipGitRepoCheck = data.optBoolean("skipGitRepoCheck", current.skipGitRepoCheck),
+                        mode = data.optString("mode", current.mode).ifBlank { current.mode },
+                        jsonOutput = data.optBoolean("structured", current.jsonOutput),
                     )
                 }
                 val command = data.optString("command").trim()
@@ -2623,6 +3035,16 @@ class EasyCodexController(private val context: android.content.Context) {
             "cli/output" -> {
                 val chunk = data.optString("chunk")
                 if (chunk.isNotBlank()) appendCliOutput(chunk, data.optString("stream", "stdout"), windowId)
+            }
+
+            "cli/status" -> {
+                val chunk = data.optString("chunk").ifBlank { data.optString("title") }
+                if (chunk.isNotBlank()) appendCliLine("status", chunk, windowId)
+            }
+
+            "cli/final" -> {
+                val chunk = data.optString("finalText").ifBlank { data.optString("chunk") }
+                if (chunk.isNotBlank()) appendCliLine("stdout", chunk, windowId)
             }
 
             "cli/exited" -> {
@@ -2658,7 +3080,10 @@ class EasyCodexController(private val context: android.content.Context) {
             text = text,
             timestamp = System.currentTimeMillis(),
         )
-        updateCliWindow(windowId) { it.copy(lines = (it.lines + line).takeLast(120)) }
+        updateCliWindow(windowId) {
+            val nextLines = it.lines + line
+            it.copy(lines = nextLines.takeLast(120), truncated = it.truncated || nextLines.size > 120)
+        }
     }
 
     private fun appendCliOutput(chunk: String, stream: String, windowId: String) {
@@ -2694,7 +3119,7 @@ class EasyCodexController(private val context: android.content.Context) {
                 ),
             )
         }
-        updateCliWindow(windowId) { it.copy(lines = lines.takeLast(120)) }
+        updateCliWindow(windowId) { it.copy(lines = lines.takeLast(120), truncated = it.truncated || lines.size > 120) }
     }
 
     private fun scheduleCliOutputFlush() {
@@ -2732,6 +3157,31 @@ class EasyCodexController(private val context: android.content.Context) {
 
     private fun cliWindow(windowId: String): CliConsoleWindow {
         return cliConsole.windows.firstOrNull { it.id == windowId } ?: cliConsole.activeWindow
+    }
+
+    private fun ensureCliWindow(windowId: String) {
+        if (windowId.isBlank() || cliConsole.windows.any { it.id == windowId }) return
+        val active = cliConsole.activeWindow
+        val next = CliConsoleWindow(
+            id = windowId,
+            title = "CLI ${cliConsole.windows.size + 1}",
+            cwd = active.cwd,
+            model = active.model,
+            reasoningEffort = active.reasoningEffort,
+            sandboxMode = active.sandboxMode,
+            skipGitRepoCheck = active.skipGitRepoCheck,
+            mode = active.mode,
+            sessionId = active.sessionId,
+            reviewTarget = active.reviewTarget,
+            profile = active.profile,
+            images = active.images,
+            addDirs = active.addDirs,
+            jsonOutput = active.jsonOutput,
+            ephemeral = active.ephemeral,
+            ignoreRules = active.ignoreRules,
+            version = active.version,
+        )
+        cliConsole = cliConsole.copy(windows = cliConsole.windows + next)
     }
 
     private fun updateActiveCliWindow(transform: (CliConsoleWindow) -> CliConsoleWindow) {
@@ -2936,7 +3386,8 @@ class EasyCodexController(private val context: android.content.Context) {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             val smallIcon = if (context.applicationInfo.icon != 0) context.applicationInfo.icon else R.mipmap.ic_launcher
-            val notification = Notification.Builder(context, AGENT_ALERT_CHANNEL_ID)
+            val notificationId = AGENT_ALERT_NOTIFICATION_BASE_ID + (alert.agentId.hashCode() and 0x0FFF)
+            val builder = Notification.Builder(context, AGENT_ALERT_CHANNEL_ID)
                 .setSmallIcon(smallIcon)
                 .setContentTitle(alert.title)
                 .setContentText(alert.detail)
@@ -2946,8 +3397,10 @@ class EasyCodexController(private val context: android.content.Context) {
                 .setShowWhen(true)
                 .setWhen(alert.timestamp)
                 .setCategory(Notification.CATEGORY_STATUS)
-                .build()
-            manager.notify(AGENT_ALERT_NOTIFICATION_BASE_ID + (alert.agentId.hashCode() and 0x0FFF), notification)
+            if (alert.kind != AgentAlertKind.Error) {
+                builder.addAction(quickReplyAction(context, alert.agentId, notificationId, "回复"))
+            }
+            manager.notify(notificationId, builder.build())
         }
     }
 
@@ -2997,7 +3450,11 @@ class EasyCodexController(private val context: android.content.Context) {
                 val changes = fileChangesText(item.optJSONArray("changes")).ifBlank { fileChangesText(item.optJSONObject("changes")) }
                 if (changes.isNotBlank()) return changes
                 val path = item.optString("path").ifBlank { item.optString("file") }.ifBlank { item.optString("filePath") }
-                return if (path.isNotBlank()) "文件改动\n- $path" else if (started) "正在修改文件。" else "文件已修改。"
+                if (path.isNotBlank()) return "文件改动\n- $path"
+                val direct = listOf("text", "diff", "patch", "message")
+                    .firstNotNullOfOrNull { key -> item.optString(key).takeIf { it.isNotBlank() } }
+                if (!direct.isNullOrBlank()) return direct
+                return if (started) "正在修改文件。" else "文件已修改。"
             }
             "sub_agent" -> return if (started) "子代理正在工作。" else "子代理已返回结果，详细内容已省略。"
             "thinking" -> return "正在思考中。"
@@ -3171,12 +3628,53 @@ class EasyCodexController(private val context: android.content.Context) {
         val deltaStats = diffStats(delta)
         stats.additions += deltaStats.first
         stats.deletions += deltaStats.second
+        fileChangeLivePaths(delta).forEach { stats.paths.add(it) }
         val statText = if (stats.additions + stats.deletions > 0) {
             " +${stats.additions} -${stats.deletions}"
         } else {
             ""
         }
-        return "正在修改文件$statText"
+        val paths = stats.paths.toList()
+        val title = when (paths.size) {
+            0 -> "正在编辑文件"
+            1 -> "正在编辑 ${paths.first().substringAfterLast('/').substringAfterLast('\\')}"
+            else -> "正在编辑 ${paths.size} 个文件"
+        }
+        val pathLines = paths.take(8).joinToString("\n") { "- $it" }
+        val moreLine = if (paths.size > 8) "\n- 另有 ${paths.size - 8} 个文件" else ""
+        return listOf("$title$statText", pathLines + moreLine)
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
+    }
+
+    private fun fileChangeLivePaths(delta: String): List<String> {
+        val paths = linkedSetOf<String>()
+        delta.lineSequence().forEach { line ->
+            val trimmed = line.trim()
+            val summary = Regex("^[-•]\\s+(.+?)(?:\\s+\\(?\\+\\d+\\s+-\\d+\\)?)?$").find(trimmed)
+                ?.groupValues
+                ?.getOrNull(1)
+            val diffPath = Regex("^diff --git a/(.+?) b/(.+)$").find(trimmed)
+                ?.groupValues
+                ?.getOrNull(2)
+            val newPath = Regex("^\\+\\+\\+ b/(.+)$").find(trimmed)
+                ?.groupValues
+                ?.getOrNull(1)
+            val explicit = Regex("^(?:file|path|target|filename|filePath):\\s+(.+)$", RegexOption.IGNORE_CASE)
+                .find(trimmed)
+                ?.groupValues
+                ?.getOrNull(1)
+            listOf(summary, diffPath, newPath, explicit)
+                .filterNotNull()
+                .map { it.trim().removePrefix("a/").removePrefix("b/") }
+                .filter { candidate ->
+                    candidate.isNotBlank() &&
+                        candidate != "/dev/null" &&
+                        (candidate.contains("/") || candidate.contains("\\") || candidate.substringAfterLast('.', "").length in 1..8)
+                }
+                .forEach { paths.add(it) }
+        }
+        return paths.toList()
     }
 
     private fun commandOutputLiveText(agentId: String, itemId: String, delta: String): String {
@@ -3301,22 +3799,18 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun requestText(json: JSONObject, method: String): String {
+        if (isUserInputRequest(method)) {
+            val params = json.optJSONObject("params")
+            val questionText = params?.let { userInputRequestQuestionText(it).ifBlank { jsonSummary(it) } }.orEmpty()
+            if (questionText.isNotBlank()) return questionText
+        }
         return json.optString("text")
-            .ifBlank { json.optJSONObject("params")?.let { userInputRequestText(it).ifBlank { jsonSummary(it) } }.orEmpty() }
+            .ifBlank { json.optJSONObject("params")?.let { userInputRequestQuestionText(it).ifBlank { jsonSummary(it) } }.orEmpty() }
             .ifBlank { method }
     }
 
     private fun userInputRequestText(params: JSONObject): String {
-        val questions = params.optJSONArray("questions") ?: return params.optString("message")
-        return buildList {
-            for (index in 0 until questions.length()) {
-                val question = questions.optJSONObject(index) ?: continue
-                val header = question.optString("header")
-                val prompt = question.optString("question")
-                val line = listOf(header, prompt).filter { it.isNotBlank() }.joinToString("：")
-                if (line.isNotBlank()) add(line)
-            }
-        }.joinToString("\n")
+        return userInputRequestQuestionText(params)
     }
 
     private fun parseUserInputQuestions(params: JSONObject?): List<AgentUserInputQuestion> {
@@ -3370,12 +3864,14 @@ class EasyCodexController(private val context: android.content.Context) {
             }
         }
         val fallbackName = firstUserMessageTitle(parsedMessages) ?: "EasyCodex"
+        val projectless = json.optBoolean("projectless", false)
+        val cwd = if (projectless) "" else json.optString("cwd", ".")
         return Agent(
             id = json.optString("id"),
             name = displayTaskName(jsonNullableString(json, "name"), fallbackName),
             model = json.optString("model", DEFAULT_AGENT_MODEL).ifBlank { DEFAULT_AGENT_MODEL },
-            cwd = json.optString("cwd", "."),
-            projectRoot = cleanNullablePath(json.optString("projectRoot")),
+            cwd = cwd,
+            projectRoot = if (projectless) null else cleanNullablePath(json.optString("projectRoot")),
             status = json.optString("status", "stopped"),
             serviceTier = normalizeServiceTier(json.optString("serviceTier", DEFAULT_SERVICE_TIER).ifBlank { DEFAULT_SERVICE_TIER }),
             reasoningEffort = json.optString("reasoningEffort", DEFAULT_REASONING_EFFORT).ifBlank { DEFAULT_REASONING_EFFORT },
@@ -3477,9 +3973,6 @@ class EasyCodexController(private val context: android.content.Context) {
         val primaryRoot = nextRoots.firstOrNull()
         if (!primaryRoot.isNullOrBlank() && normalizePathKey(defaultCwd) == normalizePathKey(DEFAULT_AGENT_CWD)) {
             defaultCwd = primaryRoot
-            if (activeAgentId == null && !draftProjectLocked) {
-                draftProjectCwd = primaryRoot
-            }
         }
         if (nextRoots == relayProjectRoots) return
         relayProjectRoots = nextRoots
@@ -3691,14 +4184,18 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun parseMessage(json: JSONObject): AgentMessage {
-        val type = json.optString("type", "agent")
+        val rawType = json.optString("type", "agent")
         val role = json.optString("role", "agent")
+        val text = capMobileMessageText(simplifyUserMessageForDisplay(json.optString("text"), role, rawType), rawType)
+        val type = normalizedAgentMessageType(role, rawType, text)
         return AgentMessage(
             role = role,
             type = type,
-            text = capMobileMessageText(simplifyUserMessageForDisplay(json.optString("text"), role, type), type),
+            text = capMobileMessageText(text, type),
             timestamp = json.optLong("timestamp", System.currentTimeMillis()),
             itemId = json.optString("_itemId").ifBlank { json.optString("itemId") }.takeIf { it.isNotBlank() },
+            durationMs = json.optLong("durationMs", -1L).takeIf { it > 0L }
+                ?: json.optLong("duration_ms", -1L).takeIf { it > 0L },
         )
     }
 
@@ -3742,10 +4239,11 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun mergeMessageLists(current: List<AgentMessage>, incoming: List<AgentMessage>): List<AgentMessage> {
-        if (current.isEmpty()) return incoming
+        val normalizedIncoming = incoming.dedupeAdjacentUserEchoes()
+        if (current.isEmpty()) return normalizedIncoming
         if (incoming.isEmpty()) return current
-        if (current.size == 1 && current.first().type == "status" && incoming.size > 1) return incoming
-        if (incoming.size == 1 && incoming.first().type == "status" && current.size > 1) return current
+        if (current.size == 1 && current.first().type == "status" && normalizedIncoming.size > 1) return normalizedIncoming
+        if (normalizedIncoming.size == 1 && normalizedIncoming.first().type == "status" && current.size > 1) return current
         val merged = current.toMutableList()
         val itemIdIndexes = merged
             .mapIndexedNotNull { index, message -> message.itemId?.takeIf { it.isNotBlank() }?.let { it to index } }
@@ -3755,7 +4253,7 @@ class EasyCodexController(private val context: android.content.Context) {
             .mapIndexed { index, message -> message.contentKey() to index }
             .toMap()
             .toMutableMap()
-        incoming.forEach { message ->
+        normalizedIncoming.forEach { message ->
             val existingIndex = message.itemId
                 ?.takeIf { it.isNotBlank() }
                 ?.let { itemIdIndexes[it] }
@@ -3772,6 +4270,28 @@ class EasyCodexController(private val context: android.content.Context) {
             }
         }
         return merged
+    }
+
+    private fun List<AgentMessage>.dedupeAdjacentUserEchoes(): List<AgentMessage> {
+        if (size < 2) return this
+        val deduped = mutableListOf<AgentMessage>()
+        for (message in this) {
+            val previous = deduped.lastOrNull()
+            if (previous != null && previous.isSameUserEcho(message)) {
+                deduped[deduped.lastIndex] = mergeMessage(previous, message)
+            } else {
+                deduped.add(message)
+            }
+        }
+        return if (deduped.size == size) this else deduped
+    }
+
+    private fun AgentMessage.isSameUserEcho(other: AgentMessage): Boolean {
+        if ((role != "user" && type != "user") || (other.role != "user" && other.type != "user")) return false
+        val currentText = simplifyUserMessageForDisplay(text, role, type).trim()
+        val otherText = simplifyUserMessageForDisplay(other.text, other.role, other.type).trim()
+        if (currentText.isBlank() || currentText != otherText) return false
+        return kotlin.math.abs(timestamp - other.timestamp) <= 30_000L
     }
 
     private fun AgentMessage.contentKey(): Triple<String, String, String> {
@@ -3808,6 +4328,7 @@ class EasyCodexController(private val context: android.content.Context) {
             itemId = current.itemId ?: cleanIncoming.itemId,
             streaming = keepCurrentStreaming,
             attachments = current.attachments.ifEmpty { cleanIncoming.attachments },
+            durationMs = current.durationMs ?: cleanIncoming.durationMs,
         )
     }
 
@@ -3816,6 +4337,20 @@ class EasyCodexController(private val context: android.content.Context) {
         val incomingKey = incoming.collapsibleDuplicateKey()
         return indexOfLast { existing ->
             existing.isCollapsibleDuplicateCandidate() && existing.collapsibleDuplicateKey() == incomingKey
+        }
+    }
+
+    private fun List<AgentMessage>.indexOfLastUserEcho(incoming: AgentMessage): Int {
+        if (incoming.type != "user" && incoming.role != "user") return -1
+        val incomingText = simplifyUserMessageForDisplay(incoming.text, incoming.role, incoming.type).trim()
+        if (incomingText.isBlank()) return -1
+        return indexOfLast { existing ->
+            val existingUser = existing.type == "user" || existing.role == "user"
+            val replaceableEcho = existing.itemId?.startsWith("local_user_") == true || existing.itemId.isNullOrBlank()
+            existingUser &&
+                replaceableEcho &&
+                simplifyUserMessageForDisplay(existing.text, existing.role, existing.type).trim() == incomingText &&
+                kotlin.math.abs(existing.timestamp - incoming.timestamp) <= 30_000L
         }
     }
 
@@ -3865,7 +4400,12 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun appendMessage(agentId: String, message: AgentMessage) {
-        val capped = message.copy(text = capMobileMessageText(simplifyUserMessageForDisplay(message.text, message.role, message.type), message.type))
+        val cleanText = simplifyUserMessageForDisplay(message.text, message.role, message.type)
+        val normalizedType = normalizedAgentMessageType(message.role, message.type, cleanText)
+        val capped = message.copy(
+            type = normalizedType,
+            text = capMobileMessageText(cleanText, normalizedType),
+        )
         updateAgent(agentId) { agent ->
             val nextMessages = agent.messages.toMutableList()
             val duplicateIndex = nextMessages.indexOfLastCollapsibleDuplicate(capped)
@@ -3939,39 +4479,110 @@ class EasyCodexController(private val context: android.content.Context) {
 
     private fun finalizeMessage(agentId: String, itemId: String, text: String, type: String, streaming: Boolean = false) {
         flushPendingDelta(agentId, itemId)
-        if (type == "file_change") fileChangeLiveStats.remove(streamDeltaKey(agentId, itemId))
-        if (type == "command_output") commandOutputLiveStats.remove(streamDeltaKey(agentId, itemId))
-        val cappedIncoming = capMobileMessageText(text, type)
+        val normalizedType = normalizedAgentMessageType("agent", type, text)
+        if (normalizedType == "file_change") fileChangeLiveStats.remove(streamDeltaKey(agentId, itemId))
+        if (normalizedType == "command_output") commandOutputLiveStats.remove(streamDeltaKey(agentId, itemId))
+        val cappedIncoming = capMobileMessageText(text, normalizedType)
         updateAgent(agentId) { agent ->
             val nextMessages = agent.messages.toMutableList()
-            val incoming = AgentMessage("agent", type, cappedIncoming, System.currentTimeMillis(), itemId, streaming)
-            val index = nextMessages.indexOfLast { it.itemId == itemId }
-                .takeIf { it >= 0 }
-                ?: nextMessages.indexOfLastCollapsibleDuplicate(incoming)
+            val incomingRole = if (normalizedType == "user") "user" else "agent"
+            val incoming = AgentMessage(incomingRole, normalizedType, cappedIncoming, System.currentTimeMillis(), itemId, streaming)
+            val itemIndex = nextMessages.indexOfLast { it.itemId == itemId }
+            val localUserEchoIndex = nextMessages.indexOfLastUserEcho(incoming)
+            val collapsibleIndex = nextMessages.indexOfLastCollapsibleDuplicate(incoming)
+            val index = when {
+                itemIndex >= 0 -> itemIndex
+                localUserEchoIndex >= 0 -> localUserEchoIndex
+                else -> collapsibleIndex
+            }
             if (index >= 0) {
                 val existing = nextMessages[index]
-                val nextText = if (existing.type == type) {
-                    mergeFinalText(existing.text, cappedIncoming, type, streaming)
+                val nextText = if (existing.type == normalizedType) {
+                    mergeFinalText(existing.text, cappedIncoming, normalizedType, streaming)
                 } else {
                     cappedIncoming
                 }
-                nextMessages[index] = existing.copy(text = nextText, type = type, itemId = itemId.ifBlank { existing.itemId.orEmpty() }, streaming = streaming)
+                nextMessages[index] = existing.copy(text = nextText, type = normalizedType, itemId = itemId.ifBlank { existing.itemId.orEmpty() }, streaming = streaming)
             } else {
                 nextMessages.add(incoming)
             }
             agent.copy(messages = nextMessages, updatedAt = System.currentTimeMillis())
         }
-        maybePromptPlanReview(agentId, itemId, type, streaming)
+        rememberPlanReviewCandidate(agentId, itemId, normalizedType, streaming)
     }
 
-    private fun maybePromptPlanReview(agentId: String, itemId: String, type: String, streaming: Boolean) {
-        if (type != "plan" || streaming) return
+    private fun turnDurationMs(data: JSONObject, agentId: String, completedAt: Long): Long? {
+        val direct = data.optLong("durationMs", -1L).takeIf { it > 0L }
+            ?: data.optLong("duration_ms", -1L).takeIf { it > 0L }
+        if (direct != null) return direct
+        val turn = data.optJSONObject("turn") ?: data.optJSONObject("event")
+        val nested = turn?.optLong("durationMs", -1L)?.takeIf { it > 0L }
+            ?: turn?.optLong("duration_ms", -1L)?.takeIf { it > 0L }
+        if (nested != null) return nested
+        val nestedStarted = turn?.let { jsonTimestamp(it, "startedAt", 0L) }?.takeIf { it > 0L }
+        val nestedCompleted = turn?.let { jsonTimestamp(it, "completedAt", completedAt) }?.takeIf { it > 0L } ?: completedAt
+        if (nestedStarted != null && nestedCompleted > nestedStarted) return nestedCompleted - nestedStarted
+        val startedAt = activeTurnStartedAt[agentId] ?: return null
+        return (completedAt - startedAt).takeIf { it > 0L }
+    }
+
+    private fun annotateLatestAgentMessageDuration(agentId: String, durationMs: Long?) {
+        if (durationMs == null || durationMs <= 0L) return
+        updateAgent(agentId) { agent ->
+            val nextMessages = agent.messages.toMutableList()
+            val index = nextMessages.indexOfLast { it.role == "agent" && it.type == "agent" && it.text.isNotBlank() }
+            if (index < 0) return@updateAgent agent
+            val message = nextMessages[index]
+            nextMessages[index] = message.copy(streaming = false, durationMs = durationMs)
+            agent.copy(messages = nextMessages, updatedAt = System.currentTimeMillis())
+        }
+    }
+
+    private fun rememberPlanReviewCandidate(agentId: String, itemId: String, type: String, streaming: Boolean) {
+        if (type != "plan" || streaming || itemId.isBlank()) return
         val agent = agents.firstOrNull { it.id == agentId } ?: return
-        val message = agent.messages.lastOrNull { it.itemId == itemId && it.type == "plan" } ?: return
-        val key = "${agentId}:${message.stableKey()}"
-        if (key == lastPromptedPlanKey) return
-        lastPromptedPlanKey = key
-        planReview = PlanReview(agentId, message)
+        val message = latestPlanMessage(agent, itemId) ?: return
+        if (!isActionablePlanMessage(message)) return
+        val turnSerial = activeTurnSerials[agentId] ?: completedTurnSerials[agentId] ?: 0L
+        pendingPlanReviewCandidates[agentId] = PlanReviewCandidate(itemId, turnSerial)
+        maybePromptCompletedPlanReview(agentId)
+    }
+
+    private fun maybePromptCompletedPlanReview(agentId: String) {
+        if (!appInForeground || activeAgentId != agentId) return
+        val agent = agents.firstOrNull { it.id == agentId } ?: return
+        if (agent.isBusy()) return
+        val candidate = pendingPlanReviewCandidates[agentId] ?: return
+        val completedTurnSerial = completedTurnSerials[agentId] ?: return
+        if (candidate.turnSerial <= 0L || completedTurnSerial < candidate.turnSerial) return
+        val message = latestPlanMessage(agent, candidate.itemId) ?: return
+        if (!isActionablePlanMessage(message)) return
+        val key = "${agentId}:${message.itemId ?: message.stableKey()}"
+        if (!autoPromptedPlanKeys.add(key)) return
+        planReview = PlanReview(
+            agentId = agentId,
+            message = message,
+            taskName = agent.displayTaskName(),
+            projectPath = agent.displayProjectPath(),
+        )
+    }
+
+    private fun latestPlanMessage(agent: Agent, itemId: String?): AgentMessage? {
+        return if (!itemId.isNullOrBlank()) {
+            agent.messages.lastOrNull { it.itemId == itemId && it.type == "plan" }
+        } else {
+            agent.messages.lastOrNull { it.type == "plan" }
+        }
+    }
+
+    private fun Agent.displayTaskName(): String {
+        return name.takeIf { it.isNotBlank() && it.lowercase(Locale.ROOT) !in PENDING_CODEX_THREAD_NAMES }
+            ?: preview?.takeIf { it.isNotBlank() }
+            ?: "未命名任务"
+    }
+
+    private fun Agent.displayProjectPath(): String {
+        return (projectRoot ?: cwd).ifBlank { defaultCwd.ifBlank { DEFAULT_AGENT_CWD } }
     }
 
     private fun scheduleStreamDeltaFlush() {
@@ -4010,7 +4621,7 @@ class EasyCodexController(private val context: android.content.Context) {
 
     private fun mergeStreamingText(current: String, incoming: String, type: String = "agent"): String {
         if (incoming.isBlank()) return current
-        if (type == "file_change" && incoming.startsWith("正在修改文件")) return incoming
+        if (type == "file_change" && isLiveFileChangeText(incoming)) return incoming
         if (type == "command_output" && incoming.startsWith("正在运行命令")) return incoming
         if (current.isBlank() || isStreamingPlaceholder(current)) return incoming
         if (isStreamingPlaceholder(incoming)) return current
@@ -4026,10 +4637,18 @@ class EasyCodexController(private val context: android.content.Context) {
         if (streaming) return mergeStreamingText(current, incoming, type)
         if (incoming.isBlank()) return current
         if (current.isBlank() || isStreamingPlaceholder(current)) return incoming
+        if (type == "file_change" && isLiveFileChangeText(current)) return incoming
         if (incoming == current) return current
         if (incoming.startsWith(current)) return incoming
         if (current.startsWith(incoming)) return incoming
         return mergeStreamingText(current, incoming, type)
+    }
+
+    private fun isLiveFileChangeText(text: String): Boolean {
+        val trimmed = text.trimStart()
+        return trimmed.startsWith("正在修改文件") ||
+            trimmed.startsWith("正在编辑文件") ||
+            trimmed.startsWith("正在编辑 ")
     }
 
     private fun mobileTextLimit(type: String): Int {
@@ -4082,7 +4701,7 @@ class EasyCodexController(private val context: android.content.Context) {
 
     private fun appendCappedDelta(builder: StringBuilder, delta: String, type: String) {
         if (delta.isBlank()) return
-        if ((type == "file_change" && delta.startsWith("正在修改文件")) ||
+        if ((type == "file_change" && isLiveFileChangeText(delta)) ||
             (type == "command_output" && delta.startsWith("正在运行命令"))
         ) {
             builder.clear()
@@ -4190,3 +4809,13 @@ private fun formatCliDuration(durationMs: Long): String {
     return if (seconds <= 0L) "，耗时 <1 秒" else "，耗时 ${seconds} 秒"
 }
 
+private data class PlanReviewCandidate(
+    val itemId: String,
+    val turnSerial: Long,
+)
+
+private data class PendingQuickReply(
+    val agentId: String,
+    val text: String,
+    val createdAt: Long,
+)

@@ -11,8 +11,8 @@ android {
         applicationId = "com.easycodex.mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.1.3"
+        versionCode = 8
+        versionName = "0.1.5"
     }
 
     buildFeatures {
@@ -40,6 +40,11 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
+    implementation("org.commonmark:commonmark:0.27.1")
+    implementation("org.commonmark:commonmark-ext-autolink:0.27.1")
+    implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.27.1")
+    implementation("org.commonmark:commonmark-ext-gfm-tables:0.27.1")
+    implementation("org.commonmark:commonmark-ext-task-list-items:0.27.1")
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
     testImplementation("junit:junit:4.13.2")

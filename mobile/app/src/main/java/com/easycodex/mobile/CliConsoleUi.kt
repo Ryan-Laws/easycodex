@@ -1,5 +1,6 @@
 package com.easycodex.mobile
 
+import android.content.ClipData
 import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -44,10 +45,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
@@ -55,6 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 
 @Composable
 fun CliConsoleScreen(
@@ -71,11 +76,14 @@ fun CliConsoleScreen(
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
+    onClearWindow: () -> Unit,
     onCreateWindow: () -> Unit,
     onSelectWindow: (String) -> Unit,
 ) {
     val window = state.activeWindow
     val listState = rememberLazyListState()
+    val clipboard = LocalClipboard.current
+    val clipboardScope = rememberCoroutineScope()
     var showProjectPicker by remember { mutableStateOf(false) }
     var showCommandMenu by remember { mutableStateOf(false) }
     var showModelPicker by remember { mutableStateOf(false) }
@@ -135,8 +143,22 @@ fun CliConsoleScreen(
                 .weight(1f)
                 .fillMaxWidth(),
         ) {
+            CliWindowTabs(
+                state = state,
+                onCreateWindow = onCreateWindow,
+                onSelectWindow = onSelectWindow,
+            )
             CliTerminalHeader(
                 window = window,
+                onCopy = {
+                    val text = window.lines.joinToString("\n\n") { it.text }.trim()
+                    if (text.isNotBlank()) {
+                        clipboardScope.launch {
+                            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("EasyCodex CLI output", text)))
+                        }
+                    }
+                },
+                onClear = onClearWindow,
             )
 
             LazyColumn(
@@ -149,6 +171,11 @@ fun CliConsoleScreen(
             ) {
                 item(key = "cli-tip") {
                     CliTip()
+                }
+                if (window.truncated) {
+                    item(key = "cli-truncated") {
+                        CliTruncatedNotice()
+                    }
                 }
                 if (window.lines.isNotEmpty()) {
                     items(window.lines, key = { it.id }) { line ->
@@ -318,6 +345,62 @@ private fun CliPromptBar(
                         },
                     )
                     DropdownMenuItem(
+                        text = { Text("/resume  Resume last session") },
+                        onClick = {
+                            onInputChange("/resume --last ")
+                            onDismissCommandMenu()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("/review  Review uncommitted changes") },
+                        onClick = {
+                            onInputChange("/review --uncommitted")
+                            onDismissCommandMenu()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("/json  Stream structured output") },
+                        onClick = {
+                            onInputChange("/json ")
+                            onDismissCommandMenu()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("/profile  Use config profile") },
+                        onClick = {
+                            onInputChange("/profile ")
+                            onDismissCommandMenu()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("/image  Attach image path") },
+                        onClick = {
+                            onInputChange("/image ")
+                            onDismissCommandMenu()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("/add-dir  Add writable directory") },
+                        onClick = {
+                            onInputChange("/add-dir ")
+                            onDismissCommandMenu()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("/ephemeral  Do not persist session") },
+                        onClick = {
+                            onInputChange("/ephemeral ")
+                            onDismissCommandMenu()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("/ignore-rules  Ignore exec policy rules") },
+                        onClick = {
+                            onInputChange("/ignore-rules ")
+                            onDismissCommandMenu()
+                        },
+                    )
+                    DropdownMenuItem(
                         text = { Text("/sandbox  Change sandbox") },
                         onClick = {
                             onInputChange("")
@@ -475,6 +558,8 @@ private fun CliWindowTabs(
 @Composable
 private fun CliTerminalHeader(
     window: CliConsoleWindow,
+    onCopy: () -> Unit,
+    onClear: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -488,26 +573,45 @@ private fun CliTerminalHeader(
             shape = RoundedCornerShape(7.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Row(
+            Column(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    ">_ OpenAI Codex",
-                    color = Color(0xFFE6E6E6),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-                if (window.version.isNotBlank()) {
-                    Spacer(Modifier.width(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "(${window.version})",
-                        color = Color(0xFF747474),
+                        ">_ OpenAI Codex",
+                        color = Color(0xFFE6E6E6),
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 15.sp,
+                        fontSize = 17.sp,
                         fontWeight = FontWeight.Bold,
                     )
+                    if (window.version.isNotBlank()) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "(${window.version})",
+                            color = Color(0xFF747474),
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CliHeaderLine(
+                        listOf(window.mode, window.reasoningEffortLabel(), window.sandboxMode)
+                            .filter { it.isNotBlank() }
+                            .joinToString(" | "),
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onCopy, enabled = window.lines.isNotEmpty()) {
+                        Text("Copy", fontFamily = FontFamily.Monospace)
+                    }
+                    TextButton(onClick = onClear, enabled = window.lines.isNotEmpty() || window.truncated) {
+                        Text("Clear", fontFamily = FontFamily.Monospace)
+                    }
                 }
             }
         }
@@ -570,12 +674,20 @@ private fun CliHelpDialog(onDismiss: () -> Unit) {
                 Text("/model  Change --model")
                 Text("/reasoning  Change -c model_reasoning_effort")
                 Text("/project  Change --cd")
+                Text("/resume [--last|session]  Run codex exec resume")
+                Text("/review [--uncommitted|--base main|--commit sha]  Run codex exec review")
+                Text("/json  Parse --json JSONL events")
+                Text("/profile name  Add --profile")
+                Text("/image path  Add --image")
+                Text("/add-dir path  Add --add-dir")
+                Text("/ephemeral  Add --ephemeral")
+                Text("/ignore-rules  Add --ignore-rules")
                 Text("/sandbox  Change --sandbox")
                 Text("/git-check  Remove --skip-git-repo-check")
                 Text("/skip-git-check  Add --skip-git-repo-check")
                 Text("/help  Show this list")
                 Text(
-                    "Advanced exec options like --profile, --image, --json, --output-schema, --add-dir, and resume/review subcommands are not wired into this mobile CLI yet.",
+                    "Dangerous bypass flags and output-schema file writing are intentionally not exposed in mobile CLI.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -625,6 +737,20 @@ private fun CliTip() {
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 18.dp),
+    )
+}
+
+@Composable
+private fun CliTruncatedNotice() {
+    Text(
+        "Older CLI output was trimmed on this phone. Copy the current window or use the desktop relay for full history.",
+        color = Color(0xFF8B8B8B),
+        fontFamily = FontFamily.Monospace,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp),
     )
 }
 

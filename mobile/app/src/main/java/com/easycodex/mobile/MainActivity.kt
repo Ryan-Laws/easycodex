@@ -39,6 +39,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.animateColorAsState
@@ -50,7 +52,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -58,6 +62,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -66,6 +71,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -221,7 +227,65 @@ const val PLAN_MODE_PROMPT = """
 需求：
 """
 const val PLAN_OPTIMIZE_PROMPT = "请优化上一条计划，让步骤更清晰、风险更完整、执行顺序更可靠。仍然不要开始执行，最后继续询问我是否要开始这个计划。"
-const val PLAN_START_PROMPT = "开始执行上一条计划。"
+const val PLAN_START_PROMPT = "请开始任务"
+
+private data class EasyCodexAdaptiveMetrics(
+    val usePermanentDrawer: Boolean,
+    val drawerWidth: androidx.compose.ui.unit.Dp,
+    val contentMaxWidth: androidx.compose.ui.unit.Dp,
+    val composerMaxWidth: androidx.compose.ui.unit.Dp,
+)
+
+private fun easyCodexAdaptiveMetrics(
+    width: androidx.compose.ui.unit.Dp,
+    height: androidx.compose.ui.unit.Dp,
+): EasyCodexAdaptiveMetrics {
+    val landscapeWide = width >= 720.dp && width > height
+    val expanded = width >= 840.dp
+    val usePermanentDrawer = expanded || landscapeWide
+    return EasyCodexAdaptiveMetrics(
+        usePermanentDrawer = usePermanentDrawer,
+        drawerWidth = when {
+            width >= 1200.dp -> 372.dp
+            width >= 1000.dp -> 344.dp
+            else -> 316.dp
+        },
+        contentMaxWidth = when {
+            width >= 1200.dp -> 980.dp
+            width >= 840.dp -> 900.dp
+            else -> androidx.compose.ui.unit.Dp.Unspecified
+        },
+        composerMaxWidth = when {
+            width >= 1200.dp -> 940.dp
+            width >= 840.dp -> 880.dp
+            else -> androidx.compose.ui.unit.Dp.Unspecified
+        },
+    )
+}
+
+@Composable
+private fun AdaptiveWidthFrame(
+    maxWidth: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = if (maxWidth == androidx.compose.ui.unit.Dp.Unspecified) {
+                Modifier.fillMaxWidth()
+            } else {
+                Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = maxWidth)
+            },
+        ) {
+            content()
+        }
+    }
+}
 
 private val COMMON_EMOJI = listOf(
     "😀", "😄", "😂", "🤣", "😊", "😍", "😘", "😎",
@@ -270,11 +334,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
-private fun buildSystemVoiceInputIntent(context: Context): Intent {
+private fun buildSystemVoiceInputIntent(context: Context, prompt: String): Intent {
     val baseIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-        putExtra(RecognizerIntent.EXTRA_PROMPT, "说出要发送给 EasyCodex 的内容")
+        putExtra(RecognizerIntent.EXTRA_PROMPT, prompt)
     }
     val preferredActivity = context.packageManager
         .queryIntentActivities(baseIntent, 0)
@@ -455,10 +519,10 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
         showCliMode = false
     }
 
-    LaunchedEffect(drawerState.currentValue, drawerState.targetValue) {
+    LaunchedEffect(drawerState.currentValue, drawerState.targetValue, controller.agentsRevision) {
         val drawerVisible = drawerState.currentValue != DrawerValue.Closed || drawerState.targetValue != DrawerValue.Closed
         if (drawerVisible) {
-            if (drawerAgentsSnapshot == null) captureDrawerSnapshot()
+            captureDrawerSnapshot()
         } else {
             delay(120)
             drawerAgentsSnapshot = null
@@ -474,36 +538,11 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
         oledMode = controller.oledMode,
     ) {
         CompositionLocalProvider(LocalAppStrings provides strings) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val adaptiveMetrics = easyCodexAdaptiveMetrics(maxWidth, maxHeight)
         Box(Modifier.fillMaxSize()) {
             if (appContentReady) {
-                ModalNavigationDrawer(
-                    drawerState = drawerState,
-                    gesturesEnabled = true,
-                    drawerContent = {
-                        val drawerAgents = drawerAgentsSnapshot ?: controller.agents.toList()
-                        val drawerAlerts = drawerAlertsSnapshot ?: controller.alerts.toList()
-                        val drawerProjectOptions = drawerProjectOptionsSnapshot ?: controller.projectOptions()
-                        AgentDrawer(
-                            agents = drawerAgents,
-                            alerts = drawerAlerts,
-                            projectOptions = drawerProjectOptions,
-                            activeAgentId = controller.activeAgentId,
-                            onHome = {
-                                controller.openHome()
-                                scope.launch { drawerState.close() }
-                            },
-                            onSelect = {
-                                controller.selectAgent(it)
-                                scope.launch { drawerState.close() }
-                            },
-                            onCreateInProject = { cwd ->
-                                controller.startProjectDraft(cwd)
-                                scope.launch { drawerState.close() }
-                            },
-                            onDeleteAgent = { controller.deleteAgent(it) },
-                        )
-                    },
-                ) {
+                val mainScaffold: @Composable () -> Unit = {
                     Scaffold(
                         contentWindowInsets = WindowInsets(0),
                         topBar = {
@@ -536,7 +575,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                         IconButton(onClick = { showCliMode = false }) {
                                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.back)
                                         }
-                                    } else {
+                                    } else if (!adaptiveMetrics.usePermanentDrawer) {
                                         IconButton(onClick = {
                                             captureDrawerSnapshot()
                                             scope.launch { drawerState.open() }
@@ -569,6 +608,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                 val activeAgent = controller.activeAgent
                                 val composerAgent = draftAgent ?: activeAgent
                                 val projectOptions = controller.projectOptions()
+                                AdaptiveWidthFrame(maxWidth = adaptiveMetrics.composerMaxWidth) {
                                 MessageComposer(
                                     textValue = controller.inputTextValue,
                                     attachments = controller.attachmentDrafts,
@@ -582,8 +622,15 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                     serviceTierOptions = controller.serviceTierOptionsFor(composerAgent),
                                     runtimeCapabilities = controller.runtimeCapabilities,
                                     planModeEnabled = planModeEnabled,
+                                    pendingUserInputRequest = controller.userInputRequests.firstOrNull { it.agentId == composerAgent?.id },
+                                    pendingPlanReview = controller.planReview?.takeIf { it.agentId == composerAgent?.id },
                                     onTextChange = { controller.inputTextValue = it },
                                     onPlanModeChange = { planModeEnabled = it },
+                                    onSubmitUserInput = { request, answers -> controller.respondUserInputRequest(request, answers) },
+                                    onDismissUserInput = { request -> controller.deferUserInputRequest(request) },
+                                    onOptimizePlan = { review, adjustment -> controller.optimizePlan(review, adjustment) },
+                                    onStartPlan = { review -> controller.startPlan(review) },
+                                    onDismissPlan = { controller.dismissPlanReview() },
                                     onGuideQueuedFollowUp = { queued ->
                                         val nextText = if (controller.inputText.isBlank()) {
                                             queued.text
@@ -602,13 +649,14 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                     onAttachImages = { imagePicker.launch("image/*") },
                                     onInsertEmoji = { controller.appendToInput(it) },
                                     onVoiceInput = {
-                                        val intent = buildSystemVoiceInputIntent(context)
+                                        val intent = buildSystemVoiceInputIntent(context, strings.voiceInputPrompt)
                                         runCatching { voiceInput.launch(intent) }
                                             .onFailure { controller.statusText = strings.startVoiceInput }
                                     },
                                     onInterrupt = { controller.interruptActiveAgent() },
                                     onSend = { controller.sendActiveMessage(planModeEnabled) },
                                 )
+                                }
                             }
                         },
                     ) { padding ->
@@ -633,32 +681,108 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                     onInputChange = { controller.updateCliInput(it) },
                                     onSend = { controller.sendCliCommand() },
                                     onStop = { controller.stopCliCommand() },
+                                    onClearWindow = { controller.clearCliWindow() },
                                     onCreateWindow = { controller.createCliWindow() },
                                     onSelectWindow = { controller.selectCliWindow(it) },
                                 )
                             } else if (draftAgent != null) {
                                 val projectOptions = controller.projectOptions()
-                                HomeTaskScreen(
-                                    draftAgent = draftAgent,
-                                    projectOptions = projectOptions,
-                                    canChangeProject = !controller.draftProjectLocked,
-                                    onProjectChange = { controller.updateDraftProject(it) },
-                                    onBrowseDirectories = { path, callback -> controller.browseDirectories(path, callback) },
-                                )
+                                AdaptiveWidthFrame(
+                                    maxWidth = adaptiveMetrics.contentMaxWidth,
+                                    modifier = Modifier.fillMaxSize(),
+                                ) {
+                                    HomeTaskScreen(
+                                        draftAgent = draftAgent,
+                                        projectOptions = projectOptions,
+                                        canChangeProject = !controller.draftProjectLocked,
+                                        onProjectChange = { controller.updateDraftProject(it) },
+                                        onBrowseDirectories = { path, callback -> controller.browseDirectories(path, callback) },
+                                    )
+                                }
                             } else {
-                                Conversation(
-                                    agent = controller.activeAgent,
-                                    layoutMode = controller.appLayout,
-                                    emptyMessage = strings.emptyConversation,
-                                    relayUrl = controller.relayUrl,
-                                    apiKey = controller.apiKey,
-                                    onOpenDiffReview = { controller.openDiffReview() },
-                                    onOpenPlan = { message ->
-                                        controller.activeAgent?.let { controller.showPlanReview(it.id, message) }
-                                    },
-                                )
+                                AdaptiveWidthFrame(
+                                    maxWidth = adaptiveMetrics.contentMaxWidth,
+                                    modifier = Modifier.fillMaxSize(),
+                                ) {
+                                    Conversation(
+                                        agent = controller.activeAgent,
+                                        layoutMode = controller.appLayout,
+                                        emptyMessage = strings.emptyConversation,
+                                        relayUrl = controller.relayUrl,
+                                        apiKey = controller.apiKey,
+                                        onOpenDiffReview = { controller.openDiffReview() },
+                                        onOpenPlan = { message ->
+                                            controller.activeAgent?.let { controller.showPlanReview(it.id, message) }
+                                        },
+                                    )
+                                }
                             }
                         }
+                    }
+                }
+                if (adaptiveMetrics.usePermanentDrawer) {
+                    Row(Modifier.fillMaxSize()) {
+                        val drawerAgents = drawerAgentsSnapshot ?: controller.agents.toList()
+                        val drawerAlerts = drawerAlertsSnapshot ?: controller.alerts.toList()
+                        val drawerProjectOptions = drawerProjectOptionsSnapshot ?: controller.projectOptions()
+                        AgentDrawer(
+                            agents = drawerAgents,
+                            alerts = drawerAlerts,
+                            projectOptions = drawerProjectOptions,
+                            activeAgentId = controller.activeAgentId,
+                            modifier = Modifier
+                                .width(adaptiveMetrics.drawerWidth)
+                                .fillMaxHeight(),
+                            permanent = true,
+                            onHome = { controller.openHome() },
+                            onSelect = { controller.selectAgent(it) },
+                            onCreateInProject = { cwd -> controller.startProjectDraft(cwd) },
+                            onDeleteAgent = { controller.deleteAgent(it) },
+                        )
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .width(1.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+                        ) {}
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight(),
+                        ) {
+                            mainScaffold()
+                        }
+                    }
+                } else {
+                    ModalNavigationDrawer(
+                        drawerState = drawerState,
+                        gesturesEnabled = true,
+                        drawerContent = {
+                            val drawerAgents = drawerAgentsSnapshot ?: controller.agents.toList()
+                            val drawerAlerts = drawerAlertsSnapshot ?: controller.alerts.toList()
+                            val drawerProjectOptions = drawerProjectOptionsSnapshot ?: controller.projectOptions()
+                            AgentDrawer(
+                                agents = drawerAgents,
+                                alerts = drawerAlerts,
+                                projectOptions = drawerProjectOptions,
+                                activeAgentId = controller.activeAgentId,
+                                onHome = {
+                                    controller.openHome()
+                                    scope.launch { drawerState.close() }
+                                },
+                                onSelect = {
+                                    controller.selectAgent(it)
+                                    scope.launch { drawerState.close() }
+                                },
+                                onCreateInProject = { cwd ->
+                                    controller.startProjectDraft(cwd)
+                                    scope.launch { drawerState.close() }
+                                },
+                                onDeleteAgent = { controller.deleteAgent(it) },
+                            )
+                        },
+                    ) {
+                        mainScaffold()
                     }
                 }
             }
@@ -671,6 +795,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
             }
         }
         }
+    }
     }
 
     if (showCreateAgent) {
@@ -715,24 +840,6 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
             request = request,
             onApprove = { controller.respondApprovalRequest(request, approved = true) },
             onDeny = { controller.respondApprovalRequest(request, approved = false) },
-        )
-    }
-
-    controller.userInputRequests.firstOrNull()?.let { request ->
-        UserInputRequestDialog(
-            request = request,
-            onSubmit = { answers -> controller.respondUserInputRequest(request, answers) },
-            onDismiss = { controller.deferUserInputRequest(request) },
-        )
-    }
-
-    val activePlanReview = controller.planReview
-    if (activePlanReview != null) {
-        PlanReviewDialog(
-            review = activePlanReview,
-            onDismiss = { controller.dismissPlanReview() },
-            onOptimize = { controller.optimizePlan(activePlanReview) },
-            onStart = { controller.startPlan(activePlanReview) },
         )
     }
 
@@ -950,7 +1057,7 @@ fun EasyCodexAppIcon(
 }
 
 fun projectNameFromCwd(cwd: String): String {
-    if (isConversationProjectPath(cwd)) return "对话"
+    if (isConversationProjectPath(cwd)) return "空项目"
     val cleaned = cleanNullablePath(cwd) ?: return "未命名项目"
     return cleaned
         .trimEnd('\\', '/')
@@ -1221,8 +1328,15 @@ fun MessageComposer(
     serviceTierOptions: List<String>,
     runtimeCapabilities: RuntimeCapabilities,
     planModeEnabled: Boolean,
+    pendingUserInputRequest: AgentUserInputRequest? = null,
+    pendingPlanReview: PlanReview? = null,
     onTextChange: (TextFieldValue) -> Unit,
     onPlanModeChange: (Boolean) -> Unit,
+    onSubmitUserInput: (AgentUserInputRequest, Map<String, String>) -> Unit = { _, _ -> },
+    onDismissUserInput: (AgentUserInputRequest) -> Unit = {},
+    onOptimizePlan: (PlanReview, String) -> Unit = { _, _ -> },
+    onStartPlan: (PlanReview) -> Unit = {},
+    onDismissPlan: () -> Unit = {},
     onGuideQueuedFollowUp: (QueuedFollowUp) -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onProjectChange: (String) -> Unit,
@@ -1236,6 +1350,7 @@ fun MessageComposer(
     onVoiceInput: () -> Unit,
     onInterrupt: () -> Unit,
     onSend: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val strings = LocalAppStrings.current
     val text = textValue.text
@@ -1250,15 +1365,16 @@ fun MessageComposer(
     fun performTapHaptic() {
         hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
     }
-    val quickReplyPrompts = remember {
+    val quickReplyPrompts = remember(strings) {
         listOf(
-            "先调查，再给修复计划",
-            "修复并测试",
-            "基于上次任务解释报错",
-            "继续上次任务",
+            strings.quickReplyInvestigatePlan,
+            strings.quickReplyFixAndTest,
+            strings.quickReplyExplainLastError,
+            strings.quickReplyContinueLastTask,
         )
     }
-    val showInterruptButton = agent?.isBusy() == true && text.isBlank() && attachments.isEmpty()
+    val hasComposerPayload = text.isNotBlank() || attachments.isNotEmpty()
+    val showInterruptButton = agent?.isBusy() == true && !hasComposerPayload
     val selectedModel = agent?.model.orEmpty()
     val displayModel = selectedModel.ifBlank { modelOptions.firstOrNull()?.model.orEmpty() }
     val selectedModelLabel = modelOptions.firstOrNull { it.model == displayModel }?.displayName
@@ -1300,7 +1416,7 @@ fun MessageComposer(
 
     Surface(
         color = MaterialTheme.colorScheme.background,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .navigationBarsPadding()
             .imePadding(),
@@ -1348,7 +1464,7 @@ fun MessageComposer(
                 ComposerFloatingActions(
                     enabled = enabled,
                     planModeEnabled = planModeEnabled,
-                    modelLabel = compactModelLabel(selectedModelLabel),
+                    modelLabel = compactModelLabel(selectedModelLabel, strings.model),
                     reasoningLabel = if (runtimeCapabilities.supportsReasoningEffort) {
                         reasoningLabel(displayReasoningEffort, strings)
                     } else {
@@ -1390,91 +1506,115 @@ fun MessageComposer(
                     },
                 )
             }
-            Surface(
-                color = MaterialTheme.colorScheme.surface,
-                shape = EasyCodexDesign.ComposerPanelShape,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
-                tonalElevation = 1.dp,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(7.dp),
+            if (pendingUserInputRequest != null) {
+                UserInputComposerCard(
+                    request = pendingUserInputRequest,
+                    enabled = enabled,
+                    onSubmit = { onSubmitUserInput(pendingUserInputRequest, it) },
+                    onDismiss = { onDismissUserInput(pendingUserInputRequest) },
+                )
+            } else if (pendingPlanReview != null) {
+                PlanReviewComposerCard(
+                    review = pendingPlanReview,
+                    enabled = enabled,
+                    onStart = { onStartPlan(pendingPlanReview) },
+                    onOptimize = { onOptimizePlan(pendingPlanReview, it) },
+                    onDismiss = onDismissPlan,
+                )
+            } else {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = EasyCodexDesign.ComposerPanelShape,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+                    tonalElevation = 1.dp,
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.Bottom,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    Column(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(7.dp),
                     ) {
-                        AnimatedComposerIconButton(
-                            selected = actionsExpanded,
-                            onClick = {
-                                performTapHaptic()
-                                actionsExpanded = !actionsExpanded
-                                if (!actionsExpanded) quickRepliesExpanded = false
-                            },
-                            enabled = enabled,
-                            rotationWhenSelected = 45f,
-                        ) { iconModifier ->
-                            Icon(
-                                Icons.Default.Add,
-                                contentDescription = strings.openAttachmentPanel,
-                                modifier = iconModifier,
+                        Row(
+                            verticalAlignment = Alignment.Bottom,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            AnimatedComposerIconButton(
+                                selected = actionsExpanded,
+                                onClick = {
+                                    performTapHaptic()
+                                    actionsExpanded = !actionsExpanded
+                                    if (!actionsExpanded) quickRepliesExpanded = false
+                                },
+                                enabled = enabled,
+                                rotationWhenSelected = 45f,
+                            ) { iconModifier ->
+                                Icon(
+                                    Icons.Default.Add,
+                                    contentDescription = strings.openAttachmentPanel,
+                                    modifier = iconModifier,
+                                )
+                            }
+                            OutlinedTextField(
+                                value = textValue,
+                                onValueChange = onTextChange,
+                                enabled = enabled,
+                                modifier = Modifier.weight(1f),
+                                placeholder = { Text(strings.sendToEasyCodex) },
+                                trailingIcon = {
+                                    AnimatedComposerIconButton(
+                                        selected = false,
+                                        onClick = onVoiceInput,
+                                        enabled = enabled,
+                                    ) { iconModifier ->
+                                        Icon(
+                                            Icons.Default.Mic,
+                                            contentDescription = strings.openVoicePanel,
+                                            modifier = iconModifier,
+                                        )
+                                    }
+                                },
+                                minLines = 1,
+                                maxLines = 5,
+                                shape = RoundedCornerShape(24.dp),
                             )
-                        }
-                        OutlinedTextField(
-                            value = textValue,
-                            onValueChange = onTextChange,
-                            enabled = enabled,
-                            modifier = Modifier.weight(1f),
-                            placeholder = { Text(strings.sendToEasyCodex) },
-                            trailingIcon = {
-                                AnimatedComposerIconButton(
-                                    selected = false,
-                                    onClick = onVoiceInput,
-                                    enabled = enabled,
-                                ) { iconModifier ->
+                            FilledTonalIconButton(
+                                onClick = {
+                                    actionsExpanded = false
+                                    quickRepliesExpanded = false
+                                    performTapHaptic()
+                                    if (showInterruptButton) {
+                                        onInterrupt()
+                                    } else {
+                                        sendAnimationKey += 1
+                                        onSend()
+                                    }
+                                },
+                                enabled = enabled && (showInterruptButton || hasComposerPayload),
+                                colors = if (showInterruptButton) {
+                                    IconButtonDefaults.filledTonalIconButtonColors(
+                                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                    )
+                                } else {
+                                    IconButtonDefaults.filledTonalIconButtonColors()
+                                },
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .scale(sendButtonScale.value),
+                            ) {
+                                if (showInterruptButton) {
+                                    Icon(Icons.Default.Stop, contentDescription = strings.interrupt)
+                                } else {
                                     Icon(
-                                        Icons.Default.Mic,
-                                        contentDescription = strings.openVoicePanel,
-                                        modifier = iconModifier,
+                                        Icons.AutoMirrored.Filled.Send,
+                                        contentDescription = strings.send,
+                                        modifier = Modifier.graphicsLayer(
+                                            translationX = sendIconTravel.value,
+                                            translationY = -sendIconTravel.value * 0.35f,
+                                            rotationZ = sendIconTravel.value * 1.4f,
+                                            alpha = (1f - sendIconTravel.value / 60f).coerceIn(0.72f, 1f),
+                                        ),
                                     )
                                 }
-                            },
-                            minLines = 1,
-                            maxLines = 5,
-                            shape = RoundedCornerShape(24.dp),
-                        )
-                        FilledTonalIconButton(
-                            onClick = {
-                                actionsExpanded = false
-                                quickRepliesExpanded = false
-                                if (showInterruptButton) {
-                                    performTapHaptic()
-                                    onInterrupt()
-                                } else {
-                                    performTapHaptic()
-                                    sendAnimationKey += 1
-                                    onSend()
-                                }
-                            },
-                            enabled = enabled && (showInterruptButton || text.isNotBlank() || attachments.isNotEmpty()),
-                            modifier = Modifier
-                                .size(52.dp)
-                                .scale(sendButtonScale.value),
-                        ) {
-                            if (showInterruptButton) {
-                                Icon(Icons.Default.Stop, contentDescription = strings.interrupt)
-                            } else {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.Send,
-                                    contentDescription = strings.send,
-                                    modifier = Modifier.graphicsLayer(
-                                        translationX = sendIconTravel.value,
-                                        translationY = -sendIconTravel.value * 0.35f,
-                                        rotationZ = sendIconTravel.value * 1.4f,
-                                        alpha = (1f - sendIconTravel.value / 60f).coerceIn(0.72f, 1f),
-                                    ),
-                                )
                             }
                         }
                     }
@@ -1541,6 +1681,198 @@ fun MessageComposer(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
+private fun UserInputComposerCard(
+    request: AgentUserInputRequest,
+    enabled: Boolean,
+    onSubmit: (Map<String, String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var answers by remember(request.id) { mutableStateOf(emptyMap<String, String>()) }
+    val canSubmit = request.questions.all { question -> answers[question.id].orEmpty().isNotBlank() }
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = EasyCodexDesign.ComposerPanelShape,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+        tonalElevation = 1.dp,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                request.questions.firstOrNull()?.question?.ifBlank { request.detail } ?: request.detail.ifBlank { "请确认下一步。" },
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            request.questions.forEach { question ->
+                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    if (question.header.isNotBlank()) {
+                        Text(
+                            question.header,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (question.options.isNotEmpty()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            question.options.forEachIndexed { index, option ->
+                                ComposerOptionRow(
+                                    number = index + 1,
+                                    label = option.label,
+                                    description = option.description,
+                                    selected = answers[question.id] == option.label,
+                                    enabled = enabled,
+                                    onClick = { answers = answers + (question.id to option.label) },
+                                )
+                            }
+                        }
+                    }
+                    if (question.isOther || question.options.isEmpty()) {
+                        OutlinedTextField(
+                            value = answers[question.id].orEmpty(),
+                            onValueChange = { answers = answers + (question.id to it) },
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 1,
+                            maxLines = 3,
+                            label = { Text("输入回答") },
+                            enabled = enabled,
+                        )
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onDismiss, enabled = enabled) {
+                    Text(LocalAppStrings.current.later)
+                }
+                Button(
+                    enabled = enabled && canSubmit,
+                    onClick = { onSubmit(answers.mapValues { it.value.trim() }.filterValues { it.isNotBlank() }) },
+                ) {
+                    Text("提交")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlanReviewComposerCard(
+    review: PlanReview,
+    enabled: Boolean,
+    onStart: () -> Unit,
+    onOptimize: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var selected by remember(review.agentId, review.message.stableKey()) { mutableStateOf("start") }
+    var adjustmentText by remember(review.agentId, review.message.stableKey()) { mutableStateOf("") }
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = EasyCodexDesign.ComposerPanelShape,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+        tonalElevation = 1.dp,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("实施此计划？", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                ComposerOptionRow(
+                    number = 1,
+                    label = "是，开始任务",
+                    selected = selected == "start",
+                    enabled = enabled,
+                    onClick = { selected = "start" },
+                )
+                ComposerOptionRow(
+                    number = 2,
+                    label = "否，我有更多问题",
+                    selected = selected == "adjust",
+                    enabled = enabled,
+                    onClick = { selected = "adjust" },
+                )
+            }
+            AnimatedVisibility(
+                visible = selected == "adjust",
+                enter = easyCodexExpandVertically(expandFrom = Alignment.Top),
+                exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
+            ) {
+                OutlinedTextField(
+                    value = adjustmentText,
+                    onValueChange = { adjustmentText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    maxLines = 4,
+                    label = { Text("告诉 Codex 如何调整") },
+                    placeholder = { Text("例如：先问我更多问题，或把测试步骤写清楚") },
+                    enabled = enabled,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onDismiss, enabled = enabled) {
+                    Text(LocalAppStrings.current.later)
+                }
+                Button(
+                    enabled = enabled && (selected == "start" || adjustmentText.isNotBlank()),
+                    onClick = {
+                        if (selected == "start") onStart() else onOptimize(adjustmentText)
+                    },
+                ) {
+                    Text("提交")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComposerOptionRow(
+    number: Int,
+    label: String,
+    description: String = "",
+    selected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Surface(
+        color = if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(
+            1.dp,
+            if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.42f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.64f),
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, role = Role.RadioButton, onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("$number.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+                if (description.isNotBlank()) {
+                    Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ComposerFloatingActions(
     enabled: Boolean,
     planModeEnabled: Boolean,
@@ -1563,6 +1895,7 @@ private fun ComposerFloatingActions(
     onAttachImages: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
+    var runtimeSettingsExpanded by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1576,10 +1909,11 @@ private fun ComposerFloatingActions(
         ) {
             ComposerActionBubble(
                 icon = Icons.Default.Settings,
-                label = strings.chooseModel,
-                detail = listOf(modelLabel, reasoningLabel).filter { it.isNotBlank() }.joinToString(" "),
+                label = strings.runtimeSettings,
+                detail = listOf(modelLabel, reasoningLabel, serviceTierLabel).filter { it.isNotBlank() }.joinToString(" "),
+                selected = runtimeSettingsExpanded,
                 enabled = enabled,
-                onClick = onModelClick,
+                onClick = { runtimeSettingsExpanded = !runtimeSettingsExpanded },
             )
             ComposerActionBubble(
                 icon = Icons.Default.TaskAlt,
@@ -1591,39 +1925,12 @@ private fun ComposerFloatingActions(
             )
             ComposerActionBubble(
                 icon = Icons.Default.Search,
-                label = "快速回答",
-                detail = if (quickRepliesExpanded) "收起" else "常用提示",
+                label = strings.quickReplies,
+                detail = if (quickRepliesExpanded) strings.quickRepliesCollapsed else strings.commonPrompts,
                 selected = quickRepliesExpanded,
                 enabled = enabled,
                 onClick = onQuickRepliesToggle,
             )
-            if (reasoningLabel.isNotBlank()) {
-                ComposerActionBubble(
-                    icon = Icons.Default.Check,
-                    label = strings.chooseReasoning,
-                    detail = reasoningLabel,
-                    enabled = enabled,
-                    onClick = onReasoningClick,
-                )
-            }
-            if (showServiceTier) {
-                ComposerActionBubble(
-                    icon = Icons.Default.KeyboardArrowDown,
-                    label = strings.chooseSpeed,
-                    detail = serviceTierLabel,
-                    enabled = enabled,
-                    onClick = onServiceTierClick,
-                )
-            }
-            if (showProject) {
-                ComposerActionBubble(
-                    icon = Icons.Default.Folder,
-                    label = strings.project,
-                    detail = projectLabel,
-                    enabled = enabled,
-                    onClick = onProjectClick,
-                )
-            }
             ComposerActionBubble(
                 icon = Icons.Default.AttachFile,
                 label = strings.file,
@@ -1636,6 +1943,51 @@ private fun ComposerFloatingActions(
                 enabled = enabled,
                 onClick = onAttachImages,
             )
+        }
+        AnimatedVisibility(
+            visible = runtimeSettingsExpanded,
+            enter = easyCodexExpandVertically(expandFrom = Alignment.Top),
+            exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
+        ) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                ComposerActionBubble(
+                    icon = Icons.Default.Settings,
+                    label = strings.chooseModel,
+                    detail = modelLabel,
+                    enabled = enabled,
+                    onClick = onModelClick,
+                )
+                if (reasoningLabel.isNotBlank()) {
+                    ComposerActionBubble(
+                        icon = Icons.Default.Check,
+                        label = strings.chooseReasoning,
+                        detail = reasoningLabel,
+                        enabled = enabled,
+                        onClick = onReasoningClick,
+                    )
+                }
+                if (showServiceTier) {
+                    ComposerActionBubble(
+                        icon = Icons.Default.KeyboardArrowDown,
+                        label = strings.chooseSpeed,
+                        detail = serviceTierLabel,
+                        enabled = enabled,
+                        onClick = onServiceTierClick,
+                    )
+                }
+                if (showProject) {
+                    ComposerActionBubble(
+                        icon = Icons.Default.Folder,
+                        label = strings.project,
+                        detail = projectLabel,
+                        enabled = enabled,
+                        onClick = onProjectClick,
+                    )
+                }
+            }
         }
         AnimatedVisibility(
             visible = quickRepliesExpanded,
@@ -1743,6 +2095,7 @@ private fun QueuedFollowUpsPanel(
     enabled: Boolean,
     onGuide: (QueuedFollowUp) -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     var selectedItem by remember { mutableStateOf<QueuedFollowUp?>(null) }
     val clipboard = LocalClipboard.current
     val clipboardScope = rememberCoroutineScope()
@@ -1791,7 +2144,7 @@ private fun QueuedFollowUpsPanel(
                 if (items.size > 5) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f))
                     Text(
-                        "另有 ${items.size - 5} 个排队任务",
+                        strings.queuedFollowUpsMore(items.size - 5),
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1837,8 +2190,9 @@ private fun QueuedFollowUpRow(
             enabled = enabled,
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
         ) {
+            val strings = LocalAppStrings.current
             Text(
-                "引导",
+                strings.guideAction,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1854,9 +2208,10 @@ private fun QueuedFollowUpDetailDialog(
     onCopy: () -> Unit,
     onGuide: () -> Unit,
 ) {
+    val strings = LocalAppStrings.current
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("排队任务详情") },
+        title = { Text(strings.queuedFollowUpDetail) },
         text = {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant,
@@ -1865,7 +2220,7 @@ private fun QueuedFollowUpDetailDialog(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    item.text.ifBlank { "任务内容为空。" },
+                    item.text.ifBlank { strings.queuedFollowUpEmpty },
                     modifier = Modifier
                         .heightIn(max = 420.dp)
                         .verticalScroll(rememberScrollState())
@@ -1880,16 +2235,16 @@ private fun QueuedFollowUpDetailDialog(
                 onClick = onGuide,
                 enabled = enabled,
             ) {
-                Text("引导")
+                Text(strings.guideAction)
             }
         },
         dismissButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onCopy, enabled = item.text.isNotBlank()) {
-                    Text("复制")
+                    Text(strings.copyContent)
                 }
                 TextButton(onClick = onDismiss) {
-                    Text("关闭")
+                    Text(strings.close)
                 }
             }
         },
@@ -2009,7 +2364,7 @@ private fun AgentRuntimeBar(
         if (showRuntime) {
             RuntimeCombinedChip(
                 enabled = enabled && (modelOptions.isNotEmpty() || reasoningOptions.isNotEmpty()),
-                modelLabel = compactModelLabel(selectedModelLabel),
+                modelLabel = compactModelLabel(selectedModelLabel, strings.model),
                 reasoningLabel = if (runtimeCapabilities.supportsReasoningEffort) {
                     reasoningLabel(displayReasoningEffort, strings)
                 } else {
@@ -2124,7 +2479,7 @@ private fun RuntimeCombinedChip(
         ) {
             if (reasoningOptions.isNotEmpty()) {
                 Text(
-                    "智能",
+                    strings.reasoningEffort,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2181,13 +2536,13 @@ private enum class RuntimePicker {
 
 private data class RuntimeChoice(val value: String, val label: String, val description: String = "")
 
-private fun compactModelLabel(label: String): String {
+private fun compactModelLabel(label: String, fallback: String): String {
     val normalized = label
         .removePrefix("GPT-")
         .removePrefix("gpt-")
         .removePrefix("Codex ")
         .trim()
-    return normalized.ifBlank { label.ifBlank { "Model" } }
+    return normalized.ifBlank { label.ifBlank { fallback } }
 }
 
 @Composable
