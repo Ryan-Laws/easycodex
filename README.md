@@ -29,6 +29,20 @@ EasyCodex lets you control local Codex work from a desktop relay app and an Andr
 
 The current app is a full control room: create and resume Codex sessions, stream conversation updates, answer approvals and user-input prompts, send attachments, review plans and diffs, commit selected files, browse projects and worktrees, archive tasks, run multi-window Codex CLI consoles, receive notifications, and keep task lists synced as Codex thread state changes.
 
+## Why EasyCodex
+
+OpenAI now offers Codex remote access inside the ChatGPT mobile app, currently as a preview for connecting mobile ChatGPT to Codex hosts. EasyCodex focuses on a different path: a local-first relay you own, with broader desktop host support and no hosted control plane between your phone and your development machine.
+
+| Area | EasyCodex | OpenAI Codex mobile preview |
+| --- | --- | --- |
+| Desktop host platforms | Windows, macOS, and Linux relay builds | OpenAI's May 14, 2026 release notes say mobile remote access currently connects to Codex running on macOS; OpenAI's blog says Windows mobile connection support is coming soon |
+| Phone pairing | QR/deep-link pairing to your own relay with a local API key | Runs inside the ChatGPT mobile app and uses your ChatGPT/OpenAI account |
+| API/provider flexibility | The phone does not hard-code a provider login; the relay follows the Codex CLI configuration already authenticated on your computer, including compatible non-OpenAI setups when your local Codex environment supports them | Tied to OpenAI's ChatGPT/Codex account experience |
+| Data path | Phone talks to your desktop relay over your trusted LAN or private network; repositories and credentials stay on the host machine | Uses OpenAI's authorized ChatGPT device and relay infrastructure |
+| Workflow scope | Mobile approvals, diffs, Git status, selected-file commits, project/worktree browsing, attachments, local CLI consoles, and a desktop relay workbench | Mobile start/continue threads, approvals, direction changes, host switching, and live context from connected Codex hosts |
+
+Sources for the current OpenAI behavior: [OpenAI product post](https://openai.com/index/work-with-codex-from-anywhere/) and [ChatGPT release notes](https://help.openai.com/en/articles/6825453-chatgpt-release-notes).
+
 ## Install
 
 Download the current release from the [latest EasyCodex release](https://github.com/Ryan-Laws/easycodex/releases/latest).

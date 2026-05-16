@@ -29,6 +29,20 @@ EasyCodex 是一个本地优先的 Codex 编程智能体远程控制应用。你
 
 当前公开版本已经提供可直接使用的 Windows、macOS、Linux 中继程序和 Android APK。普通用户不需要克隆仓库才能体验。
 
+## 为什么选择 EasyCodex
+
+OpenAI 已经把 Codex 远程访问带到 ChatGPT 手机应用里，但它目前仍是官方预览体验。EasyCodex 的定位不同：它把手机连接到你自己电脑上的本地中继，不要求把手机控制面放到官方托管控制平面里，并且覆盖更多桌面宿主系统。
+
+| 对比项 | EasyCodex | OpenAI Codex 手机预览 |
+| --- | --- | --- |
+| 桌面宿主系统 | 提供 Windows、macOS、Linux 中继构建 | OpenAI 2026-05-14 发布说明写明：手机远程访问目前可连接运行在 macOS 上的 Codex；OpenAI 博客说明 Windows 手机连接支持还在 coming soon |
+| 手机配对方式 | 通过二维码或 deep link 连接你自己的中继，并使用本地 relay API Key 鉴权 | 集成在 ChatGPT 手机应用里，需要使用 ChatGPT/OpenAI 账号体系 |
+| API / Provider 灵活性 | 手机端不硬编码官方账号登录；中继沿用你电脑上已经配置和登录的 Codex CLI 环境，本地 Codex 支持兼容第三方 API 时也可以随本机配置使用 | 绑定 OpenAI 的 ChatGPT/Codex 账号体验 |
+| 数据路径 | 手机通过可信 LAN 或 Tailscale 等私有网络连接你的桌面中继；仓库、凭据和执行环境留在本机 | 使用 OpenAI 授权的 ChatGPT 设备和官方中继基础设施 |
+| 工作流能力 | 手机审批、查看 diff/Git 状态、选择文件提交、浏览项目和 worktree、发送附件、打开本地 CLI 窗口，并带桌面中继工作台 | 手机启动/继续 thread、审批、改变方向、切换 host，并查看连接宿主的实时上下文 |
+
+当前官方行为来源：[OpenAI 产品文章](https://openai.com/index/work-with-codex-from-anywhere/) 和 [ChatGPT 发布说明](https://help.openai.com/en/articles/6825453-chatgpt-release-notes)。
+
 ## 安装 EasyCodex
 
 从 [最新版 EasyCodex Release](https://github.com/Ryan-Laws/easycodex/releases/latest) 下载当前版本。在 GitHub 页面上，也可以从仓库右侧的 **Releases** 入口进入发布页，再选择最新的 EasyCodex 版本。
@@ -46,7 +60,7 @@ EasyCodex 是一个本地优先的 Codex 编程智能体远程控制应用。你
 ## 快速开始
 
 1. 在电脑上安装并登录 OpenAI Codex CLI。
-2. 在 Windows 或 macOS 上安装并打开 **EasyCodex Relay**。
+2. 在 Windows、macOS 或 Linux 上安装并打开 **EasyCodex Relay**。
 3. 在桌面端应用里点击启动中继。它会显示中继状态、连接地址、API Key 和二维码。
 4. 在 Android 手机上安装最新 Release 里的 `EasyCodex.Mobile.*.apk`。
 5. 用手机扫描二维码，或在应用内打开连接链接。
@@ -83,7 +97,7 @@ Android app <-> EasyCodex Relay <-> codex app-server <-> Codex thread
 
 ## 环境要求
 
-- 用于运行桌面端中继的 Windows 或 macOS 电脑
+- 用于运行桌面端中继的 Windows、macOS 或 Linux 电脑
 - Android 真机或模拟器
 - 电脑上已安装并登录 OpenAI Codex CLI
 - 手机和电脑在同一个可信网络内，或通过 Tailscale 等私有网络连接
@@ -114,7 +128,7 @@ gradle assembleDebug
 EasyCodex/
 ├── mobile/          Android 原生手机应用
 ├── agent-relay/     Codex 的 Node.js Agent Relay
-├── desktop-relay/   Electron Windows/macOS 桌面端中继
+├── desktop-relay/   Electron Windows/macOS/Linux 桌面端中继
 └── scripts/         CLI 和本地安装辅助脚本
 ```
 

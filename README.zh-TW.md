@@ -29,6 +29,20 @@ EasyCodex 是一個本機優先的 Codex 程式開發智能體遠端控制應用
 
 目前公開版本已經提供可直接使用的 Windows、macOS、Linux 中繼程式和 Android APK。一般使用者不需要 clone 倉庫才能體驗。
 
+## 為什麼選擇 EasyCodex
+
+OpenAI 已經把 Codex 遠端存取帶到 ChatGPT 手機應用裡，但它目前仍是官方預覽體驗。EasyCodex 的定位不同：它把手機連到你自己電腦上的本機中繼，不要求把手機控制面放到官方託管控制平面裡，並且覆蓋更多桌面宿主系統。
+
+| 對比項 | EasyCodex | OpenAI Codex 手機預覽 |
+| --- | --- | --- |
+| 桌面宿主系統 | 提供 Windows、macOS、Linux 中繼建置 | OpenAI 2026-05-14 發布說明寫明：手機遠端存取目前可連接執行在 macOS 上的 Codex；OpenAI 部落格說明 Windows 手機連線支援還在 coming soon |
+| 手機配對方式 | 透過 QR Code 或 deep link 連接你自己的中繼，並使用本機 relay API Key 驗證 | 整合在 ChatGPT 手機應用裡，需要使用 ChatGPT/OpenAI 帳號體系 |
+| API / Provider 彈性 | 手機端不硬編碼官方帳號登入；中繼沿用你電腦上已經設定和登入的 Codex CLI 環境，本機 Codex 支援相容第三方 API 時也可以隨本機設定使用 | 綁定 OpenAI 的 ChatGPT/Codex 帳號體驗 |
+| 資料路徑 | 手機透過可信 LAN 或 Tailscale 等私人網路連接你的桌面中繼；倉庫、憑據和執行環境留在本機 | 使用 OpenAI 授權的 ChatGPT 裝置和官方中繼基礎設施 |
+| 工作流程能力 | 手機核准、查看 diff/Git 狀態、選擇檔案提交、瀏覽專案和 worktree、傳送附件、開啟本機 CLI 視窗，並帶桌面中繼工作台 | 手機啟動/繼續 thread、核准、改變方向、切換 host，並查看連接宿主的即時上下文 |
+
+目前官方行為來源：[OpenAI 產品文章](https://openai.com/index/work-with-codex-from-anywhere/) 和 [ChatGPT 發布說明](https://help.openai.com/en/articles/6825453-chatgpt-release-notes)。
+
 ## 安裝 EasyCodex
 
 從 [最新版 EasyCodex Release](https://github.com/Ryan-Laws/easycodex/releases/latest) 下載目前版本。在 GitHub 頁面上，也可以從倉庫右側的 **Releases** 入口進入發布頁，再選擇最新的 EasyCodex 版本。
@@ -46,7 +60,7 @@ EasyCodex 是一個本機優先的 Codex 程式開發智能體遠端控制應用
 ## 快速開始
 
 1. 在電腦上安裝並登入 OpenAI Codex CLI。
-2. 在 Windows 或 macOS 上安裝並開啟 **EasyCodex Relay**。
+2. 在 Windows、macOS 或 Linux 上安裝並開啟 **EasyCodex Relay**。
 3. 在桌面端應用裡點擊啟動中繼。它會顯示中繼狀態、連線位址、API Key 和 QR Code。
 4. 在 Android 手機上安裝最新 Release 裡的 `EasyCodex.Mobile.*.apk`。
 5. 用手機掃描 QR Code，或在應用內開啟連線連結。
@@ -83,7 +97,7 @@ Android app <-> EasyCodex Relay <-> codex app-server <-> Codex thread
 
 ## 環境需求
 
-- 用於執行桌面端中繼的 Windows 或 macOS 電腦
+- 用於執行桌面端中繼的 Windows、macOS 或 Linux 電腦
 - Android 實體裝置或模擬器
 - 電腦上已安裝並登入 OpenAI Codex CLI
 - 手機和電腦在同一個可信網路內，或透過 Tailscale 等私人網路連線
@@ -114,7 +128,7 @@ gradle assembleDebug
 EasyCodex/
 ├── mobile/          Android 原生手機應用
 ├── agent-relay/     Codex 的 Node.js Agent Relay
-├── desktop-relay/   Electron Windows/macOS 桌面端中繼
+├── desktop-relay/   Electron Windows/macOS/Linux 桌面端中繼
 └── scripts/         CLI 和本機安裝輔助腳本
 ```
 
