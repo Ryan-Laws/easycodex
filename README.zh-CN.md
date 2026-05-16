@@ -14,6 +14,7 @@
     <img alt="Windows" src="https://img.shields.io/badge/Windows-relay%20app-0078D4?logo=windows&logoColor=white&style=flat-square">
     <img alt="Android" src="https://img.shields.io/badge/Android-mobile%20APK-3DDC84?logo=android&logoColor=white&style=flat-square">
     <img alt="macOS" src="https://img.shields.io/badge/macOS-relay%20app-000000?logo=apple&logoColor=white&style=flat-square">
+    <img alt="Linux-relay" src="https://img.shields.io/badge/Linux-relay%20app-FCC624?logo=linux&logoColor=black&style=flat-square">
     <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-Android-7F52FF?logo=kotlin&logoColor=white&style=flat-square">
     <img alt="Electron" src="https://img.shields.io/badge/Electron-desktop%20relay-47848F?logo=electron&logoColor=white&style=flat-square">
     <a href="https://visitor-badge.laobi.icu/"><img alt="Visitors" src="https://visitor-badge.laobi.icu/badge?page_id=Ryan-Laws.easycodex"></a>
@@ -70,12 +71,20 @@ OpenAI 已经把 Codex 远程访问带到 ChatGPT 手机应用里，但它目前
 
 ## 你可以做什么
 
-- 创建、恢复、中断和停止 Codex 智能体会话。
-- 在手机上实时查看 Codex 流式回复。
-- 智能体忙碌时继续排队发送消息。
-- 在本地操作执行前，通过手机处理审批提示。
-- 浏览工作区文件、检查 Git 状态、查看 diff，并使用分支和 worktree。
-- 在任务完成时接收本地中继事件和可选手机通知。
+- 创建、恢复、中断、停止和归档 Codex 智能体会话。
+- 查看运行中 agent、活跃 Codex thread、历史可恢复 thread、排队 follow-up 和未读完成状态。
+- 在手机上实时查看 Codex 回复、reasoning、命令输出、文件改动、计划和子 agent 活动。
+- 发送文本、图片和文件附件；附件会保存到当前工作区的 `.easycodex-attachments/`。
+- 使用快捷回复、emoji 面板和 Android 系统语音输入来编写 prompt。
+- 先审阅计划，再选择优化计划或开始执行。
+- 浏览工作区文件、检查 Git 状态、查看完整/单文件 diff、预览文件，并提交选中的改动文件。
+- 浏览受信工作区、relay-managed repos 和 Git worktree。
+- 在本地操作执行前，通过手机处理审批提示和结构化 user-input 问题。
+- 打开多个手机 CLI 窗口，每个窗口对应独立的 `codex exec`，支持 resume/review、profile、图片、额外目录、JSON 输出、ephemeral、ignore-rules、sandbox 和 Git repo check 开关。
+- 选择模型、reasoning effort、service tier、cwd、approval policy、sandbox mode 和更新通道。
+- 接收本地通知和可选手机推送，并同步每个 agent 的通知级别和最近通知历史。
+- 在 Android 端检查稳定版/Beta APK 更新，在桌面中继端检查 relay/安装包更新。
+- 使用桌面中继 workbench 查看任务、阅读对话、发送 follow-up、处理审批，并查看 Git 状态/diff。
 - 通过二维码或 `easycodex://connect` 深链接快速配对。
 
 ## 技术栈

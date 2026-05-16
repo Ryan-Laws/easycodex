@@ -75,6 +75,7 @@ Implemented in `CliConsoleUi.kt`.
 
 - Multi-window tabs (`CliWindowTabs`) allow separate mobile CLI sessions.
 - `CliPromptBar` controls cwd, model, reasoning effort, sandbox mode, and skip-git-repo-check.
+- Slash commands expose `exec`, `resume`, and `review` modes plus profile, image, extra-directory, JSON output, ephemeral, ignore-rules, sandbox, and Git-repo-check options.
 - `CliConsoleScreen` streams `cli/output` lines and shows run status/version metadata.
 - `cli_run` starts one `codex exec` per prompt; `cli_stop` stops the active run.
 

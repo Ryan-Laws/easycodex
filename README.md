@@ -27,7 +27,7 @@
 
 EasyCodex lets you control local Codex work from a desktop relay app and an Android phone. The relay runs on your computer beside your repositories, starts and supervises `codex app-server`, and exposes a secure QR/deep-link pairing flow so the phone can follow and steer the same work without moving source code or credentials to a hosted service.
 
-The current app is a full control room: create and resume Codex sessions, stream conversation updates, answer approvals and user-input prompts, send attachments, review plans and diffs, commit selected files, browse projects and worktrees, archive tasks, run multi-window Codex CLI consoles, receive notifications, and keep task lists synced as Codex thread state changes.
+The current app is a full control room: create and resume Codex sessions, stream conversation updates, answer approvals and user-input prompts, send attachments, review plans and diffs, commit selected files, browse projects and worktrees, archive tasks, run multi-window Codex CLI consoles, use quick replies/emoji/voice input from the phone, receive and tune notifications, check updates, and keep task lists synced as Codex thread state changes.
 
 ## Why EasyCodex
 
@@ -73,14 +73,16 @@ The phone does not run Codex. It connects to the relay over an authenticated Web
 - Start, resume, interrupt, stop, and archive Codex tasks.
 - See running agents, active Codex threads, historical threads, queued follow-ups, and unread completed work.
 - Send text, images, and files from the phone; attachments are stored under the selected workspace in `.easycodex-attachments/`.
+- Use quick replies, emoji insertion, and Android system voice input while composing prompts.
 - Review plans before execution and ask Codex to optimize them.
 - Inspect Git status/diff, preview changed files, and commit selected files.
 - Browse allowed workspaces, trusted directories, relay-managed repos, and Git worktrees.
 - Answer Codex approval prompts and structured user-input prompts.
-- Open multiple mobile CLI windows backed by separate `codex exec` runs.
-- Choose model, reasoning effort, service tier, cwd, sandbox mode, and update channel where supported.
-- Receive local app notifications and optional mobile push notifications.
-- Use the desktop relay workbench to monitor tasks without opening the phone.
+- Open multiple mobile CLI windows backed by separate `codex exec` runs, including resume/review modes, profiles, images, extra directories, JSON output, ephemeral runs, ignore-rules, sandbox, and Git-repo-check toggles.
+- Choose model, reasoning effort, service tier, cwd, approval policy, sandbox mode, and update channel where supported.
+- Receive local app notifications and optional mobile push notifications, with per-agent notification levels and recent notification history.
+- Check stable/beta APK updates from the Android app and relay/installer updates from the desktop relay.
+- Use the desktop relay workbench to monitor tasks, read conversations, send follow-ups, answer approvals, and inspect Git status/diff without opening the phone.
 
 ## Architecture
 
