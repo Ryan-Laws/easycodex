@@ -14,6 +14,7 @@
     <img alt="Windows" src="https://img.shields.io/badge/Windows-relay%20app-0078D4?logo=windows&logoColor=white&style=flat-square">
     <img alt="Android" src="https://img.shields.io/badge/Android-mobile%20APK-3DDC84?logo=android&logoColor=white&style=flat-square">
     <img alt="macOS" src="https://img.shields.io/badge/macOS-relay%20app-000000?logo=apple&logoColor=white&style=flat-square">
+    <img alt="Linux-relay" src="https://img.shields.io/badge/Linux-relay%20app-FCC624?logo=linux&logoColor=black&style=flat-square">
     <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-Android-7F52FF?logo=kotlin&logoColor=white&style=flat-square">
     <img alt="Electron" src="https://img.shields.io/badge/Electron-desktop%20relay-47848F?logo=electron&logoColor=white&style=flat-square">
     <a href="https://visitor-badge.laobi.icu/"><img alt="Visitors" src="https://visitor-badge.laobi.icu/badge?page_id=Ryan-Laws.easycodex"></a>
@@ -70,12 +71,20 @@ OpenAI 已經把 Codex 遠端存取帶到 ChatGPT 手機應用裡，但它目前
 
 ## 你可以做什麼
 
-- 建立、恢復、中斷和停止 Codex 智能體對話。
-- 在手機上即時查看 Codex 串流回覆。
-- 智能體忙碌時繼續佇列傳送訊息。
-- 在本機操作執行前，透過手機處理核准提示。
-- 瀏覽工作區檔案、檢查 Git 狀態、查看 diff，並使用分支和 worktree。
-- 在任務完成時接收本機中繼事件和可選的手機通知。
+- 建立、恢復、中斷、停止和封存 Codex 智能體對話。
+- 查看執行中 agent、活躍 Codex thread、歷史可恢復 thread、佇列 follow-up 和未讀完成狀態。
+- 在手機上即時查看 Codex 回覆、reasoning、命令輸出、檔案改動、計畫和子 agent 活動。
+- 傳送文字、圖片和檔案附件；附件會保存到目前工作區的 `.easycodex-attachments/`。
+- 使用快捷回覆、emoji 面板和 Android 系統語音輸入來編寫 prompt。
+- 先審閱計畫，再選擇最佳化計畫或開始執行。
+- 瀏覽工作區檔案、檢查 Git 狀態、查看完整/單檔 diff、預覽檔案，並提交選中的改動檔案。
+- 瀏覽受信工作區、relay-managed repos 和 Git worktree。
+- 在本機操作執行前，透過手機處理核准提示和結構化 user-input 問題。
+- 開啟多個手機 CLI 視窗，每個視窗對應獨立的 `codex exec`，支援 resume/review、profile、圖片、額外目錄、JSON 輸出、ephemeral、ignore-rules、sandbox 和 Git repo check 開關。
+- 選擇模型、reasoning effort、service tier、cwd、approval policy、sandbox mode 和更新通道。
+- 接收本機通知和可選手機推送，並同步每個 agent 的通知級別和最近通知歷史。
+- 在 Android 端檢查穩定版/Beta APK 更新，在桌面中繼端檢查 relay/安裝包更新。
+- 使用桌面中繼 workbench 查看任務、閱讀對話、傳送 follow-up、處理核准，並查看 Git 狀態/diff。
 - 透過 QR Code 或 `easycodex://connect` deep link 快速配對。
 
 ## 技術棧

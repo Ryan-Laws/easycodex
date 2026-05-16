@@ -65,13 +65,14 @@ The Android app currently supports:
 - active/resumable/history task lists with queued follow-ups and unread completion state
 - streaming agent responses, reasoning, command output, file changes, plans, and sub-agent activity
 - attachment upload for files/images with mobile previews
+- quick replies, emoji insertion, and Android system voice input in the composer
 - mobile approval prompts and structured user-input request dialogs
 - plan review with optimize/start actions
 - Git status, full/single-file diff review, file preview, and selected-file commit
 - project/workspace picker with trusted roots and Git worktree visibility
-- multi-window Codex CLI consoles backed by `codex exec`
+- multi-window Codex CLI consoles backed by `codex exec`, including exec/resume/review modes, profiles, images, extra dirs, JSON output, ephemeral runs, ignore-rules, sandbox, and Git repo check controls
 - model, reasoning, service tier, cwd, approval policy, sandbox, and skip-git-repo-check controls
-- relay URL/API key settings, QR scanning, language/theme/layout defaults, notifications, and APK update checks
+- relay URL/API key settings, QR scanning, language/theme/layout defaults, notification permissions/preferences/history, and stable/beta APK update checks
 
 The desktop relay currently supports:
 
@@ -80,7 +81,7 @@ The desktop relay currently supports:
 - port preview and reclaiming an existing EasyCodex relay process
 - workspace and Codex executable selection
 - startup/update state, packaged installer updates, source checkout updates, and light tray mode
-- a task workbench that can list agents/threads, read conversations, send messages, and inspect Git status/diff
+- a task workbench that can list agents/threads, read conversations, stream updates, send messages, answer approval prompts, and inspect Git status/diff
 
 ## Data and State
 
