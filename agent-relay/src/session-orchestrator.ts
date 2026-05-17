@@ -21,6 +21,14 @@ import {
   isRpcReply,
   RpcReply,
 } from './codex-rpc';
+import {
+  permissionModeFromRuntime,
+  permissionRuntimeConfig,
+  sandboxPolicyForMode,
+  type ApprovalsReviewer,
+  type PermissionMode,
+  type SandboxMode,
+} from './permission-modes';
 
 export interface MessageAttachmentInput {
   name?: string;
@@ -35,6 +43,9 @@ interface AgentInfo {
   model: string;
   cwd: string;
   approvalPolicy: string;
+  permissionMode: PermissionMode;
+  sandboxMode: SandboxMode;
+  approvalsReviewer?: ApprovalsReviewer;
   serviceTier: string;
   reasoningEffort: string;
   systemPrompt: string;
@@ -47,7 +58,7 @@ interface AgentInfo {
   codexPath: string | null;
   source: string | null;
   projectless: boolean;
-  messages: { role: string; type: string; text: string; timestamp: number; _itemId?: string; durationMs?: number }[];
+  messages: AgentMessageRecord[];
   messageItemIds: Map<string, number>;
   fileSnapshots: Map<string, { exists: boolean; content: string | null }>;
   toolCalls: Map<string, { name: string; text: string }>;
@@ -109,6 +120,7 @@ const PLAN_MODE_DEMAND_MARKER = '需求：';
 const CONTEXT_PLACEHOLDER = '已加载项目上下文。';
 const DEFAULT_SERVICE_TIER = 'default';
 const USER_INPUT_REQUEST_METHOD = 'item/tool/requestUserInput';
+const CODEX_SESSION_USER_INPUT_PREFIX = 'codex_user_input_';
 
 export interface CodexSessionRuntimeState {
   running: boolean;
@@ -155,6 +167,9 @@ interface PersistedAgent {
   model: string;
   cwd: string;
   approvalPolicy?: string;
+  permissionMode?: string;
+  sandboxMode?: string;
+  approvalsReviewer?: string;
   serviceTier?: string;
   reasoningEffort?: string;
   systemPrompt?: string;
@@ -178,6 +193,15 @@ export interface CodexThreadSummary {
   activityLabel?: string | null;
   queuedFollowUpCount: number;
   queuedFollowUps: QueuedFollowUpSummary[];
+  pendingRequests?: AgentPendingRequestSummary[];
+}
+
+export interface AgentPendingRequestSummary {
+  requestId: string;
+  method: string;
+  params: Record<string, unknown>;
+  text: string;
+  timestamp: number;
 }
 
 export interface QueuedFollowUpSummary {
@@ -209,13 +233,31 @@ export interface RuntimeCapabilities {
   reason: string;
 }
 
+type AgentMessageRecord = {
+  role: string;
+  type: string;
+  text: string;
+  timestamp: number;
+  _itemId?: string;
+  durationMs?: number;
+  detailText?: string;
+  subAgentThreadId?: string;
+  subAgentNickname?: string;
+  subAgentStatus?: string;
+  subAgentRole?: string;
+  toolCallId?: string;
+};
+
 export interface CodexThreadDetail extends CodexThreadSummary {
   model: string;
   approvalPolicy: string;
+  permissionMode: PermissionMode;
+  sandboxMode: SandboxMode;
+  approvalsReviewer?: ApprovalsReviewer;
   serviceTier: string;
   reasoningEffort: string;
   activityLabel?: string | null;
-  messages: { role: string; type: string; text: string; timestamp: number; _itemId?: string; durationMs?: number }[];
+  messages: AgentMessageRecord[];
 }
 
 export interface CodexSidebarSnapshot {
@@ -289,36 +331,75 @@ function summarizeFileChangeForMobile(text: string): string {
 }
 
 function summarizeCommandForMobile(text: string, completed = false): string {
-  const command = text
+  const lines = stripAnsi(text)
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .find((line) =>
-      line &&
+    .filter(Boolean);
+  const exit = lines
+    .map((line) => line.match(/^(?:exit(?: code)?|exit code):\s*(-?\d+)/i)?.[1])
+    .find(Boolean);
+  const duration = lines
+    .map((line) => line.match(/^duration:\s*(.+)$/i)?.[1])
+    .find(Boolean);
+  const command = lines.find((line) =>
       !line.toLowerCase().startsWith('cwd:') &&
       !line.toLowerCase().startsWith('status:') &&
       !line.toLowerCase().startsWith('exit:') &&
       !line.toLowerCase().startsWith('duration:') &&
-      !['正在运行命令。', '命令执行完成。', '命令已完成，输出已省略。'].includes(line)
-    );
-  if (!command) return completed ? '命令已完成，输出已省略。' : '运行命令';
-  const compact = compactSingleLine(command);
-  const visible = compact.length > 160 ? `${compact.slice(0, 160).trimEnd()}...` : compact;
-  return `${completed ? '命令已完成' : '运行命令'}\n${visible}`;
+      !['正在运行命令。', '命令执行完成。', '命令已完成，输出已省略。', '命令已完成', '运行命令'].includes(line)
+  );
+  const readable = command ? summarizeReadableCommand(command) : '';
+  if (completed) {
+    const formattedDuration = duration
+      ? formatDuration(Number(String(duration).replace(/ms$/i, ''))) || duration
+      : '';
+    const meta = [exit ? `exit ${exit}` : '', formattedDuration].filter(Boolean).join(' · ');
+    const errorLine = exit && exit !== '0' ? firstMeaningfulOutputLine(text) : '';
+    return [meta || '命令已完成', errorLine ? compactSingleLine(errorLine, 120) : '', readable && !meta ? readable : '']
+      .filter(Boolean)
+      .join('\n');
+  }
+  return `运行命令${readable ? `\n${readable}` : ''}`;
 }
 
-function summarizeMessageForMobile<T extends { type: string; text: string }>(message: T): T {
+function summarizeSubAgentForMobile(message: AgentMessageRecord): string {
+  const status = message.subAgentStatus?.trim().toLowerCase() || '';
+  const label = status === 'failed' || status === 'errored'
+    ? '子代理失败'
+    : status === 'inprogress' || status === 'running' || status === 'pendinginit'
+      ? '子代理正在工作'
+      : '子代理已完成';
+  const name = message.subAgentNickname || message.subAgentRole || '';
+  return [label, name].filter(Boolean).join(' · ');
+}
+
+function sanitizeSubAgentDetail(text: string): string {
+  const clean = stripAnsi(text);
+  if (clean.includes('Full-history forked agents inherit')) {
+    return '子代理启动参数与 full-history fork 不兼容。';
+  }
+  return clean
+    .replace(/\b(fork_context|reasoning_effort|agent_type|model)\s*[:=]\s*[^,\n}]+/gi, '$1: [hidden]')
+    .replace(/\b(prompt|message)\s*[:=]\s*(['"])[\s\S]*?\2/gi, '$1: [hidden]');
+}
+
+export function summarizeMessageForMobile<T extends { type: string; text: string }>(message: T): T {
   if ((message as T & { role?: string }).role === 'user' || message.type === 'user') {
     return { ...message, text: truncateForMobile(simplifyUserMessageForMobile(message.text), 'user') };
   }
   switch (message.type) {
     case 'command':
-      return { ...message, text: summarizeCommandForMobile(message.text) };
+      return { ...message, text: summarizeCommandForMobile(message.text), detailText: truncateForMobile(stripAnsi(message.text), message.type) };
     case 'command_output':
-      return { ...message, text: summarizeCommandForMobile(message.text, true) };
+      return { ...message, text: summarizeCommandForMobile(message.text, true), detailText: truncateForMobile(stripAnsi(message.text), message.type) };
     case 'file_change':
-      return { ...message, text: summarizeFileChangeForMobile(message.text) };
+      return { ...message, text: summarizeFileChangeForMobile(message.text), detailText: truncateForMobile(stripAnsi(message.text), message.type) };
     case 'sub_agent':
-      return { ...message, text: '子代理已返回结果，详细内容已省略。' };
+      return {
+        ...message,
+        text: summarizeSubAgentForMobile(message as T & AgentMessageRecord),
+        detailText: truncateForMobile(sanitizeSubAgentDetail(message.text), 'sub_agent'),
+      };
     case 'thinking':
       return { ...message, text: '正在思考中。' };
     default:
@@ -881,9 +962,18 @@ function turnsToMessages(thread: Record<string, unknown> | undefined) {
       }
 
       if (type === 'dynamicToolCall' || type === 'collabAgentToolCall') {
-        const text = formatDynamicToolCallItem(record);
+        const subAgent = isSubAgentToolItem(record);
+        const text = subAgent
+          ? formatSubAgentToolCallItem(record, String(record.status || '').toLowerCase() !== 'inprogress')
+          : formatDynamicToolCallItem(record);
         if (text) {
-          messages.push({ role: 'agent', type: isSubAgentToolItem(record) ? 'sub_agent' : 'command_output', text, timestamp: itemTimestamp(record, type) });
+          messages.push({
+            role: 'agent',
+            type: subAgent ? 'sub_agent' : 'command_output',
+            text,
+            timestamp: itemTimestamp(record, type),
+            ...(subAgent ? subAgentMetadata(record, String(record.status || '').toLowerCase() !== 'inprogress') : {}),
+          });
           index += 1;
         }
         continue;
@@ -1074,10 +1164,15 @@ function turnsToMessages(thread: Record<string, unknown> | undefined) {
 }
 
 function readSessionMessages(sessionPath: unknown) {
+  const entries = readSessionEntries(sessionPath);
+  return entries.length > 0 ? turnsToMessages({ entries }) : [];
+}
+
+function readSessionEntries(sessionPath: unknown): Record<string, unknown>[] {
   if (typeof sessionPath !== 'string' || !sessionPath.trim()) return [];
   try {
     if (!fs.existsSync(sessionPath)) return [];
-    const entries = fs.readFileSync(sessionPath, 'utf8')
+    return fs.readFileSync(sessionPath, 'utf8')
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean)
@@ -1088,11 +1183,45 @@ function readSessionMessages(sessionPath: unknown) {
           return null;
         }
       })
-      .filter(Boolean);
-    return turnsToMessages({ entries });
+      .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object' && !Array.isArray(entry));
   } catch {
     return [];
   }
+}
+
+export function extractPendingUserInputRequestsFromSession(sessionPath: unknown): AgentPendingRequestSummary[] {
+  const entries = readSessionEntries(sessionPath);
+  if (entries.length === 0) return [];
+  const requests = new Map<string, AgentPendingRequestSummary>();
+
+  for (const entry of entries) {
+    const payload = sessionEventPayload(entry);
+    const topType = usableString(entry.type);
+    const payloadType = usableString(payload.type);
+    const callId = itemCallId(payload);
+    if (!callId) continue;
+
+    if (topType === 'response_item' && payloadType === 'function_call' && itemToolName(payload) === 'request_user_input') {
+      const params = itemArguments(payload) || {};
+      requests.set(callId, {
+        requestId: `${CODEX_SESSION_USER_INPUT_PREFIX}${callId}`,
+        method: USER_INPUT_REQUEST_METHOD,
+        params,
+        text: userInputRequestText(params),
+        timestamp: toTimestampMs(entry.timestamp, Date.now()),
+      });
+      continue;
+    }
+
+    if (
+      topType === 'response_item'
+      && (payloadType === 'function_call_output' || payloadType === 'custom_tool_call_output')
+    ) {
+      requests.delete(callId);
+    }
+  }
+
+  return Array.from(requests.values()).sort((a, b) => a.timestamp - b.timestamp);
 }
 
 function mergeMessageHistory(
@@ -1471,6 +1600,50 @@ function compactSingleLine(value: string, max = 140): string {
   return normalized.length > max ? `${normalized.slice(0, max - 3)}...` : normalized;
 }
 
+function stripAnsi(value: string): string {
+  return value.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
+}
+
+function compactPath(value: string, max = 72): string {
+  const normalized = value.replace(/\\/g, '/').replace(/^["']|["']$/g, '');
+  if (normalized.length <= max) return normalized;
+  const name = normalized.split('/').filter(Boolean).slice(-2).join('/');
+  if (name && name.length + 4 < max) return `.../${name}`;
+  return `${normalized.slice(0, Math.max(8, max - 18))}...${normalized.slice(-12)}`;
+}
+
+function unwrapShellCommand(value: string): string {
+  let command = stripAnsi(value).trim();
+  const quotedPowerShell = command.match(/^"[^"]*\\(?:pwsh|powershell)(?:\.exe)?"\s+-Command\s+([\s\S]+)$/i);
+  if (quotedPowerShell?.[1]) command = quotedPowerShell[1].trim();
+  const barePowerShell = command.match(/^(?:pwsh|powershell)(?:\.exe)?\s+-Command\s+([\s\S]+)$/i);
+  if (barePowerShell?.[1]) command = barePowerShell[1].trim();
+  command = command.replace(/^['"]|['"]$/g, '').replace(/\\"/g, '"').replace(/\\\\/g, '\\').trim();
+  return command;
+}
+
+function summarizeReadableCommand(value: string): string {
+  const command = unwrapShellCommand(value);
+  if (!command) return '';
+  const getContent = command.match(/\bGet-Content\s+-Path\s+(['"]?)([^'"\r\n|]+)\1/i);
+  if (getContent?.[2]) return `读取文件 ${compactPath(getContent[2].trim())}`;
+  const rg = command.match(/\brg\s+(?:-[^\s]+\s+)*(['"])(.*?)\1\s*([^\r\n]*)/i);
+  if (rg?.[2]) return `搜索 ${compactSingleLine(rg[2], 72)}`;
+  if (/^apply_patch\b/i.test(command) || command.includes('*** Begin Patch')) return '应用补丁';
+  if (/^git\s+/i.test(command)) return compactSingleLine(command, 120);
+  if (/^(npm|pnpm|yarn|gradle|\.\\gradlew|gradlew|node)\b/i.test(command)) return compactSingleLine(command, 120);
+  return compactSingleLine(command, 120);
+}
+
+function firstMeaningfulOutputLine(value: string): string {
+  const skip = /^(?:命令已完成|正在运行命令|command completed|command started|exit code:\s*\d+|exit:\s*\d+|status:|duration:|cwd:)\b/i;
+  return stripAnsi(value)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !skip.test(line))
+    || '';
+}
+
 function uniqueValues(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
@@ -1712,6 +1885,65 @@ function isSubAgentToolItem(item: Record<string, unknown>): boolean {
     || ['spawn_agent', 'wait_agent', 'send_input', 'close_agent', 'resume_agent'].includes(tool);
 }
 
+function subAgentStatusFromItem(item: Record<string, unknown>, completed = false): string {
+  const status = valueToText(item.status).trim() || valueToText((item.state as Record<string, unknown> | undefined)?.status).trim();
+  if (status) return status;
+  if (typeof item.success === 'boolean') return item.success ? 'completed' : 'failed';
+  const error = valueToText((item.error as Record<string, unknown> | undefined)?.message ?? item.error);
+  if (error) return 'failed';
+  return completed ? 'completed' : 'running';
+}
+
+function subAgentMetadata(item: Record<string, unknown>, completed = false): Partial<AgentMessageRecord> {
+  const agentsStates = item.agentsStates && typeof item.agentsStates === 'object'
+    ? item.agentsStates as Record<string, unknown>
+    : {};
+  const firstStateEntry = Object.entries(agentsStates)[0];
+  const firstState = firstStateEntry?.[1] && typeof firstStateEntry[1] === 'object'
+    ? firstStateEntry[1] as Record<string, unknown>
+    : {};
+  const args = itemArguments(item) || {};
+  const content = safeJsonParseObject(item.output) || safeJsonParseObject(item.result) || {};
+  const threadId = valueToText(
+    item.threadId ?? item.thread_id ?? item.agentThreadId ?? item.agent_thread_id ??
+    content.thread_id ?? content.threadId ?? args.thread_id ?? args.threadId ?? firstStateEntry?.[0],
+  );
+  const nickname = valueToText(
+    item.agent_nickname ?? item.agentNickname ?? item.nickname ??
+    content.nickname ?? content.agent_nickname ?? args.agent_nickname ?? args.nickname,
+  );
+  const role = valueToText(item.agent_role ?? item.agentRole ?? content.agent_role ?? args.agent_role ?? args.agent_type);
+  return {
+    subAgentThreadId: threadId || undefined,
+    subAgentNickname: nickname || undefined,
+    subAgentRole: role || undefined,
+    subAgentStatus: subAgentStatusFromItem({ ...firstState, ...item }, completed),
+    toolCallId: itemIdentifier(item) || itemCallId(item) || undefined,
+  };
+}
+
+function formatSubAgentToolCallItem(item: Record<string, unknown>, completed = false): string {
+  const meta = subAgentMetadata(item, completed);
+  const label = summarizeSubAgentForMobile({
+    role: 'agent',
+    type: 'sub_agent',
+    text: '',
+    timestamp: Date.now(),
+    ...meta,
+  });
+  const error = valueToText((item.error as Record<string, unknown> | undefined)?.message ?? item.error);
+  const safeError = error.includes('Full-history forked agents inherit')
+    ? '子代理启动参数与 full-history fork 不兼容。'
+    : compactSingleLine(stripAnsi(error), 240);
+  const lines = [
+    label,
+    meta.subAgentThreadId ? `thread: ${meta.subAgentThreadId}` : '',
+    meta.toolCallId ? `toolCall: ${meta.toolCallId}` : '',
+    safeError ? `error: ${safeError}` : '',
+  ];
+  return lines.filter(Boolean).join('\n');
+}
+
 function formatDynamicToolCallItem(item: Record<string, unknown>): string {
   const namespace = valueToText(item.namespace);
   const tool = valueToText(item.tool ?? item.name);
@@ -1837,11 +2069,19 @@ function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Re
   }
 
   if (type === 'dynamicToolCall' || type === 'collabAgentToolCall') {
-    const text = formatDynamicToolCallItem(item);
     const completed = String(item.status || '').toLowerCase() !== 'inprogress';
     if (isSubAgentToolItem(item)) {
-      return { ...item, type: completed ? 'subAgentOutput' : 'subAgent', command: text, output: text, text };
+      const text = formatSubAgentToolCallItem(item, completed);
+      return {
+        ...item,
+        ...subAgentMetadata(item, completed),
+        type: completed ? 'subAgentOutput' : 'subAgent',
+        command: text,
+        output: text,
+        text,
+      };
     }
+    const text = formatDynamicToolCallItem(item);
     return { ...item, type: completed ? 'commandOutput' : 'command', command: text, output: text, text };
   }
 
@@ -1895,6 +2135,8 @@ function normalizeThreadSummary(
   const updatedAt = toTimestampMs(thread.updatedAt, createdAt);
   const queuedFollowUps = codexQueuedFollowUpsForThread(id);
   const pinned = Boolean(id && pinnedThreadIds.has(id));
+  const pendingRequests = extractPendingUserInputRequestsFromSession(thread.path);
+  const waitingForReply = pendingRequests.length > 0;
   return {
     id,
     name: typeof thread.name === 'string' ? thread.name : null,
@@ -1912,9 +2154,10 @@ function normalizeThreadSummary(
         ? (runtime.running ? 'working' : '可恢复')
         : extractThreadStatus(thread.status),
     pinned,
-    activityLabel: stoppedOverride ? null : (runtime?.running ? runtime.activityLabel : null),
+    activityLabel: stoppedOverride ? null : (waitingForReply ? '正在等待你回答问题' : (runtime?.running ? runtime.activityLabel : null)),
     queuedFollowUpCount: queuedFollowUps.length,
     queuedFollowUps,
+    pendingRequests,
   };
 }
 
@@ -2017,7 +2260,7 @@ export class SessionOrchestrator {
     name: string,
     model: string,
     cwd: string,
-    approvalPolicy = 'never',
+    permissionMode: PermissionMode | string = 'default-review',
     systemPrompt = '',
     agentId?: string,
     options?: {
@@ -2028,6 +2271,7 @@ export class SessionOrchestrator {
     },
   ): Promise<Omit<AgentInfo, 'process' | 'buffer' | 'pendingResponses' | 'pendingAgentRequests' | 'messageItemIds' | 'fileSnapshots' | 'toolCalls' | 'turnQueue' | 'queueDraining'>> {
     const id = agentId || uuid();
+    const permissions = permissionRuntimeConfig(permissionMode);
     const requestedCodexThreadId = options?.codexThreadId?.trim() || undefined;
     const projectless = options?.projectless === true && !requestedCodexThreadId;
     const existingThreadAgent = requestedCodexThreadId ? this.findAgentByCodexThreadId(requestedCodexThreadId) : null;
@@ -2048,7 +2292,10 @@ export class SessionOrchestrator {
       name,
       model,
       cwd: projectless ? '' : cwd,
-      approvalPolicy,
+      approvalPolicy: permissions.approvalPolicy,
+      permissionMode: permissions.permissionMode,
+      sandboxMode: permissions.sandboxMode,
+      approvalsReviewer: permissions.approvalsReviewer,
       serviceTier: normalizeServiceTier(options?.serviceTier),
       reasoningEffort: options?.reasoningEffort || 'medium',
       systemPrompt,
@@ -2146,7 +2393,9 @@ export class SessionOrchestrator {
           codexThreadResumeCall(options.codexThreadId, {
             model,
             cwd,
-            approvalPolicy,
+            approvalPolicy: permissions.approvalPolicy,
+            sandbox: permissions.sandboxMode,
+            approvalsReviewer: permissions.approvalsReviewer,
               serviceTier: codexServiceTierParam(agent.serviceTier),
               includeServiceTier: this.capabilities.supportsServiceTier,
             }),
@@ -2156,7 +2405,9 @@ export class SessionOrchestrator {
           codexThreadStartCall(
             model,
             projectless ? undefined : cwd,
-            approvalPolicy,
+            permissions.approvalPolicy,
+            permissions.sandboxMode,
+            permissions.approvalsReviewer,
             codexServiceTierParam(agent.serviceTier),
             this.capabilities.supportsServiceTier,
           ),
@@ -2169,10 +2420,23 @@ export class SessionOrchestrator {
             ? await this.sendRequest(agent, codexThreadResumeCall(options.codexThreadId, {
               model,
               cwd,
-              approvalPolicy,
+              approvalPolicy: permissions.approvalPolicy,
+              sandbox: permissions.sandboxMode,
+              approvalsReviewer: permissions.approvalsReviewer,
               includeServiceTier: false,
             }))
-            : await this.sendRequest(agent, codexThreadStartCall(model, projectless ? undefined : cwd, approvalPolicy, undefined, false));
+            : await this.sendRequest(
+              agent,
+              codexThreadStartCall(
+                model,
+                projectless ? undefined : cwd,
+                permissions.approvalPolicy,
+                permissions.sandboxMode,
+                permissions.approvalsReviewer,
+                undefined,
+                false,
+              ),
+            );
           if (retryRes.error) {
             throw new Error(`${options?.codexThreadId ? 'Thread resume' : 'Thread start'} failed: ${retryRes.error.message}`);
           }
@@ -2197,7 +2461,17 @@ export class SessionOrchestrator {
       agent.source = typeof thread?.source === 'string' ? thread.source : null;
       agent.cwd = projectless ? '' : ((typeof threadData.cwd === 'string' ? threadData.cwd : cwd) || cwd);
       agent.model = (typeof threadData.model === 'string' ? threadData.model : model) || model;
-      agent.approvalPolicy = (typeof threadData.approvalPolicy === 'string' ? threadData.approvalPolicy : approvalPolicy) || approvalPolicy;
+      const threadPermissionMode = permissionModeFromRuntime({
+        permissionMode: permissions.permissionMode,
+        approvalPolicy: threadData.approvalPolicy,
+        sandboxMode: threadData.sandbox,
+        approvalsReviewer: threadData.approvalsReviewer,
+      });
+      const threadPermissions = permissionRuntimeConfig(threadPermissionMode);
+      agent.approvalPolicy = threadPermissions.approvalPolicy;
+      agent.permissionMode = threadPermissions.permissionMode;
+      agent.sandboxMode = threadPermissions.sandboxMode;
+      agent.approvalsReviewer = threadPermissions.approvalsReviewer;
       agent.serviceTier = normalizeServiceTier(
         typeof threadData.serviceTier === 'string' ? threadData.serviceTier : agent.serviceTier,
       );
@@ -2258,6 +2532,8 @@ export class SessionOrchestrator {
       includeEffort: this.capabilities.supportsReasoningEffort,
       includeServiceTier: this.capabilities.supportsServiceTier,
       approvalPolicy: agent.approvalPolicy,
+      approvalsReviewer: agent.approvalsReviewer,
+      sandboxPolicy: sandboxPolicyForMode(agent.sandboxMode, agent.cwd),
       cwd: agent.cwd,
       input,
     });
@@ -2271,6 +2547,8 @@ export class SessionOrchestrator {
             model: agent.model,
             effort: this.isReasoningEffortError(message) ? undefined : agent.reasoningEffort,
             approvalPolicy: agent.approvalPolicy,
+            approvalsReviewer: agent.approvalsReviewer,
+            sandboxPolicy: sandboxPolicyForMode(agent.sandboxMode, agent.cwd),
             cwd: agent.cwd,
             includeEffort: !this.isReasoningEffortError(message),
             includeServiceTier: false,
@@ -2459,7 +2737,7 @@ export class SessionOrchestrator {
     config: {
       model?: string;
       cwd?: string;
-      approvalPolicy?: string;
+      permissionMode?: string;
       systemPrompt?: string;
       serviceTier?: string;
       reasoningEffort?: string;
@@ -2473,8 +2751,12 @@ export class SessionOrchestrator {
     if (typeof config.cwd === 'string' && config.cwd.trim()) {
       agent.cwd = config.cwd.trim();
     }
-    if (typeof config.approvalPolicy === 'string' && config.approvalPolicy.trim()) {
-      agent.approvalPolicy = config.approvalPolicy.trim();
+    if (typeof config.permissionMode === 'string' && config.permissionMode.trim()) {
+      const permissions = permissionRuntimeConfig(config.permissionMode);
+      agent.permissionMode = permissions.permissionMode;
+      agent.approvalPolicy = permissions.approvalPolicy;
+      agent.sandboxMode = permissions.sandboxMode;
+      agent.approvalsReviewer = permissions.approvalsReviewer;
     }
     if (typeof config.serviceTier === 'string' && config.serviceTier.trim()) {
       agent.serviceTier = normalizeServiceTier(config.serviceTier);
@@ -2661,19 +2943,32 @@ export class SessionOrchestrator {
     );
     const model = usableString(result?.model) || usableString(thread.model);
     const approvalPolicy = usableString(result?.approvalPolicy) || usableString(thread.approvalPolicy) || 'never';
+    const permissionMode = permissionModeFromRuntime({
+      approvalPolicy,
+      sandboxMode: usableString(result?.sandbox) || usableString(thread.sandbox),
+      approvalsReviewer: usableString(result?.approvalsReviewer) || usableString(thread.approvalsReviewer),
+    });
+    const permissions = permissionRuntimeConfig(permissionMode);
     const serviceTier = normalizeServiceTier(usableString(result?.serviceTier) || usableString(thread.serviceTier));
     const reasoningEffort = usableString(result?.reasoningEffort) || usableString(thread.reasoningEffort) || 'medium';
     const status = summary.status;
     const queueLabel = summary.queuedFollowUpCount > 0 ? `已排队 ${summary.queuedFollowUpCount} 个后续任务` : null;
-    const activityLabel = queueLabel || (status === 'working' ? (summary.activityLabel || inferThreadActivity(messages)) : null);
+    const pendingRequests = extractPendingUserInputRequestsFromSession(thread.path);
+    const activityLabel = pendingRequests.length > 0
+      ? '正在等待你回答问题'
+      : queueLabel || (status === 'working' ? (summary.activityLabel || inferThreadActivity(messages)) : null);
     return {
       ...summary,
       status,
       model,
-      approvalPolicy,
+      permissionMode: permissions.permissionMode,
+      approvalPolicy: permissions.approvalPolicy,
+      sandboxMode: permissions.sandboxMode,
+      approvalsReviewer: permissions.approvalsReviewer,
       serviceTier,
       reasoningEffort,
       activityLabel,
+      pendingRequests,
       messages,
     };
   }
@@ -2756,7 +3051,10 @@ export class SessionOrchestrator {
       cwd: agent.cwd,
       projectRoot: agent.projectless ? null : codexDesktopProjectRootForCwd(agent.cwd),
       projectless: agent.projectless,
+      permissionMode: agent.permissionMode,
       approvalPolicy: agent.approvalPolicy,
+      sandboxMode: agent.sandboxMode,
+      approvalsReviewer: agent.approvalsReviewer,
       serviceTier: agent.serviceTier,
       reasoningEffort: agent.reasoningEffort,
       systemPrompt: agent.systemPrompt,
@@ -2836,13 +3134,14 @@ export class SessionOrchestrator {
     });
   }
 
-  private finalizeItemMessage(agent: AgentInfo, itemId: string, text: string, type: string) {
+  private finalizeItemMessage(agent: AgentInfo, itemId: string, text: string, type: string, metadata: Partial<AgentMessageRecord> = {}) {
     if (!itemId || !text) return;
     const existingIndex = agent.messageItemIds.get(itemId);
     if (typeof existingIndex === 'number' && agent.messages[existingIndex]) {
       const existing = agent.messages[existingIndex];
       existing.text = text;
       existing.type = type;
+      Object.assign(existing, metadata);
       return;
     }
     agent.messageItemIds.set(itemId, agent.messages.length);
@@ -2852,6 +3151,7 @@ export class SessionOrchestrator {
       text,
       timestamp: Date.now(),
       _itemId: itemId,
+      ...metadata,
     });
   }
 
@@ -2891,7 +3191,10 @@ export class SessionOrchestrator {
           name: agent.name,
           model: agent.model,
           cwd: agent.cwd,
+          permissionMode: agent.permissionMode,
           approvalPolicy: agent.approvalPolicy,
+          sandboxMode: agent.sandboxMode,
+          approvalsReviewer: agent.approvalsReviewer,
           serviceTier: agent.serviceTier,
           reasoningEffort: agent.reasoningEffort,
           systemPrompt: agent.systemPrompt,
@@ -2917,7 +3220,7 @@ export class SessionOrchestrator {
             entry.name,
             entry.model,
             entry.cwd,
-            entry.approvalPolicy || 'never',
+            entry.permissionMode ? permissionModeFromRuntime(entry) : 'default-review',
             entry.systemPrompt || '',
             entry.id,
             {
@@ -3049,7 +3352,7 @@ export class SessionOrchestrator {
       } else if (type === 'commandOutput') {
         this.finalizeItemMessage(agent, itemId, text, 'command_output');
       } else if (type === 'subAgent' || type === 'subAgentOutput') {
-        this.finalizeItemMessage(agent, itemId, text, 'sub_agent');
+        this.finalizeItemMessage(agent, itemId, text, 'sub_agent', subAgentMetadata(normalized, type === 'subAgentOutput'));
       } else if (type === 'fileChange') {
         this.finalizeItemMessage(agent, itemId, text, 'file_change');
       } else if (type === 'status') {
@@ -3337,7 +3640,7 @@ export class SessionOrchestrator {
               this.finalizeItemMessage(agent, itemId, (activeItem.output as string) || (activeItem.text as string) || '', 'command_output');
               console.log(`\n${tag} ${GREEN}Output complete${RESET}`);
             } else if (type === 'subAgent' || type === 'subAgentOutput') {
-              this.finalizeItemMessage(agent, itemId, (activeItem.output as string) || (activeItem.text as string) || '', 'sub_agent');
+              this.finalizeItemMessage(agent, itemId, (activeItem.output as string) || (activeItem.text as string) || '', 'sub_agent', subAgentMetadata(activeItem, type === 'subAgentOutput'));
             } else if (type === 'reasoning') {
               this.finalizeItemMessage(agent, itemId, (activeItem.text as string) || '', 'thinking');
             } else if (type === 'command' || type === 'localShellCommand') {
@@ -3372,7 +3675,7 @@ export class SessionOrchestrator {
             } else if (type === 'commandOutput') {
               this.finalizeItemMessage(agent, itemId, String(normalizedTool.output || normalizedTool.text || ''), 'command_output');
             } else if (type === 'subAgent' || type === 'subAgentOutput') {
-              this.finalizeItemMessage(agent, itemId, String(normalizedTool.output || normalizedTool.text || ''), 'sub_agent');
+              this.finalizeItemMessage(agent, itemId, String(normalizedTool.output || normalizedTool.text || ''), 'sub_agent', subAgentMetadata(normalizedTool, type === 'subAgentOutput'));
             } else if (type === 'fileChange') {
               this.finalizeItemMessage(agent, itemId, String(normalizedTool.text || ''), 'file_change');
             }
@@ -3423,7 +3726,7 @@ export class SessionOrchestrator {
             } else if (type === 'commandOutput') {
               this.finalizeItemMessage(agent, itemId, String(normalizedTool.output || normalizedTool.text || ''), 'command_output');
             } else if (type === 'subAgent' || type === 'subAgentOutput') {
-              this.finalizeItemMessage(agent, itemId, String(normalizedTool.output || normalizedTool.text || ''), 'sub_agent');
+              this.finalizeItemMessage(agent, itemId, String(normalizedTool.output || normalizedTool.text || ''), 'sub_agent', subAgentMetadata(normalizedTool, type === 'subAgentOutput'));
             } else if (type === 'fileChange') {
               this.finalizeItemMessage(agent, itemId, String(normalizedTool.text || ''), 'file_change');
             }

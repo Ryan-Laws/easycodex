@@ -34,9 +34,10 @@ Use `.github/workflows/release-android.yml`.
 
 1. Bump `versionName` and `versionCode` in `mobile/app/build.gradle.kts`.
 2. Bump matching package versions where relevant.
-3. Update `CHANGELOG.md`.
-4. Push a tag matching `versionName`, for example `v0.1.1`.
-5. Let the workflow build, sign, verify the signing certificate, launch on emulator, and upload:
+3. Update `CHANGELOG.md`. Keep each release note to exactly two subsections, `### Added` and `### Fixed`; put behavior changes and improvements under the closest matching subsection instead of adding extra headings.
+4. Commit the release directly on `main`; do not create a temporary release branch unless explicitly asked.
+5. Push `main`, then push a tag matching `versionName`, for example `v0.1.1`.
+6. Let the workflow build, sign, verify the signing certificate, launch on emulator, and upload:
    - `EasyCodex.Mobile.<version>.apk`
    - `EasyCodex.Mobile.<version>.apk.sha256`
 

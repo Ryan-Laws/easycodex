@@ -77,15 +77,18 @@ export function codexThreadStartCall(
   model: string,
   cwd?: string,
   approvalPolicy = 'never',
+  sandbox = 'danger-full-access',
+  approvalsReviewer?: string,
   serviceTier?: string,
   includeServiceTier = true,
 ): string {
   const params: Record<string, unknown> = {
     model,
     approvalPolicy,
-    sandbox: 'danger-full-access',
+    sandbox,
   };
   withOptionalValues(params, [
+    ['approvalsReviewer', approvalsReviewer],
     ['cwd', cwd],
     ['serviceTier', serviceTier, includeServiceTier],
   ]);
@@ -98,6 +101,8 @@ export function codexThreadResumeCall(
     model?: string;
     cwd?: string;
     approvalPolicy?: string;
+    sandbox?: string;
+    approvalsReviewer?: string;
     serviceTier?: string;
     includeServiceTier?: boolean;
   } = {},
@@ -107,6 +112,8 @@ export function codexThreadResumeCall(
     ['model', options.model],
     ['cwd', options.cwd],
     ['approvalPolicy', options.approvalPolicy],
+    ['approvalsReviewer', options.approvalsReviewer],
+    ['sandbox', options.sandbox],
     ['serviceTier', options.serviceTier, options.includeServiceTier !== false],
   ]);
   return rpcCall('thread/resume', params);
@@ -159,6 +166,8 @@ export function codexTurnStartCall(
     includeEffort?: boolean;
     includeServiceTier?: boolean;
     approvalPolicy?: string;
+    approvalsReviewer?: string;
+    sandboxPolicy?: Record<string, unknown>;
     cwd?: string;
     input?: CodexTurnInputItem[];
   } = {},
@@ -172,6 +181,8 @@ export function codexTurnStartCall(
     ['effort', options.effort, options.includeEffort !== false],
     ['serviceTier', options.serviceTier, options.includeServiceTier !== false],
     ['approvalPolicy', options.approvalPolicy],
+    ['approvalsReviewer', options.approvalsReviewer],
+    ['sandboxPolicy', options.sandboxPolicy],
     ['cwd', options.cwd],
   ]);
   return rpcCall('turn/start', params);

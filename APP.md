@@ -64,6 +64,7 @@ The Android app currently supports:
 - creating, resuming, interrupting, stopping, and archiving Codex tasks
 - active/resumable/history task lists with queued follow-ups and unread completion state
 - streaming agent responses, reasoning, command output, file changes, plans, and sub-agent activity
+- compact mobile activity rows for commands and sub-agents: command groups are collapsed by default, and sub-agent rows can open the delegated thread when Codex provides one
 - attachment upload for files/images with mobile previews
 - quick replies, emoji insertion, and Android system voice input in the composer
 - mobile approval prompts and structured user-input request dialogs
@@ -71,8 +72,11 @@ The Android app currently supports:
 - Git status, full/single-file diff review, file preview, and selected-file commit
 - project/workspace picker with trusted roots and Git worktree visibility
 - multi-window Codex CLI consoles backed by `codex exec`, including exec/resume/review modes, profiles, images, extra dirs, JSON output, ephemeral runs, ignore-rules, sandbox, and Git repo check controls
-- model, reasoning, service tier, cwd, approval policy, sandbox, and skip-git-repo-check controls
+- model, reasoning, service tier, cwd, main-agent permission mode, CLI sandbox, and skip-git-repo-check controls
+- main-agent permission modes: default review, Codex auto-review, or full access with no permission approval prompts
 - relay URL/API key settings, QR scanning, language/theme/layout defaults, notification permissions/preferences/history, and stable/beta APK update checks
+
+EasyCodex treats desktop handoff and mobile-originated tasks differently. A handoff resumes an existing Codex thread, so the desktop Codex App remains the primary UI. A mobile-originated task is owned by the relay/app-server session; it can be surfaced from shared Codex state, but the desktop Codex App should be treated as a secondary view and may not contain full app-server or sub-agent detail.
 
 The desktop relay currently supports:
 

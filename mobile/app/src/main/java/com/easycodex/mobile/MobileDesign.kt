@@ -1,5 +1,6 @@
 package com.easycodex.mobile
 
+import android.view.HapticFeedbackConstants
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -10,6 +11,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -18,9 +20,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 
 internal object EasyCodexDesign {
@@ -63,6 +68,38 @@ internal fun easyCodexShrinkVertically(
     animationSpec = EasyCodexMotion.exitTween(),
     shrinkTowards = shrinkTowards,
 ) + fadeOut(animationSpec = EasyCodexMotion.fastTween())
+
+@Composable
+internal fun rememberHapticClick(
+    onClick: () -> Unit,
+    feedbackConstant: Int = HapticFeedbackConstants.KEYBOARD_TAP,
+): () -> Unit {
+    val view = LocalView.current
+    return remember(view, onClick, feedbackConstant) {
+        {
+            view.performHapticFeedback(feedbackConstant)
+            onClick()
+        }
+    }
+}
+
+@Composable
+internal fun rememberHapticClick(
+    feedbackConstant: Int = HapticFeedbackConstants.KEYBOARD_TAP,
+    onClick: () -> Unit,
+): () -> Unit = rememberHapticClick(onClick, feedbackConstant)
+
+@Composable
+internal fun Modifier.hapticClickable(
+    enabled: Boolean = true,
+    role: Role? = null,
+    feedbackConstant: Int = HapticFeedbackConstants.KEYBOARD_TAP,
+    onClick: () -> Unit,
+): Modifier = clickable(
+    enabled = enabled,
+    role = role,
+    onClick = rememberHapticClick(onClick, feedbackConstant),
+)
 
 @Composable
 internal fun EasyCodexIconBubble(

@@ -60,13 +60,20 @@ The relay must keep these boundaries explicit:
 
 Only one running relay agent is attached to a Codex thread id. If a client resumes a thread that is already active, the relay returns the existing agent.
 
+EasyCodex has two task modes that must stay distinct:
+
+- Desktop handoff resumes an existing Codex thread. The desktop Codex App remains the primary UI, and mobile messages are follow-ups on that thread.
+- Mobile-originated tasks are relay-managed `codex app-server` sessions. They may appear in the desktop Codex App through shared Codex state, but the desktop UI is only a secondary view and may not show full app-server or sub-agent details.
+
+For mobile-originated tasks, keep sub-agent results visible in the relay/mobile transcript when Codex provides them. Summarize or truncate only for size, and do not replace a returned sub-agent result with a generic "details omitted" placeholder.
+
 ## WebSocket Actions
 
 Agent and message actions:
 
 | Action | Purpose |
 | --- | --- |
-| `create_agent` | Start or resume an agent. Supports `name`, `model`, `cwd`, `approvalPolicy`, `systemPrompt`, `serviceTier`, `reasoningEffort`, `codexThreadId`, first `message`, and `attachments`. |
+| `create_agent` | Start or resume an agent. Supports `name`, `model`, `cwd`, `permissionMode`, `systemPrompt`, `serviceTier`, `reasoningEffort`, `codexThreadId`, first `message`, and `attachments`. |
 | `list_agents` | Return relay-managed running agents. |
 | `get_agent` | Return one running agent. |
 | `send_message` | Send a turn to an agent, or queue it while busy. Supports attachments. |
@@ -76,7 +83,7 @@ Agent and message actions:
 | `stop_agent` | Stop a running agent process. |
 | `archive_codex_thread` | Archive a Codex thread. If a relay-managed agent is still running for that thread, the relay first marks it stopped, kills the process, removes it from local state, then sends Codex `thread/archive`. |
 | `update_agent_model` | Change the in-memory model for an agent. |
-| `update_agent_config` | Change model, cwd, approval policy, system prompt, service tier, or reasoning effort. |
+| `update_agent_config` | Change model, cwd, permission mode, system prompt, service tier, or reasoning effort. |
 
 Stream and runtime actions:
 
@@ -167,8 +174,10 @@ The orchestrator maps old and current Codex event names into stable app message 
 - `command_output` for command/MCP output
 - `file_change` for patches, diffs, and code changes
 - `plan` for plan updates
-- `sub_agent` for delegated agent tool calls and results
+- `sub_agent` for delegated agent activity. It is a compact navigation/status row in clients, not a normal chat bubble; full delegated work belongs in the sub-agent thread when a thread id is available.
 - `status` for lifecycle/error notices
+
+Command and sub-agent items are summarized for mobile by default. The relay strips shell wrappers, ANSI control codes, unsafe internal tool arguments, and repeated empty success output before sending display text; detail text may still be attached for explicit expansion.
 
 When a user prompt contains injected AGENTS/environment context, the relay and Android app hide that context in display copies and keep the user-facing prompt readable.
 
@@ -198,6 +207,14 @@ Runtime state is outside the repo:
 ```
 
 The relay also reads Codex desktop/global state from `~/.codex/` when available to surface pinned threads, visible workspace roots, queued follow-ups, archived threads, and active sessions.
+
+Permission modes are stored with relay agents and mapped to Codex app-server fields:
+
+| `permissionMode` | Codex `sandbox` | Codex `approvalPolicy` | Codex `approvalsReviewer` | Behavior |
+| --- | --- | --- | --- | --- |
+| `default-review` | `workspace-write` | `on-request` | `user` | Work inside the workspace normally; phone approval handles sandbox escapes, blocked network, MCP approvals, and similar permission requests. |
+| `auto-review` | `workspace-write` | `on-request` | `auto_review` | Same sandbox boundary, but Codex routes permission decisions to its auto-reviewer before interrupting the user. |
+| `full-access` | `danger-full-access` | `never` | unset | Full access; EasyCodex does not surface permission approvals because Codex should not ask for them in this mode. |
 
 ## Environment Variables
 

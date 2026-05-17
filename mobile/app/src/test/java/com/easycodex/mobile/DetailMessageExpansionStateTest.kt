@@ -1,7 +1,6 @@
 package com.easycodex.mobile
 
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DetailMessageExpansionStateTest {
@@ -16,13 +15,13 @@ class DetailMessageExpansionStateTest {
     }
 
     @Test
-    fun runningDetailGroupDefaultsExpanded() {
+    fun runningDetailGroupDefaultsCollapsed() {
         val messages = listOf(
             AgentMessage("agent", "command", "gradle test", 1L, itemId = "cmd_1", streaming = true),
             AgentMessage("agent", "command_output", "status: running", 2L, itemId = "out_1", streaming = false),
         )
 
-        assertTrue(detailGroupDefaultExpanded(messages))
+        assertFalse(detailGroupDefaultExpanded(messages))
     }
 
     @Test
@@ -33,9 +32,16 @@ class DetailMessageExpansionStateTest {
     }
 
     @Test
-    fun runningSingleDetailDefaultsExpanded() {
+    fun runningSingleDetailDefaultsCollapsed() {
         val message = AgentMessage("agent", "command", "gradle test", 1L, itemId = "cmd_1", streaming = true)
 
-        assertTrue(detailMessageDefaultExpanded(message))
+        assertFalse(detailMessageDefaultExpanded(message))
+    }
+
+    @Test
+    fun subAgentSingleDetailDefaultsCollapsed() {
+        val message = AgentMessage("agent", "sub_agent", "子代理正在工作", 1L, itemId = "sub_1", streaming = true)
+
+        assertFalse(detailMessageDefaultExpanded(message))
     }
 }

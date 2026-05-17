@@ -20,6 +20,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -105,11 +107,11 @@ fun ConnectionBanner(
             )
             if (onConfigure != null) {
                 Spacer(Modifier.width(8.dp))
-                TextButton(onClick = onConfigure) {
+                TextButton(onClick = rememberHapticClick(onConfigure)) {
                     Text(strings.fillIn)
                 }
             }
-            IconButton(onClick = onHelp) {
+            IconButton(onClick = rememberHapticClick(onHelp)) {
                 Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = strings.connectionTroubleshooting)
             }
         }
@@ -142,12 +144,12 @@ fun ApprovalRequestDialog(
             }
         },
         confirmButton = {
-            Button(onClick = onApprove) {
+            Button(onClick = rememberHapticClick(onApprove)) {
                 Text("批准")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDeny) {
+            TextButton(onClick = rememberHapticClick(onDeny)) {
                 Text("拒绝")
             }
         },
@@ -161,12 +163,16 @@ fun UserInputRequestDialog(
     onDismiss: () -> Unit,
 ) {
     var answers by remember(request.id) { mutableStateOf(emptyMap<String, String>()) }
-    val canSubmit = request.questions.all { question ->
-        answers[question.id].orEmpty().isNotBlank()
-    }
+    var currentQuestionIndex by remember(request.id) { mutableStateOf(0) }
+    val questions = request.questions
+    val questionCount = questions.size
+    val safeIndex = currentQuestionIndex.coerceIn(0, (questionCount - 1).coerceAtLeast(0))
+    val currentQuestion = questions.getOrNull(safeIndex)
+    val canContinue = currentQuestion?.let { answers[it.id].orEmpty().isNotBlank() } == true
+    val isLastQuestion = safeIndex >= questionCount - 1
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(request.title) },
+        title = { Text("CodeX 等你回答") },
         text = {
             Column(
                 modifier = Modifier
@@ -174,24 +180,43 @@ fun UserInputRequestDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (request.detail.isNotBlank()) {
-                    Text(
-                        request.detail,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                request.questions.forEach { question ->
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        val label = question.header.ifBlank { question.question.ifBlank { "你的回答" } }
+                if (questionCount > 1) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(
+                            onClick = { currentQuestionIndex = (safeIndex - 1).coerceAtLeast(0) },
+                            enabled = safeIndex > 0,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "上一题")
+                        }
                         Text(
-                            label,
+                            "${safeIndex + 1} / $questionCount",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        IconButton(
+                            onClick = { currentQuestionIndex = (safeIndex + 1).coerceAtMost(questionCount - 1) },
+                            enabled = canContinue && !isLastQuestion,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "下一题")
+                        }
+                    }
+                }
+                currentQuestion?.let { question ->
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            question.question.ifBlank { question.header.ifBlank { request.detail.ifBlank { "你的回答" } } },
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.SemiBold,
                         )
                         if (question.header.isNotBlank() && question.question.isNotBlank()) {
                             Text(
-                                question.question,
+                                question.header,
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -202,7 +227,7 @@ fun UserInputRequestDialog(
                                     val selected = answers[question.id] == option.label
                                     FilterChip(
                                         selected = selected,
-                                        onClick = { answers = answers + (question.id to option.label) },
+                                        onClick = rememberHapticClick { answers = answers + (question.id to option.label) },
                                         label = {
                                             Column {
                                                 Text(option.label)
@@ -220,12 +245,13 @@ fun UserInputRequestDialog(
                             }
                         }
                         if (question.isOther || question.options.isEmpty()) {
+                            val selectedOption = question.options.any { option -> option.label == answers[question.id] }
                             OutlinedTextField(
-                                value = answers[question.id].orEmpty(),
+                                value = if (selectedOption) "" else answers[question.id].orEmpty(),
                                 onValueChange = { answers = answers + (question.id to it) },
                                 modifier = Modifier.fillMaxWidth(),
                                 minLines = 2,
-                                label = { Text("输入回答") },
+                                label = { Text("没有我想要的答案，向 CodeX 提问") },
                                 visualTransformation = if (question.isSecret) PasswordVisualTransformation() else VisualTransformation.None,
                             )
                         }
@@ -235,14 +261,20 @@ fun UserInputRequestDialog(
         },
         confirmButton = {
             Button(
-                enabled = canSubmit,
-                onClick = { onSubmit(answers.mapValues { it.value.trim() }.filterValues { it.isNotBlank() }) },
+                enabled = canContinue,
+                onClick = rememberHapticClick {
+                    if (!isLastQuestion) {
+                        currentQuestionIndex = (safeIndex + 1).coerceAtMost(questionCount - 1)
+                    } else {
+                        onSubmit(answers.mapValues { it.value.trim() }.filterValues { it.isNotBlank() })
+                    }
+                },
             ) {
-                Text("发送回答")
+                Text(if (isLastQuestion) "发送回答" else "下一题")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = rememberHapticClick(onDismiss)) {
                 Text("稍后")
             }
         },
@@ -309,16 +341,16 @@ fun PlanReviewDialog(
             }
         },
         confirmButton = {
-            Button(onClick = onStart) {
+            Button(onClick = rememberHapticClick(onStart)) {
                 Text("开始计划")
             }
         },
         dismissButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { onOptimize(adjustmentText) }) {
+                TextButton(onClick = rememberHapticClick { onOptimize(adjustmentText) }) {
                     Text("让他补充/调整")
                 }
-                TextButton(onClick = onDismiss) {
+                TextButton(onClick = rememberHapticClick(onDismiss)) {
                     Text("稍后")
                 }
             }
@@ -402,13 +434,13 @@ fun DiffReviewDialog(
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         FilterChip(
                             selected = review.selectedFile == null,
-                            onClick = { onSelectFile(null) },
+                            onClick = rememberHapticClick { onSelectFile(null) },
                             label = { Text("全部") },
                         )
                         review.files.take(10).forEach { file ->
                             FilterChip(
                                 selected = review.selectedFile == file.path,
-                                onClick = { onSelectFile(file.path) },
+                                onClick = rememberHapticClick { onSelectFile(file.path) },
                                 leadingIcon = { FileTypeIcon(file.path, modifier = Modifier.size(18.dp)) },
                                 label = { Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             )
@@ -438,7 +470,7 @@ fun DiffReviewDialog(
                 if (review.selectedFile != null) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(strings.filePreview, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
-                        TextButton(onClick = { copyText(review.selectedFile) }) {
+                        TextButton(onClick = rememberHapticClick { copyText(review.selectedFile) }) {
                             Text(strings.copyPath)
                         }
                     }
@@ -497,7 +529,7 @@ fun DiffReviewDialog(
                                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                             }
                             Button(
-                                onClick = { showCommitConfirm = true },
+                                onClick = rememberHapticClick { showCommitConfirm = true },
                                 enabled = !commitDraft.busy && commitDraft.message.isNotBlank(),
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
@@ -513,11 +545,11 @@ fun DiffReviewDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { copyText(review.diff) }, enabled = review.diff.isNotBlank()) {
+            TextButton(onClick = rememberHapticClick { copyText(review.diff) }, enabled = review.diff.isNotBlank()) {
                 Text(strings.copyDiff)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(strings.close) } },
+        dismissButton = { TextButton(onClick = rememberHapticClick(onDismiss)) { Text(strings.close) } },
     )
     if (showCommitConfirm) {
         AlertDialog(
@@ -534,7 +566,7 @@ fun DiffReviewDialog(
             },
             confirmButton = {
                 Button(
-                    onClick = {
+                    onClick = rememberHapticClick {
                         showCommitConfirm = false
                         onCommit()
                     },
@@ -544,7 +576,7 @@ fun DiffReviewDialog(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showCommitConfirm = false }) {
+                TextButton(onClick = rememberHapticClick { showCommitConfirm = false }) {
                     Text(strings.cancel)
                 }
             },
@@ -581,8 +613,8 @@ fun ConnectionTroubleshootingDialog(
                 Text(strings.troubleshootingStepApiKey)
             }
         },
-        confirmButton = { Button(onClick = onConfigure) { Text(strings.openSettings) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(strings.close) } },
+        confirmButton = { Button(onClick = rememberHapticClick(onConfigure)) { Text(strings.openSettings) } },
+        dismissButton = { TextButton(onClick = rememberHapticClick(onDismiss)) { Text(strings.close) } },
     )
 }
 

@@ -49,4 +49,12 @@ class MessageInteractionStateTest {
     fun ignoresBlankUserInputQuestionParts() {
         assertEquals("请输入你的回答。", formatUserInputQuestionText(listOf("" to "请输入你的回答。")))
     }
+
+    @Test
+    fun spacedEasyCodexNameFallsBackToTaskPreview() {
+        assertEquals(
+            "有报错程序运行不起来 请你",
+            displayTaskNameForMobile("easy codex", "有报错程序运行不起来 请你"),
+        )
+    }
 }

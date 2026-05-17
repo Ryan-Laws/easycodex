@@ -857,8 +857,11 @@ function sanitizeStreamData(value: unknown, event = ''): unknown {
   if (!value || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map((item) => sanitizeStreamData(item, event));
 
+  const source = value as Record<string, unknown>;
+  const itemType = String(source.type || '').toLowerCase();
+  const isSubAgentItem = itemType.includes('subagent') || event.toLowerCase().includes('subagent');
   const result: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+  for (const [key, child] of Object.entries(source)) {
     const heavyText = [
       'text',
       'output',
@@ -880,6 +883,8 @@ function sanitizeStreamData(value: unknown, event = ''): unknown {
         result[key] = '正在运行命令。';
       } else if (key === 'input' || key === 'arguments') {
         result[key] = '参数已省略。';
+      } else if (isSubAgentItem && (key === 'text' || key === 'output')) {
+        result[key] = capStreamDelta(child);
       } else if (event.includes('commandOutput') || key === 'stdout' || key === 'stderr' || key === 'aggregated_output' || key === 'aggregatedOutput' || key === 'output') {
         result[key] = '命令输出已省略。';
       } else if (event.includes('fileChange') || event.includes('diff') || key === 'diff' || key === 'patch') {
@@ -1392,7 +1397,7 @@ wss.on('connection', (ws, req) => {
             name,
             model,
             cwd,
-            approvalPolicy,
+            permissionMode,
             systemPrompt,
             agentId,
             serviceTier,
@@ -1405,7 +1410,7 @@ wss.on('connection', (ws, req) => {
             name: string;
             model: string;
             cwd?: string;
-            approvalPolicy?: string;
+            permissionMode?: string;
             systemPrompt?: string;
             agentId?: string;
             serviceTier?: string;
@@ -1422,7 +1427,7 @@ wss.on('connection', (ws, req) => {
             name || 'Agent',
             model || 'gpt-5.5',
             resolvedCwd,
-            approvalPolicy || 'never',
+            permissionMode || 'default-review',
             systemPrompt || '',
             agentId,
             {
@@ -1572,7 +1577,7 @@ wss.on('connection', (ws, req) => {
             agentId,
             model,
             cwd,
-            approvalPolicy,
+            permissionMode,
             systemPrompt,
             serviceTier,
             reasoningEffort,
@@ -1580,7 +1585,7 @@ wss.on('connection', (ws, req) => {
             agentId: string;
             model?: string;
             cwd?: string;
-            approvalPolicy?: string;
+            permissionMode?: string;
             systemPrompt?: string;
             serviceTier?: string;
             reasoningEffort?: string;
@@ -1588,7 +1593,7 @@ wss.on('connection', (ws, req) => {
           manager.updateConfig(agentId, {
             model,
             cwd: cwd ? resolveWorkspaceCwd(cwd) : undefined,
-            approvalPolicy,
+            permissionMode,
             systemPrompt,
             serviceTier,
             reasoningEffort,

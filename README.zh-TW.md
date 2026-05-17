@@ -69,6 +69,8 @@ OpenAI 已經把 Codex 遠端存取帶到 ChatGPT 手機應用裡，但它目前
 
 手機不會直接執行 Codex。它透過 WebSocket 連線到桌面端中繼，由中繼在本機倉庫旁邊啟動 `codex app-server`。
 
+手機接力和手機單獨發起是兩種不同模式。接力已有 Codex thread 時，電腦 Codex App 仍是主視圖；從手機新開的任務由 EasyCodex relay / `codex app-server` 管理，電腦 Codex App 可能只能從共享 Codex 狀態裡看到部分歷史，不能保證完整展示 app-server 或子 agent 細節。
+
 ## 你可以做什麼
 
 - 建立、恢復、中斷、停止和封存 Codex 智能體對話。
@@ -79,9 +81,9 @@ OpenAI 已經把 Codex 遠端存取帶到 ChatGPT 手機應用裡，但它目前
 - 先審閱計畫，再選擇最佳化計畫或開始執行。
 - 瀏覽工作區檔案、檢查 Git 狀態、查看完整/單檔 diff、預覽檔案，並提交選中的改動檔案。
 - 瀏覽受信工作區、relay-managed repos 和 Git worktree。
-- 在本機操作執行前，透過手機處理核准提示和結構化 user-input 問題。
+- 在本機操作執行前，透過手機處理核准提示和結構化 user-input 問題；主 agent 支援預設審核、Codex 自動審核和完全開放三種權限模式，完全開放時不再彈出權限審核。
 - 開啟多個手機 CLI 視窗，每個視窗對應獨立的 `codex exec`，支援 resume/review、profile、圖片、額外目錄、JSON 輸出、ephemeral、ignore-rules、sandbox 和 Git repo check 開關。
-- 選擇模型、reasoning effort、service tier、cwd、approval policy、sandbox mode 和更新通道。
+- 選擇模型、reasoning effort、service tier、cwd、主 agent 權限模式、CLI sandbox mode 和更新通道。
 - 接收本機通知和可選手機推送，並同步每個 agent 的通知級別和最近通知歷史。
 - 在 Android 端檢查穩定版/Beta APK 更新，在桌面中繼端檢查 relay/安裝包更新。
 - 使用桌面中繼 workbench 查看任務、閱讀對話、傳送 follow-up、處理核准，並查看 Git 狀態/diff。

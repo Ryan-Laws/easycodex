@@ -68,6 +68,8 @@ Download the current release from the [latest EasyCodex release](https://github.
 
 The phone does not run Codex. It connects to the relay over an authenticated WebSocket. The relay launches `codex app-server` for agent sessions and `codex exec` for mobile CLI windows.
 
+Desktop handoff and mobile-originated tasks are intentionally different modes. When the phone resumes an existing Codex thread, the desktop Codex App remains the primary UI. When the phone starts a new task, the relay-owned `codex app-server` session is the primary UI; the desktop Codex App may discover some history through shared Codex state, but it is not expected to show every app-server or sub-agent detail.
+
 ## What You Can Do
 
 - Start, resume, interrupt, stop, and archive Codex tasks.
@@ -77,9 +79,9 @@ The phone does not run Codex. It connects to the relay over an authenticated Web
 - Review plans before execution and ask Codex to optimize them.
 - Inspect Git status/diff, preview changed files, and commit selected files.
 - Browse allowed workspaces, trusted directories, relay-managed repos, and Git worktrees.
-- Answer Codex approval prompts and structured user-input prompts.
+- Answer Codex approval prompts and structured user-input prompts; main agents support default review, Codex auto-review, and full access modes, with full access suppressing permission approval prompts.
 - Open multiple mobile CLI windows backed by separate `codex exec` runs, including resume/review modes, profiles, images, extra directories, JSON output, ephemeral runs, ignore-rules, sandbox, and Git-repo-check toggles.
-- Choose model, reasoning effort, service tier, cwd, approval policy, sandbox mode, and update channel where supported.
+- Choose model, reasoning effort, service tier, cwd, main-agent permission mode, CLI sandbox mode, and update channel where supported.
 - Receive local app notifications and optional mobile push notifications, with per-agent notification levels and recent notification history.
 - Check stable/beta APK updates from the Android app and relay/installer updates from the desktop relay.
 - Use the desktop relay workbench to monitor tasks, read conversations, send follow-ups, answer approvals, and inspect Git status/diff without opening the phone.

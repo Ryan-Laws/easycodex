@@ -19,7 +19,6 @@ import android.os.Looper
 import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import android.util.Base64
-import android.view.HapticFeedbackConstants
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -46,7 +45,6 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
@@ -81,6 +79,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -94,8 +93,10 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TaskAlt
@@ -159,7 +160,6 @@ import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
@@ -201,9 +201,9 @@ private const val EMOJI_PAGE_SIZE = EMOJI_COLUMNS * EMOJI_ROWS
 const val AGENTS_REFRESH_DEBOUNCE_MS = 500L
 const val BACKGROUND_AGENTS_REFRESH_DEBOUNCE_MS = 5_000L
 const val AGENT_ACTIVITY_UPDATE_THROTTLE_MS = 500L
-const val STREAM_DELTA_FLUSH_MS = 160L
+const val STREAM_DELTA_FLUSH_MS = 64L
 const val BACKGROUND_STREAM_DELTA_FLUSH_MS = 1_500L
-const val CLI_OUTPUT_FLUSH_MS = 160L
+const val CLI_OUTPUT_FLUSH_MS = 96L
 const val RELAY_STATE_DETAIL_REFRESH_DEBOUNCE_MS = 250L
 const val CODEX_THREAD_DETAIL_PREFETCH_LIMIT = 10
 const val CODEX_THREAD_DETAIL_MAX_RETRIES = 3
@@ -371,21 +371,41 @@ private fun TopBarStatusPill(status: String, text: String) {
         status == "connecting" -> MaterialTheme.colorScheme.tertiary
         else -> MaterialTheme.colorScheme.outline
     }
+    val infiniteTransition = rememberInfiniteTransition(label = "status dot")
+    val dotAlpha by if (status == "connecting") {
+        infiniteTransition.animateFloat(
+            initialValue = 0.4f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(800, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "dot alpha"
+        )
+    } else {
+        remember { mutableStateOf(1f) }
+    }
+
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         shape = RoundedCornerShape(999.dp),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
         ) {
-            Surface(shape = CircleShape, color = dotColor, modifier = Modifier.size(7.dp)) {}
+            Surface(
+                shape = CircleShape,
+                color = dotColor.copy(alpha = dotAlpha),
+                modifier = Modifier.size(8.dp)
+            ) {}
             Text(
                 text,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -572,11 +592,11 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                 },
                                 navigationIcon = {
                                     if (showCliMode) {
-                                        IconButton(onClick = { showCliMode = false }) {
+                                        IconButton(onClick = rememberHapticClick { showCliMode = false }) {
                                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.back)
                                         }
                                     } else if (!adaptiveMetrics.usePermanentDrawer) {
-                                        IconButton(onClick = {
+                                        IconButton(onClick = rememberHapticClick {
                                             captureDrawerSnapshot()
                                             scope.launch { drawerState.open() }
                                         }) {
@@ -586,15 +606,45 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                 },
                                 actions = {
                                     if (!showCliMode) {
-                                        IconButton(onClick = { showCliMode = true }) {
+                                        IconButton(onClick = rememberHapticClick { showCliMode = true }) {
                                             Icon(Icons.Default.Terminal, contentDescription = "Codex CLI")
                                         }
                                     }
-                                    IconButton(onClick = { showTroubleshooting = true }) {
-                                        Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = strings.connectionTroubleshooting)
-                                    }
-                                    IconButton(onClick = { openSettings() }) {
-                                        Icon(Icons.Default.Settings, contentDescription = strings.settingsContentDescription)
+                                    if (adaptiveMetrics.usePermanentDrawer) {
+                                        IconButton(onClick = rememberHapticClick { showTroubleshooting = true }) {
+                                            Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = strings.connectionTroubleshooting)
+                                        }
+                                        IconButton(onClick = rememberHapticClick { openSettings() }) {
+                                            Icon(Icons.Default.Settings, contentDescription = strings.settingsContentDescription)
+                                        }
+                                    } else {
+                                        var moreMenuExpanded by remember { mutableStateOf(false) }
+                                        Box {
+                                            IconButton(onClick = { moreMenuExpanded = true }) {
+                                                Icon(Icons.Default.MoreVert, contentDescription = strings.collapse)
+                                            }
+                                            DropdownMenu(
+                                                expanded = moreMenuExpanded,
+                                                onDismissRequest = { moreMenuExpanded = false }
+                                            ) {
+                                                DropdownMenuItem(
+                                                    text = { Text(strings.connectionTroubleshooting) },
+                                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = null) },
+                                                    onClick = {
+                                                        moreMenuExpanded = false
+                                                        showTroubleshooting = true
+                                                    }
+                                                )
+                                                DropdownMenuItem(
+                                                    text = { Text(strings.settingsContentDescription) },
+                                                    leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                                    onClick = {
+                                                        moreMenuExpanded = false
+                                                        openSettings()
+                                                    }
+                                                )
+                                            }
+                                        }
                                     }
                                 },
                                 colors = TopAppBarDefaults.topAppBarColors(
@@ -644,6 +694,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                     onModelChange = { controller.updateActiveModel(it) },
                                     onReasoningEffortChange = { controller.updateActiveReasoningEffort(it) },
                                     onServiceTierChange = { controller.updateActiveServiceTier(it) },
+                                    onPermissionModeChange = { controller.updateActivePermissionMode(it) },
                                     onBrowseDirectories = { path, callback -> controller.browseDirectories(path, callback) },
                                     onAttachFiles = { filePicker.launch("*/*") },
                                     onAttachImages = { imagePicker.launch("image/*") },
@@ -714,6 +765,8 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                         onOpenPlan = { message ->
                                             controller.activeAgent?.let { controller.showPlanReview(it.id, message) }
                                         },
+                                        onOpenSubAgent = { message -> controller.openSubAgentThread(message) },
+                                        onUndoFileChanges = { files -> controller.requestUndoFileChanges(files) },
                                     )
                                 }
                             }
@@ -811,8 +864,8 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                     showCreateAgent = false
                     createAgentInitialCwd = null
                 },
-                onCreate = { name, model, cwd, reasoningEffort ->
-                    controller.createAgent(name, model, cwd, reasoningEffort)
+                onCreate = { name, model, cwd, reasoningEffort, permissionMode ->
+                    controller.createAgent(name, model, cwd, reasoningEffort, permissionMode = permissionMode)
                     showCreateAgent = false
                     createAgentInitialCwd = null
                 },
@@ -1343,6 +1396,7 @@ fun MessageComposer(
     onModelChange: (String) -> Unit,
     onReasoningEffortChange: (String) -> Unit,
     onServiceTierChange: (String) -> Unit,
+    onPermissionModeChange: (String) -> Unit,
     onBrowseDirectories: (String?, (DirectoryListing?, String?) -> Unit) -> Unit,
     onAttachFiles: () -> Unit,
     onAttachImages: () -> Unit,
@@ -1361,10 +1415,6 @@ fun MessageComposer(
     var sendAnimationKey by remember { mutableStateOf(0) }
     val sendButtonScale = remember { Animatable(1f) }
     val sendIconTravel = remember { Animatable(0f) }
-    val hapticView = LocalView.current
-    fun performTapHaptic() {
-        hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-    }
     val quickReplyPrompts = remember(strings) {
         listOf(
             strings.quickReplyInvestigatePlan,
@@ -1386,6 +1436,7 @@ fun MessageComposer(
     val displayServiceTier = agent?.serviceTier?.takeIf { it.isNotBlank() }
         ?: serviceTierOptions.firstOrNull()?.takeIf { it.isNotBlank() }
         ?: DEFAULT_SERVICE_TIER
+    val displayPermissionMode = normalizePermissionMode(agent?.permissionMode)
     val selectedProject = agent?.cwd.orEmpty()
     val selectedProjectLabel = cleanNullablePath(selectedProject)?.let { projectNameFromCwd(it) } ?: strings.selectProject
     LaunchedEffect(sendAnimationKey) {
@@ -1421,7 +1472,7 @@ fun MessageComposer(
             .navigationBarsPadding()
             .imePadding(),
     ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
             QueuedFollowUpsPanel(
                 items = queuedFollowUps,
                 enabled = enabled,
@@ -1471,6 +1522,7 @@ fun MessageComposer(
                         ""
                     },
                     serviceTierLabel = serviceTierLabel(displayServiceTier, strings),
+                    permissionModeLabel = permissionModeLabel(displayPermissionMode),
                     showServiceTier = runtimeCapabilities.supportsServiceTier && serviceTierOptions.isNotEmpty(),
                     showProject = canChangeProject && selectedProject.isNotBlank(),
                     projectLabel = selectedProjectLabel,
@@ -1485,6 +1537,7 @@ fun MessageComposer(
                         }
                     },
                     onServiceTierClick = { runtimePicker = RuntimePicker.ServiceTier },
+                    onPermissionModeClick = { runtimePicker = RuntimePicker.PermissionMode },
                     onProjectClick = { showProjectPicker = true },
                     onPlanModeChange = onPlanModeChange,
                     onQuickRepliesToggle = { quickRepliesExpanded = !quickRepliesExpanded },
@@ -1525,13 +1578,13 @@ fun MessageComposer(
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
                     shape = EasyCodexDesign.ComposerPanelShape,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
-                    tonalElevation = 1.dp,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.46f)),
+                    tonalElevation = 0.dp,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(7.dp),
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Row(
                             verticalAlignment = Alignment.Bottom,
@@ -1539,8 +1592,7 @@ fun MessageComposer(
                         ) {
                             AnimatedComposerIconButton(
                                 selected = actionsExpanded,
-                                onClick = {
-                                    performTapHaptic()
+                                onClick = rememberHapticClick {
                                     actionsExpanded = !actionsExpanded
                                     if (!actionsExpanded) quickRepliesExpanded = false
                                 },
@@ -1562,7 +1614,7 @@ fun MessageComposer(
                                 trailingIcon = {
                                     AnimatedComposerIconButton(
                                         selected = false,
-                                        onClick = onVoiceInput,
+                                        onClick = rememberHapticClick(onVoiceInput),
                                         enabled = enabled,
                                     ) { iconModifier ->
                                         Icon(
@@ -1574,13 +1626,12 @@ fun MessageComposer(
                                 },
                                 minLines = 1,
                                 maxLines = 5,
-                                shape = RoundedCornerShape(24.dp),
+                                shape = RoundedCornerShape(22.dp),
                             )
                             FilledTonalIconButton(
-                                onClick = {
+                                onClick = rememberHapticClick {
                                     actionsExpanded = false
                                     quickRepliesExpanded = false
-                                    performTapHaptic()
                                     if (showInterruptButton) {
                                         onInterrupt()
                                     } else {
@@ -1629,7 +1680,6 @@ fun MessageComposer(
             pinnedPaths = projectOptions,
             onBrowseDirectories = onBrowseDirectories,
             onSelect = {
-                performTapHaptic()
                 onProjectChange(it)
                 showProjectPicker = false
                 actionsExpanded = false
@@ -1675,6 +1725,18 @@ fun MessageComposer(
             onDismiss = { runtimePicker = null },
         )
 
+        RuntimePicker.PermissionMode -> RuntimeChoiceDialog(
+            title = "选择权限模式",
+            options = permissionModeChoices(),
+            selected = displayPermissionMode,
+            onSelect = {
+                onPermissionModeChange(it)
+                runtimePicker = null
+                actionsExpanded = false
+            },
+            onDismiss = { runtimePicker = null },
+        )
+
         RuntimePicker.Project, null -> Unit
     }
 }
@@ -1688,29 +1750,70 @@ private fun UserInputComposerCard(
     onDismiss: () -> Unit,
 ) {
     var answers by remember(request.id) { mutableStateOf(emptyMap<String, String>()) }
-    val canSubmit = request.questions.all { question -> answers[question.id].orEmpty().isNotBlank() }
+    var currentQuestionIndex by remember(request.id) { mutableStateOf(0) }
+    val questions = request.questions
+    val questionCount = questions.size
+    val safeIndex = currentQuestionIndex.coerceIn(0, (questionCount - 1).coerceAtLeast(0))
+    val currentQuestion = questions.getOrNull(safeIndex)
+    val currentAnswer = currentQuestion?.let { answers[it.id].orEmpty() }.orEmpty()
+    val canContinue = currentQuestion != null && currentAnswer.isNotBlank()
+    val isLastQuestion = safeIndex >= questionCount - 1
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = EasyCodexDesign.ComposerPanelShape,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
-        tonalElevation = 1.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.46f)),
+        tonalElevation = 0.dp,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
             modifier = Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(
-                request.questions.firstOrNull()?.question?.ifBlank { request.detail } ?: request.detail.ifBlank { "请确认下一步。" },
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            request.questions.forEach { question ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "CodeX 等你回答",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (questionCount > 1) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = { currentQuestionIndex = (safeIndex - 1).coerceAtLeast(0) },
+                            enabled = enabled && safeIndex > 0,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "上一题")
+                        }
+                        Text(
+                            "${safeIndex + 1} / $questionCount",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        IconButton(
+                            onClick = { currentQuestionIndex = (safeIndex + 1).coerceAtMost(questionCount - 1) },
+                            enabled = enabled && canContinue && !isLastQuestion,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "下一题")
+                        }
+                    }
+                }
+            }
+            currentQuestion?.let { question ->
                 Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    if (question.header.isNotBlank()) {
+                    Text(
+                        question.question.ifBlank { question.header.ifBlank { request.detail.ifBlank { "请确认下一步。" } } },
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    if (question.header.isNotBlank() && question.question.isNotBlank()) {
                         Text(
                             question.header,
-                            style = MaterialTheme.typography.labelLarge,
+                            style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -1729,13 +1832,14 @@ private fun UserInputComposerCard(
                         }
                     }
                     if (question.isOther || question.options.isEmpty()) {
+                        val selectedOption = question.options.any { option -> option.label == answers[question.id] }
                         OutlinedTextField(
-                            value = answers[question.id].orEmpty(),
+                            value = if (selectedOption) "" else answers[question.id].orEmpty(),
                             onValueChange = { answers = answers + (question.id to it) },
                             modifier = Modifier.fillMaxWidth(),
                             minLines = 1,
                             maxLines = 3,
-                            label = { Text("输入回答") },
+                            label = { Text("没有我想要的答案，向 CodeX 提问") },
                             enabled = enabled,
                         )
                     }
@@ -1750,10 +1854,16 @@ private fun UserInputComposerCard(
                     Text(LocalAppStrings.current.later)
                 }
                 Button(
-                    enabled = enabled && canSubmit,
-                    onClick = { onSubmit(answers.mapValues { it.value.trim() }.filterValues { it.isNotBlank() }) },
+                    enabled = enabled && canContinue,
+                    onClick = {
+                        if (!isLastQuestion) {
+                            currentQuestionIndex = (safeIndex + 1).coerceAtMost(questionCount - 1)
+                        } else {
+                            onSubmit(answers.mapValues { it.value.trim() }.filterValues { it.isNotBlank() })
+                        }
+                    },
                 ) {
-                    Text("提交")
+                    Text(if (isLastQuestion) "提交" else "下一题")
                 }
             }
         }
@@ -1773,8 +1883,8 @@ private fun PlanReviewComposerCard(
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = EasyCodexDesign.ComposerPanelShape,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
-        tonalElevation = 1.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.46f)),
+        tonalElevation = 0.dp,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
@@ -1845,16 +1955,20 @@ private fun ComposerOptionRow(
     onClick: () -> Unit,
 ) {
     Surface(
-        color = if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainerLow,
+        color = if (selected) {
+            MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.74f)
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.52f)
+        },
         shape = RoundedCornerShape(12.dp),
         border = BorderStroke(
             1.dp,
-            if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.42f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.64f),
+            if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.32f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f),
         ),
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .clickable(enabled = enabled, role = Role.RadioButton, onClick = onClick),
+            .hapticClickable(enabled = enabled, role = Role.RadioButton, onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -1879,6 +1993,7 @@ private fun ComposerFloatingActions(
     modelLabel: String,
     reasoningLabel: String,
     serviceTierLabel: String,
+    permissionModeLabel: String,
     showServiceTier: Boolean,
     showProject: Boolean,
     projectLabel: String,
@@ -1887,6 +2002,7 @@ private fun ComposerFloatingActions(
     onModelClick: () -> Unit,
     onReasoningClick: () -> Unit,
     onServiceTierClick: () -> Unit,
+    onPermissionModeClick: () -> Unit,
     onProjectClick: () -> Unit,
     onPlanModeChange: (Boolean) -> Unit,
     onQuickRepliesToggle: () -> Unit,
@@ -1899,18 +2015,18 @@ private fun ComposerFloatingActions(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 2.dp, end = 14.dp, bottom = 8.dp),
+            .padding(start = 2.dp, end = 10.dp, bottom = 7.dp),
         horizontalAlignment = Alignment.Start,
-        verticalArrangement = Arrangement.spacedBy(7.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             ComposerActionBubble(
                 icon = Icons.Default.Settings,
                 label = strings.runtimeSettings,
-                detail = listOf(modelLabel, reasoningLabel, serviceTierLabel).filter { it.isNotBlank() }.joinToString(" "),
+                detail = listOf(modelLabel, reasoningLabel, permissionModeLabel).filter { it.isNotBlank() }.joinToString(" "),
                 selected = runtimeSettingsExpanded,
                 enabled = enabled,
                 onClick = { runtimeSettingsExpanded = !runtimeSettingsExpanded },
@@ -1950,8 +2066,8 @@ private fun ComposerFloatingActions(
             exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
         ) {
             FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(7.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 ComposerActionBubble(
                     icon = Icons.Default.Settings,
@@ -1978,6 +2094,13 @@ private fun ComposerFloatingActions(
                         onClick = onServiceTierClick,
                     )
                 }
+                ComposerActionBubble(
+                    icon = Icons.Default.Security,
+                    label = "权限模式",
+                    detail = permissionModeLabel,
+                    enabled = enabled,
+                    onClick = onPermissionModeClick,
+                )
                 if (showProject) {
                     ComposerActionBubble(
                         icon = Icons.Default.Folder,
@@ -1995,8 +2118,8 @@ private fun ComposerFloatingActions(
             exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
         ) {
             FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(7.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 quickReplyPrompts.forEach { prompt ->
                     AssistChip(
@@ -2027,9 +2150,9 @@ private fun ComposerActionBubble(
 ) {
     Surface(
         color = if (selected) {
-            MaterialTheme.colorScheme.primaryContainer
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
         } else {
-            MaterialTheme.colorScheme.surfaceContainerHigh
+            MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.78f)
         },
         contentColor = if (selected) {
             MaterialTheme.colorScheme.onPrimaryContainer
@@ -2037,15 +2160,15 @@ private fun ComposerActionBubble(
             MaterialTheme.colorScheme.onSurface
         },
         shape = RoundedCornerShape(999.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.62f)),
-        tonalElevation = 3.dp,
-        shadowElevation = 4.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (selected) 0.48f else 0.34f)),
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
         modifier = Modifier
             .clip(RoundedCornerShape(999.dp))
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+            .hapticClickable(enabled = enabled, role = Role.Button, onClick = onClick),
     ) {
         Row(
-            modifier = Modifier.padding(start = 10.dp, top = 8.dp, end = 13.dp, bottom = 8.dp),
+            modifier = Modifier.padding(start = 9.dp, top = 7.dp, end = 12.dp, bottom = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -2061,10 +2184,10 @@ private fun ComposerActionBubble(
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
-                modifier = Modifier.size(30.dp),
+                modifier = Modifier.size(28.dp),
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(icon, contentDescription = null, modifier = Modifier.size(17.dp))
                 }
             }
             Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
@@ -2125,15 +2248,15 @@ private fun QueuedFollowUpsPanel(
         Surface(
             color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
-            tonalElevation = 1.dp,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.44f)),
+            tonalElevation = 0.dp,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 8.dp),
         ) {
             Column {
                 items.take(5).forEachIndexed { index, item ->
-                    if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f))
+                    if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.38f))
                     QueuedFollowUpRow(
                         item = item,
                         enabled = enabled,
@@ -2142,7 +2265,7 @@ private fun QueuedFollowUpsPanel(
                     )
                 }
                 if (items.size > 5) {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.38f))
                     Text(
                         strings.queuedFollowUpsMore(items.size - 5),
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
@@ -2166,7 +2289,7 @@ private fun QueuedFollowUpRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .clickable(enabled = enabled, role = Role.Button, onClick = onOpen)
+            .hapticClickable(enabled = enabled, role = Role.Button, onClick = onOpen)
             .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2435,7 +2558,7 @@ private fun AgentRuntimeBar(
             onDismiss = { picker = null },
         )
 
-        RuntimePicker.Project, null -> Unit
+        RuntimePicker.Project, RuntimePicker.PermissionMode, null -> Unit
     }
 }
 
@@ -2532,6 +2655,7 @@ private enum class RuntimePicker {
     Model,
     Reasoning,
     ServiceTier,
+    PermissionMode,
 }
 
 private data class RuntimeChoice(val value: String, val label: String, val description: String = "")
@@ -2571,7 +2695,7 @@ private fun RuntimeChoiceDialog(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
-                            .clickable { onSelect(option.value) },
+                            .hapticClickable { onSelect(option.value) },
                     ) {
                         Column(Modifier.fillMaxWidth().padding(12.dp)) {
                             Text(option.label, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
@@ -2629,6 +2753,32 @@ private fun serviceTierDescription(value: String, strings: AppStrings = appStrin
         "default" -> strings.defaultSpeedDescription
         "standard" -> strings.defaultSpeedDescription
         else -> ""
+    }
+}
+
+private fun permissionModeChoices(): List<RuntimeChoice> = listOf(
+    RuntimeChoice(
+        PERMISSION_MODE_DEFAULT_REVIEW,
+        "默认审核",
+        "工作区内自动执行，越界、联网或高权限请求由手机确认。",
+    ),
+    RuntimeChoice(
+        PERMISSION_MODE_AUTO_REVIEW,
+        "自动审核",
+        "越界请求交给 Codex 自动审核，必要时才打断你。",
+    ),
+    RuntimeChoice(
+        PERMISSION_MODE_FULL_ACCESS,
+        "完全开放",
+        "不再审核，适合完全信任的仓库和任务。",
+    ),
+)
+
+fun permissionModeLabel(value: String): String {
+    return when (normalizePermissionMode(value)) {
+        PERMISSION_MODE_AUTO_REVIEW -> "自动审核"
+        PERMISSION_MODE_FULL_ACCESS -> "完全开放"
+        else -> "默认审核"
     }
 }
 
@@ -2748,7 +2898,7 @@ private fun ComposerToolItem(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f)),
         modifier = modifier
             .clip(RoundedCornerShape(18.dp))
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .hapticClickable(enabled = enabled, role = Role.Button, onClick = onClick)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -2880,7 +3030,7 @@ private fun EmojiCell(
         modifier = modifier
             .height(34.dp)
             .clip(CircleShape)
-            .clickable(enabled = enabled && item != null, role = Role.Button) {
+            .hapticClickable(enabled = enabled && item != null, role = Role.Button) {
                 item?.let {
                     tapKey += 1
                     onInsertEmoji(it)
@@ -2951,7 +3101,7 @@ fun CreateAgentDialog(
     reasoningOptions: List<String>,
     runtimeCapabilities: RuntimeCapabilities,
     onDismiss: () -> Unit,
-    onCreate: (String, String, String, String) -> Unit,
+    onCreate: (String, String, String, String, String) -> Unit,
 ) {
     val strings = LocalAppStrings.current
     var name by remember { mutableStateOf("EasyCodex") }
@@ -2960,6 +3110,7 @@ fun CreateAgentDialog(
         ?.ifBlank { DEFAULT_REASONING_EFFORT }
         ?: DEFAULT_REASONING_EFFORT
     var reasoningEffort by remember { mutableStateOf(initialReasoningEffort) }
+    var permissionMode by remember { mutableStateOf(DEFAULT_PERMISSION_MODE) }
     var cwd by remember { mutableStateOf(initialCwd.ifBlank { DEFAULT_AGENT_CWD }) }
     val models = modelOptions.ifEmpty {
         listOf(CodexModelOption(model = model, displayName = model))
@@ -2992,6 +3143,11 @@ fun CreateAgentDialog(
                         label = { Text("${strings.reasoningEffort} ${reasoningLabel(reasoningEffort, strings)}") },
                     )
                 }
+                FilterChip(
+                    selected = false,
+                    onClick = { picker = RuntimePicker.PermissionMode },
+                    label = { Text("权限模式 ${permissionModeLabel(permissionMode)}") },
+                )
                 OutlinedTextField(
                     value = cwd,
                     onValueChange = { cwd = it },
@@ -3002,7 +3158,7 @@ fun CreateAgentDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onCreate(name, model, cwd, reasoningEffort) }, enabled = !busy) {
+            Button(onClick = { onCreate(name, model, cwd, reasoningEffort, permissionMode) }, enabled = !busy) {
                 Text(if (busy) strings.creating else strings.create)
             }
         },
@@ -3032,6 +3188,17 @@ fun CreateAgentDialog(
             selected = reasoningEffort,
             onSelect = {
                 reasoningEffort = it
+                picker = null
+            },
+            onDismiss = { picker = null },
+        )
+
+        RuntimePicker.PermissionMode -> RuntimeChoiceDialog(
+            title = "选择权限模式",
+            options = permissionModeChoices(),
+            selected = permissionMode,
+            onSelect = {
+                permissionMode = normalizePermissionMode(it)
                 picker = null
             },
             onDismiss = { picker = null },

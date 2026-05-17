@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.1.6 - 2026-05-17
+
+### Added
+
+- Added main-agent permission modes for mobile-created Codex tasks: default review, Codex auto-review, and full access.
+- Added relay runtime mapping from EasyCodex permission modes to Codex `approvalPolicy`, sandbox, and approvals reviewer fields for thread start, thread resume, and turn start calls.
+- Added pending structured user-input request recovery from Codex session files so resumable threads can still show unanswered questions on mobile.
+- Added compact sub-agent metadata in relay/mobile messages, including delegated thread ids, nicknames, roles, statuses, and tool-call ids when Codex provides them.
+- Added Android tests and relay tests for permission-mode mapping, pending user-input handling, mobile message summaries, and session user-input behavior.
+- Replaced the older mobile approval-policy setting with a clearer main-agent permission mode selector while keeping CLI sandbox controls separate.
+- Collapsed command output and file-change detail rows by default on mobile, with summarized command labels and expandable full detail text.
+- Grouped completed file changes into a mobile summary card with file counts, additions/deletions, diff review access, and undo entry points.
+- Improved sub-agent rows on mobile so they behave like compact activity/navigation rows instead of noisy chat bubbles.
+- Refined Android conversation spacing, typography, streaming scroll behavior, haptic click handling, and dialog controls for phone-sized use.
+- Clarified documentation around desktop handoff versus mobile-originated relay sessions, including the expected desktop Codex App visibility limits.
+
+### Fixed
+
+- Preserved useful sub-agent results in relay/mobile transcripts instead of replacing them with a generic omitted-details placeholder.
+- Sanitized mobile command and sub-agent detail text by stripping shell wrappers, ANSI control codes, unsafe internal tool arguments, and repetitive empty output.
+- Surfaced pending user-input requests from existing Codex thread history with an explicit waiting status instead of leaving the task looking idle.
+- Normalized task names so generic `easy codex` labels fall back to the real task preview on mobile.
+- Fixed user-input dialogs with multiple questions so answers advance question by question and allow custom free-form responses when preset options do not fit.
+- Kept full-access mode from surfacing permission approval prompts by mapping it to Codex danger-full-access with `approvalPolicy: never`.
+
 ## 0.1.5 - 2026-05-16
 
 ### Added

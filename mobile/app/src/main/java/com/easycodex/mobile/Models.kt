@@ -1,5 +1,18 @@
 package com.easycodex.mobile
 
+const val DEFAULT_PERMISSION_MODE = "default-review"
+const val PERMISSION_MODE_DEFAULT_REVIEW = "default-review"
+const val PERMISSION_MODE_AUTO_REVIEW = "auto-review"
+const val PERMISSION_MODE_FULL_ACCESS = "full-access"
+
+fun normalizePermissionMode(value: String?): String {
+    return when (value?.trim()?.lowercase()) {
+        PERMISSION_MODE_AUTO_REVIEW -> PERMISSION_MODE_AUTO_REVIEW
+        PERMISSION_MODE_FULL_ACCESS, "full_control", "full-control" -> PERMISSION_MODE_FULL_ACCESS
+        else -> DEFAULT_PERMISSION_MODE
+    }
+}
+
 data class AgentMessage(
     val role: String,
     val type: String,
@@ -9,6 +22,12 @@ data class AgentMessage(
     val streaming: Boolean = false,
     val attachments: List<AttachmentDraft> = emptyList(),
     val durationMs: Long? = null,
+    val detailText: String = "",
+    val subAgentThreadId: String = "",
+    val subAgentNickname: String = "",
+    val subAgentStatus: String = "",
+    val subAgentRole: String = "",
+    val toolCallId: String = "",
 )
 
 data class Agent(
@@ -20,6 +39,7 @@ data class Agent(
     val status: String,
     val serviceTier: String = DEFAULT_SERVICE_TIER,
     val reasoningEffort: String = DEFAULT_REASONING_EFFORT,
+    val permissionMode: String = DEFAULT_PERMISSION_MODE,
     val activity: String? = null,
     val messages: List<AgentMessage> = emptyList(),
     val codexThreadId: String? = null,

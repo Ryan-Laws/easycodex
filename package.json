@@ -1,6 +1,6 @@
 {
   "name": "easycodex",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Terminal-first installer and launcher for EasyCodex mobile + relay",
   "type": "module",
   "bin": {

@@ -4,15 +4,16 @@ import android.content.ClipData
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
-import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -79,7 +80,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.AnnotatedString
@@ -96,6 +96,7 @@ import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -149,45 +150,52 @@ private const val LONG_DETAIL_TEXT_LIMIT = 6_000
 private const val LONG_MESSAGE_TEXT_LIMIT = 1_600
 private const val MESSAGE_PREVIEW_TEXT_LIMIT = 900
 private const val MESSAGE_PREVIEW_LINE_LIMIT = 14
+private const val STREAMING_REVEAL_FRAME_MS = 24L
 
 private fun AttachmentDraft.isPreviewImage(): Boolean {
     return !previewUri.isNullOrBlank() && mimeType?.startsWith("image/") == true
 }
 
-private suspend fun LazyListState.scrollToBottomAnchor(bottomIndex: Int) {
-    scrollToItem(bottomIndex)
+private suspend fun LazyListState.scrollToBottomAnchor(bottomIndex: Int, animated: Boolean = false) {
+    if (animated) {
+        animateScrollToItem(bottomIndex)
+    } else {
+        scrollToItem(bottomIndex)
+    }
     withFrameNanos { }
-    if (canScrollForward) scrollToItem(bottomIndex)
+    if (canScrollForward) {
+        if (animated) animateScrollToItem(bottomIndex) else scrollToItem(bottomIndex)
+    }
 }
 
 private fun conversationLayoutMetrics(layoutMode: String): ConversationLayoutMetrics {
     return when (layoutMode) {
         "compact" -> ConversationLayoutMetrics(
             listPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-            itemSpacing = 6.dp,
+            itemSpacing = 7.dp,
             bubblePadding = 10.dp,
-            bubbleShape = 14.dp,
-            userBubbleWidth = 0.86f,
+            bubbleShape = 16.dp,
+            userBubbleWidth = 0.84f,
             assistantBubbleWidth = 0.98f,
             detailBubbleWidth = 0.98f,
         )
 
         "spacious" -> ConversationLayoutMetrics(
             listPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
-            itemSpacing = 14.dp,
+            itemSpacing = 12.dp,
             bubblePadding = 16.dp,
-            bubbleShape = 24.dp,
-            userBubbleWidth = 0.78f,
+            bubbleShape = 22.dp,
+            userBubbleWidth = 0.76f,
             assistantBubbleWidth = 0.96f,
             detailBubbleWidth = 0.92f,
         )
 
         else -> ConversationLayoutMetrics(
             listPadding = PaddingValues(16.dp),
-            itemSpacing = 10.dp,
-            bubblePadding = 14.dp,
-            bubbleShape = 20.dp,
-            userBubbleWidth = 0.82f,
+            itemSpacing = 9.dp,
+            bubblePadding = 12.dp,
+            bubbleShape = 18.dp,
+            userBubbleWidth = 0.80f,
             assistantBubbleWidth = 0.98f,
             detailBubbleWidth = 0.96f,
         )
@@ -203,6 +211,8 @@ fun Conversation(
     apiKey: String = "",
     onOpenDiffReview: () -> Unit = {},
     onOpenPlan: (AgentMessage) -> Unit = {},
+    onOpenSubAgent: (AgentMessage) -> Unit = {},
+    onUndoFileChanges: (List<String>) -> Unit = {},
 ) {
     val metrics = conversationLayoutMetrics(layoutMode)
     val strings = LocalAppStrings.current
@@ -224,7 +234,7 @@ fun Conversation(
                 .withStreamingThinkingAtBottom()
         }
     }
-    val conversationItems = remember(visibleMessages) { visibleMessages.toConversationListItems() }
+    val conversationItems = remember(visibleMessages, agent.status) { visibleMessages.toConversationListItems(agent.isBusy()) }
     val visibleMessageKeys = remember(conversationItems) { conversationItems.uniqueLazyKeys() }
     val bottomIndex = conversationItems.size
     val bottomAnchorCount = conversationItems.size + 1
@@ -257,7 +267,7 @@ fun Conversation(
             }
     }
     LaunchedEffect(agent.id, outputRevision, followOutput) {
-        if (visibleMessages.isNotEmpty() && followOutput) listState.scrollToBottomAnchor(bottomIndex)
+        if (visibleMessages.isNotEmpty() && followOutput) listState.scrollToBottomAnchor(bottomIndex, animated = true)
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -283,6 +293,7 @@ fun Conversation(
                             apiKey = apiKey,
                             onOpenPlan = { onOpenPlan(item.message) },
                             onOpenDiffReview = onOpenDiffReview,
+                            onOpenSubAgent = { onOpenSubAgent(item.message) },
                         )
 
                         is ConversationListItem.DetailGroup -> DetailGroupBubble(
@@ -290,6 +301,13 @@ fun Conversation(
                             kind = item.kind,
                             metrics = metrics,
                             onOpenDiffReview = onOpenDiffReview,
+                        )
+
+                        is ConversationListItem.ChangeSummary -> FileChangeSummaryCard(
+                            messages = item.messages,
+                            metrics = metrics,
+                            onOpenDiffReview = onOpenDiffReview,
+                            onUndoFileChanges = onUndoFileChanges,
                         )
                     }
                 }
@@ -345,11 +363,13 @@ fun AgentMessage.stableKey(): String {
 private sealed class ConversationListItem {
     data class Message(val message: AgentMessage) : ConversationListItem()
     data class DetailGroup(val messages: List<AgentMessage>, val kind: DetailGroupKind) : ConversationListItem()
+    data class ChangeSummary(val messages: List<AgentMessage>) : ConversationListItem()
 
     fun stableKey(): String {
         return when (this) {
             is Message -> message.stableKey()
             is DetailGroup -> "${kind.name.lowercase()}_group_${messages.first().stableKey()}_${messages.last().stableKey()}_${messages.size}"
+            is ChangeSummary -> "change_summary_${messages.first().stableKey()}_${messages.last().stableKey()}_${messages.size}"
         }
     }
 }
@@ -375,11 +395,16 @@ private fun List<ConversationListItem>.uniqueLazyKeys(): List<String> {
     }
 }
 
-private fun List<AgentMessage>.toConversationListItems(): List<ConversationListItem> {
+private fun List<AgentMessage>.toConversationListItems(agentBusy: Boolean): List<ConversationListItem> {
     val items = mutableListOf<ConversationListItem>()
+    val fileChangeMessages = filter { it.role == "agent" && it.type == "file_change" }
     var index = 0
     while (index < size) {
         val message = this[index]
+        if (message.role == "agent" && message.type == "file_change") {
+            index += 1
+            continue
+        }
         if (!message.isDetailGroupCandidate()) {
             items.add(ConversationListItem.Message(message))
             index += 1
@@ -397,11 +422,14 @@ private fun List<AgentMessage>.toConversationListItems(): List<ConversationListI
             items.add(ConversationListItem.Message(group.first()))
         }
     }
+    if (!agentBusy && fileChangeMessages.isNotEmpty()) {
+        items.add(ConversationListItem.ChangeSummary(fileChangeMessages))
+    }
     return items
 }
 
 private fun AgentMessage.isDetailGroupCandidate(): Boolean {
-    return role == "agent" && type in setOf("command", "command_output", "file_change")
+    return role == "agent" && type in setOf("command", "command_output")
 }
 
 private fun List<AgentMessage>.detailGroupKind(): DetailGroupKind {
@@ -415,11 +443,11 @@ private fun List<AgentMessage>.detailGroupKind(): DetailGroupKind {
 }
 
 internal fun detailGroupDefaultExpanded(messages: List<AgentMessage>): Boolean {
-    return messages.any { it.streaming }
+    return false
 }
 
 internal fun detailMessageDefaultExpanded(message: AgentMessage): Boolean {
-    return message.streaming
+    return false
 }
 
 private val MarkdownExtensions: List<Extension> = listOf(
@@ -633,7 +661,6 @@ private fun AgentMessage.isDetailMessage(): Boolean {
     return type == "command" ||
         type == "command_output" ||
         type == "file_change" ||
-        type == "sub_agent" ||
         type == "tool" ||
         type == "tool_call"
 }
@@ -650,15 +677,15 @@ private fun AgentMessage.isInternalStatusMessage(): Boolean {
 
 private fun AgentMessage.isPrimaryConversationVisible(): Boolean {
     if (text.isBlank()) return false
+    if (type == "thinking") return streaming
     if (text.trim() == "已加载项目上下文。") return false
     if (isInternalStatusMessage()) return false
     return true
 }
 
 private fun List<AgentMessage>.withStreamingThinkingAtBottom(): List<AgentMessage> {
-    val activeThinking = filter { it.type == "thinking" && it.streaming }
-    if (activeThinking.isEmpty()) return this
-    val rest = filterNot { it.type == "thinking" && it.streaming }
+    val activeThinking = lastOrNull { it.type == "thinking" && it.streaming } ?: return this
+    val rest = filterNot { it.type == "thinking" }
     return rest + activeThinking
 }
 
@@ -676,12 +703,13 @@ private fun messageTypeLabel(type: String, strings: AppStrings): String {
 }
 
 private fun AgentMessage.detailDisplay(strings: AppStrings): DetailDisplay {
+    val bodyText = detailText.ifBlank { text }
     return when (type) {
-        "file_change" -> fileChangeDisplay(text, strings)
-        "sub_agent" -> commandDisplay(text, isOutput = true, strings = strings).copy(label = strings.subAgentLabel)
-        "command" -> commandDisplay(text, isOutput = false, strings = strings)
-        "command_output" -> commandDisplay(text, isOutput = true, strings = strings)
-        else -> DetailDisplay(messageTypeLabel(type, strings), text.lineSequence().firstOrNull { it.isNotBlank() } ?: messageTypeLabel(type, strings), "", text)
+        "file_change" -> fileChangeDisplay(bodyText, strings)
+        "sub_agent" -> commandDisplay(bodyText, isOutput = true, strings = strings).copy(label = strings.subAgentLabel)
+        "command" -> commandDisplay(bodyText, isOutput = false, strings = strings)
+        "command_output" -> commandDisplay(bodyText, isOutput = true, strings = strings)
+        else -> DetailDisplay(messageTypeLabel(type, strings), text.lineSequence().firstOrNull { it.isNotBlank() } ?: messageTypeLabel(type, strings), "", bodyText)
     }
 }
 
@@ -858,6 +886,37 @@ private fun parseInlineFileChangeStats(trimmed: String): Pair<Int, Int>? {
         (match.groupValues.getOrNull(2)?.toIntOrNull() ?: 0)
 }
 
+private fun summarizeFileChangeMessages(messages: List<AgentMessage>): FileChangeStats {
+    val entryStats = linkedMapOf<String, FileChangeEntry>()
+    var additions = 0
+    var deletions = 0
+    messages.forEach { message ->
+        val stats = fileChangeStats(message.detailText.ifBlank { message.text })
+        additions += stats.additions
+        deletions += stats.deletions
+        stats.entries.forEach { entry ->
+            val existing = entryStats[entry.path]
+            entryStats[entry.path] = if (existing == null) {
+                entry
+            } else {
+                existing.copy(
+                    additions = existing.additions + entry.additions,
+                    deletions = existing.deletions + entry.deletions,
+                )
+            }
+        }
+    }
+    val entries = entryStats.values.toList()
+    val summaryAdditions = entries.sumOf { it.additions }
+    val summaryDeletions = entries.sumOf { it.deletions }
+    return FileChangeStats(
+        files = entries.map { it.path },
+        additions = if (summaryAdditions > 0 || summaryDeletions > 0) summaryAdditions else additions,
+        deletions = if (summaryAdditions > 0 || summaryDeletions > 0) summaryDeletions else deletions,
+        entries = entries,
+    )
+}
+
 private fun String.compactDetailTitle(limit: Int = 96): String {
     val singleLine = trim().replace(Regex("\\s+"), " ")
     if (singleLine.length <= limit) return singleLine
@@ -871,23 +930,20 @@ private fun LightweightDetailHeader(
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
     modifier: Modifier = Modifier,
+    icon: ImageVector = Icons.Default.Description,
 ) {
-    val hapticView = LocalView.current
     val strings = LocalAppStrings.current
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable(role = Role.Button) {
-                hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                onToggleExpanded()
-            }
+            .hapticClickable(role = Role.Button, onClick = onToggleExpanded)
             .padding(horizontal = 2.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Icon(
-            Icons.Default.Description,
+            icon,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.66f),
             modifier = Modifier.size(15.dp),
@@ -1015,6 +1071,11 @@ private fun DetailGroupBubble(
                     subtitle = latestTitle,
                     expanded = expanded,
                     onToggleExpanded = { expanded = !expanded },
+                    icon = when (kind) {
+                        DetailGroupKind.Command -> Icons.Default.Terminal
+                        DetailGroupKind.FileChange -> Icons.Default.Description
+                        DetailGroupKind.Mixed -> Icons.Default.TaskAlt
+                    }
                 )
                 AnimatedVisibility(
                     visible = expanded,
@@ -1028,12 +1089,188 @@ private fun DetailGroupBubble(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         messages.forEachIndexed { index, message ->
-                            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.48f))
+                            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.34f))
                             DetailMessageCard(message, onOpenDiffReview)
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun FileChangeSummaryCard(
+    messages: List<AgentMessage>,
+    metrics: ConversationLayoutMetrics,
+    onOpenDiffReview: () -> Unit,
+    onUndoFileChanges: (List<String>) -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    var expanded by remember(messages.firstOrNull()?.stableKey(), messages.lastOrNull()?.stableKey(), messages.size) { mutableStateOf(false) }
+    val summary = remember(messages) { summarizeFileChangeMessages(messages) }
+    val entries = summary.entries.ifEmpty { summary.files.map { FileChangeEntry(it) } }
+    val files = summary.files
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start,
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.36f)),
+            modifier = Modifier.fillMaxWidth(metrics.detailBubbleWidth),
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    EasyCodexIconBubble(
+                        icon = Icons.Default.Description,
+                        modifier = Modifier.size(36.dp),
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(1.dp),
+                    ) {
+                        Text(
+                            strings.filesChangedCount(files.size.coerceAtLeast(1)),
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            files.firstOrNull().orEmpty().ifBlank { strings.fileChangeLabel },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    FileChangeStatText(summary.additions, summary.deletions)
+                }
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    AssistChip(
+                        onClick = rememberHapticClick { expanded = !expanded },
+                        leadingIcon = {
+                            Icon(
+                                if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        },
+                        label = { Text(if (expanded) strings.detailsCollapse else "打开详细") },
+                    )
+                    AssistChip(
+                        onClick = rememberHapticClick { onUndoFileChanges(files) },
+                        leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        label = { Text("撤销") },
+                    )
+                    AssistChip(
+                        onClick = rememberHapticClick(onOpenDiffReview),
+                        leadingIcon = { Icon(Icons.Default.TaskAlt, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        label = { Text(strings.reviewChanges) },
+                    )
+                }
+
+                AnimatedVisibility(
+                    visible = expanded,
+                    enter = easyCodexExpandVertically(expandFrom = Alignment.Top),
+                    exit = easyCodexShrinkVertically(shrinkTowards = Alignment.Top),
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        entries.take(8).forEachIndexed { index, entry ->
+                            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.32f))
+                            FileChangeRow(entry)
+                        }
+                        if (entries.size > 8) {
+                            Text(
+                                "+${entries.size - 8}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubAgentActivityRow(
+    message: AgentMessage,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val clickable = message.subAgentThreadId.isNotBlank()
+    val title = remember(message.text, message.subAgentStatus) {
+        val normalized = message.subAgentStatus.trim().lowercase()
+        when {
+            normalized in setOf("failed", "errored") -> "子代理失败"
+            normalized in setOf("inprogress", "running", "pendinginit") -> "子代理正在工作"
+            message.text.isNotBlank() -> message.text.lineSequence().firstOrNull { it.isNotBlank() } ?: "子代理已完成"
+            else -> "子代理已完成"
+        }
+    }
+    val subtitle = remember(message.subAgentNickname, message.subAgentRole, message.subAgentThreadId) {
+        listOf(message.subAgentNickname, message.subAgentRole, message.subAgentThreadId.takeLast(8))
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(" · ")
+    }
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .hapticClickable(enabled = clickable, role = Role.Button, onClick = onOpen)
+            .padding(horizontal = 2.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(
+            Icons.Default.Description,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.66f),
+            modifier = Modifier.size(15.dp),
+        )
+        Text(
+            title,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.86f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (subtitle.isNotBlank()) {
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(0.8f, fill = false),
+            )
+        }
+        if (clickable) {
+            Icon(
+                Icons.Default.KeyboardArrowDown,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f),
+                modifier = Modifier.size(18.dp),
+            )
         }
     }
 }
@@ -1046,6 +1283,7 @@ private fun MessageBubble(
     apiKey: String = "",
     onOpenPlan: () -> Unit = {},
     onOpenDiffReview: () -> Unit = {},
+    onOpenSubAgent: () -> Unit = {},
 ) {
     val strings = LocalAppStrings.current
     val isUser = message.role == "user" || message.type == "user"
@@ -1069,6 +1307,19 @@ private fun MessageBubble(
         }
         return
     }
+    if (message.type == "sub_agent") {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Start,
+        ) {
+            SubAgentActivityRow(
+                message = message,
+                onOpen = onOpenSubAgent,
+                modifier = Modifier.fillMaxWidth(metrics.detailBubbleWidth),
+            )
+        }
+        return
+    }
     if (isDetail) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1081,12 +1332,13 @@ private fun MessageBubble(
         return
     }
     val container = when {
-        isUser -> MaterialTheme.colorScheme.surfaceContainerHighest
-        message.type == "plan" -> MaterialTheme.colorScheme.surfaceContainer
+        isUser -> MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.72f)
+        message.type == "plan" -> MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.74f)
+        isPlainAssistant -> MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.5f)
         else -> Color.Transparent
     }
     val contentPadding = when {
-        isPlainAssistant -> PaddingValues(horizontal = 2.dp, vertical = 2.dp)
+        isPlainAssistant -> PaddingValues(horizontal = 8.dp, vertical = 6.dp)
         isUser -> PaddingValues(horizontal = metrics.bubblePadding, vertical = metrics.bubblePadding)
         else -> PaddingValues(metrics.bubblePadding)
     }
@@ -1123,7 +1375,7 @@ private fun MessageBubble(
                     ),
                 color = container,
                 border = if (isUser || message.type == "plan") {
-                    BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (isUser) 0.28f else 0.72f))
+                    BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (isUser) 0.18f else 0.42f))
                 } else {
                     null
                 },
@@ -1131,7 +1383,7 @@ private fun MessageBubble(
             ) {
                 Column(
                     modifier = Modifier.padding(contentPadding),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (isPlainAssistant) 6.dp else 6.dp),
                 ) {
                     if (totalDurationLabel.isNotBlank()) {
                         ProcessedDurationHeader(totalDurationLabel)
@@ -1143,6 +1395,7 @@ private fun MessageBubble(
                         message.type == "plan" -> PlanMessageCard(message, onOpenPlan)
                         else -> MarkdownMessageContent(
                             text = message.text.ifBlank { "..." },
+                            streaming = message.streaming && isPlainAssistant,
                             relayUrl = relayUrl,
                             apiKey = apiKey,
                             modifier = if (isUser) Modifier else Modifier.fillMaxWidth(),
@@ -1207,26 +1460,30 @@ private fun ThinkingMessageContent(
     modifier: Modifier = Modifier,
 ) {
     val strings = LocalAppStrings.current
-    val label = text.trim().trimEnd('。', '.', '…').ifBlank { strings.thinkingLabel }
+    val rawLabel = text.trim().trimEnd('。', '.', '…')
+    val label = when {
+        rawLabel.startsWith("已排队") -> rawLabel
+        strings.thinkingLabel.equals("Thinking", ignoreCase = true) -> "Thinking"
+        else -> "正在思考中"
+    }
     Row(
         modifier = modifier.padding(horizontal = 2.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
         CircularProgressIndicator(
             modifier = Modifier.size(14.dp),
             strokeWidth = 2.dp,
             strokeCap = StrokeCap.Round,
             color = MaterialTheme.colorScheme.primary,
             trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
-        )
-        Text(
-            label,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
         )
     }
 }
@@ -1297,7 +1554,7 @@ private fun PlanMessageCard(message: AgentMessage, onOpenPlan: () -> Unit) {
     val displayText = remember(message.text) {
         planDisplayText(message.text).ifBlank { strings.planMessageFallback }
     }
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Icon(
                 Icons.Default.TaskAlt,
@@ -1307,7 +1564,7 @@ private fun PlanMessageCard(message: AgentMessage, onOpenPlan: () -> Unit) {
             )
             Text(
                 if (actionable) strings.planReady else strings.planPreparing,
-                style = MaterialTheme.typography.titleSmall,
+                style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
         }
@@ -1322,7 +1579,7 @@ private fun PlanMessageCard(message: AgentMessage, onOpenPlan: () -> Unit) {
 private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Unit = {}) {
     val strings = LocalAppStrings.current
     var expanded by remember(message.stableKey()) { mutableStateOf(detailMessageDefaultExpanded(message)) }
-    val detail = remember(message.text, message.type, strings) { message.detailDisplay(strings) }
+    val detail = remember(message.text, message.detailText, message.type, strings) { message.detailDisplay(strings) }
     val body = remember(detail.body, message.type) {
         if (message.type == "file_change") cleanFileChangeBody(detail.body) else detail.body
     }.ifBlank { "..." }
@@ -1369,19 +1626,19 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
             ) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     AssistChip(
-                        onClick = { copyText(detail.body.ifBlank { message.text }) },
+                        onClick = rememberHapticClick { copyText(detail.body.ifBlank { message.text }) },
                         leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp)) },
                         label = { Text(if (bodyIsLong) strings.copyFullText else strings.copyContent) },
                     )
                     if (message.type == "file_change") {
                         AssistChip(
-                            onClick = onOpenDiffReview,
+                            onClick = rememberHapticClick(onOpenDiffReview),
                             leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(18.dp)) },
                             label = { Text(strings.viewFullDiff) },
                         )
                         detail.files.take(3).forEach { path ->
                             AssistChip(
-                                onClick = { copyText(path) },
+                                onClick = rememberHapticClick { copyText(path) },
                                 leadingIcon = { FileTypeIcon(path, modifier = Modifier.size(18.dp)) },
                                 label = { Text(path.substringAfterLast('/').substringAfterLast('\\'), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             )
@@ -1389,15 +1646,15 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
                     }
                 }
                 Surface(
-                    color = MaterialTheme.colorScheme.surface,
-                    shape = RoundedCornerShape(8.dp),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.48f),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.46f)),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
                         visibleBody,
                         modifier = Modifier
-                            .padding(10.dp),
+                            .padding(horizontal = 11.dp, vertical = 10.dp),
                         style = MaterialTheme.typography.bodyMedium,
                         fontFamily = FontFamily.Monospace,
                     )
@@ -1416,7 +1673,6 @@ private fun FileChangeCard(
     onOpenDiffReview: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
-    val hapticView = LocalView.current
     val entries = detail.fileEntries.ifEmpty { detail.files.map { FileChangeEntry(it) } }
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -1426,10 +1682,7 @@ private fun FileChangeCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
-                .clickable(role = Role.Button) {
-                    hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    onToggleExpanded()
-                }
+                .hapticClickable(role = Role.Button, onClick = onToggleExpanded)
                 .padding(horizontal = 2.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1469,12 +1722,12 @@ private fun FileChangeCard(
             ) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     AssistChip(
-                        onClick = onOpenDiffReview,
+                        onClick = rememberHapticClick(onOpenDiffReview),
                         leadingIcon = { Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(16.dp)) },
                         label = { Text(strings.viewFullDiff) },
                     )
                     AssistChip(
-                        onClick = onCopyText,
+                        onClick = rememberHapticClick(onCopyText),
                         leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp)) },
                         label = { Text(strings.copyContent) },
                     )
@@ -1540,29 +1793,66 @@ private fun FileChangeStatText(additions: Int, deletions: Int) {
 fun MarkdownMessageContent(
     text: String,
     previewLongContent: Boolean = false,
+    streaming: Boolean = false,
     relayUrl: String = "",
     apiKey: String = "",
     modifier: Modifier = Modifier.fillMaxWidth(),
 ) {
+    val displayText = rememberSmoothStreamingText(text, streaming)
     var expanded by remember(text) { mutableStateOf(false) }
-    val isLong = previewLongContent && textNeedsPreview(text)
-    val visibleText = remember(text, expanded, previewLongContent) {
-        if (isLong && !expanded) messagePreviewText(text) else text
+    val isLong = previewLongContent && textNeedsPreview(displayText)
+    val visibleText = remember(displayText, expanded, previewLongContent) {
+        if (isLong && !expanded) messagePreviewText(displayText) else displayText
     }
     val document = remember(visibleText) { parseMarkdownForMobile(visibleText) }
     Column(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         MarkdownNodeChildren(document, relayUrl, apiKey)
         if (isLong) {
             OutlinedButton(
-                onClick = { expanded = !expanded },
+                onClick = rememberHapticClick { expanded = !expanded },
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (expanded) LocalAppStrings.current.collapse else LocalAppStrings.current.expandMore)
             }
         }
+    }
+}
+
+@Composable
+private fun rememberSmoothStreamingText(targetText: String, streaming: Boolean): String {
+    var displayedText by remember { mutableStateOf(if (streaming) "" else targetText) }
+    LaunchedEffect(targetText, streaming) {
+        if (!streaming) {
+            displayedText = targetText
+            return@LaunchedEffect
+        }
+        if (targetText.isBlank()) {
+            displayedText = targetText
+            return@LaunchedEffect
+        }
+        if (displayedText.isBlank() || !targetText.startsWith(displayedText)) {
+            displayedText = targetText.take(minOf(displayedText.length, targetText.length))
+        }
+        while (displayedText.length < targetText.length) {
+            val remaining = targetText.length - displayedText.length
+            val step = streamingRevealStep(remaining)
+            displayedText = targetText.take(displayedText.length + step)
+            delay(STREAMING_REVEAL_FRAME_MS)
+        }
+    }
+    return displayedText
+}
+
+private fun streamingRevealStep(remainingChars: Int): Int {
+    return when {
+        remainingChars > 1_200 -> 220
+        remainingChars > 480 -> 96
+        remainingChars > 180 -> 44
+        remainingChars > 60 -> 22
+        else -> 10
     }
 }
 
@@ -1614,6 +1904,7 @@ private fun MarkdownParagraphText(text: AnnotatedString, modifier: Modifier = Mo
         modifier = modifier,
         style = MaterialTheme.typography.bodyLarge,
         lineHeight = 24.sp,
+        letterSpacing = 0.2.sp,
     )
 }
 
@@ -1622,12 +1913,12 @@ private fun MarkdownHeading(node: Heading) {
     Text(
         markdownInlineFrom(node),
         style = when (node.level) {
-            1 -> MaterialTheme.typography.titleLarge
-            2 -> MaterialTheme.typography.titleMedium
+            1 -> MaterialTheme.typography.titleMedium
+            2 -> MaterialTheme.typography.titleSmall
             else -> MaterialTheme.typography.titleSmall
         },
         fontWeight = FontWeight.SemiBold,
-        lineHeight = 26.sp,
+        lineHeight = 24.sp,
     )
 }
 
@@ -1635,16 +1926,16 @@ private fun MarkdownHeading(node: Heading) {
 private fun MarkdownBlockQuote(node: BlockQuote, relayUrl: String, apiKey: String, listDepth: Int) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Surface(
-            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.34f),
             shape = RoundedCornerShape(2.dp),
             modifier = Modifier.width(3.dp).heightIn(min = 28.dp),
         ) {}
         Column(
             modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             MarkdownNodeChildren(node, relayUrl, apiKey, listDepth)
         }
@@ -1660,7 +1951,7 @@ private fun MarkdownList(
     start: Int,
     listDepth: Int,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(if (node.isTight) 2.dp else 6.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(if (node.isTight) 1.dp else 4.dp)) {
         var child = node.firstChild
         var index = 0
         while (child != null) {
@@ -1689,29 +1980,75 @@ private fun MarkdownListItem(
             .fillMaxWidth()
             .padding(start = (listDepth * 12).dp),
         verticalAlignment = Alignment.Top,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        if (listDepth > 0) {
+            Surface(
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                modifier = Modifier
+                    .padding(top = 4.dp, bottom = 4.dp, end = 2.dp)
+                    .width(1.5.dp)
+                    .heightIn(min = 16.dp)
+            ) {}
+        }
         Text(
             when {
                 taskMarker != null -> if (taskMarker.isChecked()) "[x]" else "[ ]"
                 ordered -> "$number."
-                else -> "•"
+                else -> when (listDepth % 3) {
+                    0 -> "•"
+                    1 -> "◦"
+                    else -> "▪"
+                }
             },
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.bodyMedium,
             fontFamily = if (taskMarker != null) FontFamily.Monospace else null,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
         )
         if (leadingFileReference != null) {
-            FileTypeIcon(
+            CompactFileReferenceMarker(
                 leadingFileReference.path,
                 modifier = Modifier.padding(top = 3.dp),
             )
         }
         Column(
             modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             MarkdownNodeChildren(item, relayUrl, apiKey, listDepth + 1)
+        }
+    }
+}
+
+@Composable
+private fun CompactFileReferenceMarker(path: String, modifier: Modifier = Modifier) {
+    val spec = fileTypeBadgeSpec(path)
+    if (spec.generic) {
+        Icon(
+            Icons.Default.Description,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f),
+            modifier = modifier.size(14.dp),
+        )
+        return
+    }
+    val accent = Color(spec.background)
+    Surface(
+        color = accent.copy(alpha = 0.10f),
+        contentColor = accent,
+        shape = RoundedCornerShape(3.dp),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.34f)),
+        modifier = modifier.size(16.dp),
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(
+                spec.label.take(2),
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 6.sp,
+                lineHeight = 8.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+            )
         }
     }
 }
@@ -1796,17 +2133,17 @@ private fun MarkdownAstTableBlock(table: TableBlock) {
         }
     }
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+        color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.42f),
         shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.36f)),
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState()),
     ) {
-        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.padding(7.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             rows.forEachIndexed { rowIndex, row ->
-                if (rowIndex > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (rowIndex > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.36f))
+                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     columnWidths.forEachIndexed { columnIndex, width ->
                         val cell = row.getOrNull(columnIndex)
                         Text(
@@ -1828,7 +2165,7 @@ private fun markdownInlineFrom(node: Node): AnnotatedString {
     val styles = MarkdownInlineStyles(
         code = SpanStyle(
             fontFamily = FontFamily.Monospace,
-            background = MaterialTheme.colorScheme.surfaceVariant,
+            background = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
         ),
         link = SpanStyle(
             color = MaterialTheme.colorScheme.primary,
@@ -2053,11 +2390,11 @@ private fun MarkdownCodeBlock(block: MarkdownBlock) {
         }
     }
     val codeScroll = rememberScrollState()
-    val codeBlockShape = RoundedCornerShape(10.dp)
+    val codeBlockShape = RoundedCornerShape(12.dp)
     Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.65f),
         shape = codeBlockShape,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
         modifier = Modifier
             .fillMaxWidth()
             .clip(codeBlockShape),
@@ -2066,7 +2403,7 @@ private fun MarkdownCodeBlock(block: MarkdownBlock) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 12.dp, top = 6.dp, end = 6.dp, bottom = 6.dp),
+                    .padding(start = 14.dp, top = 6.dp, end = 8.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
@@ -2074,27 +2411,28 @@ private fun MarkdownCodeBlock(block: MarkdownBlock) {
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.labelMedium,
                     fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                IconButton(onClick = { copyText(block.text) }, modifier = Modifier.size(32.dp)) {
+                IconButton(onClick = rememberHapticClick { copyText(block.text) }, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.ContentCopy, contentDescription = strings.copyCode, modifier = Modifier.size(18.dp))
                 }
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.56f))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(codeScroll)
-                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
             ) {
                 Text(
                     block.text.ifBlank { "..." },
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 13.sp,
-                    lineHeight = 20.sp,
+                    lineHeight = 19.sp,
                     color = MaterialTheme.colorScheme.onSurface,
                     softWrap = false,
                 )

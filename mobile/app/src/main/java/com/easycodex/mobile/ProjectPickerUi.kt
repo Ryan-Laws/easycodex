@@ -5,7 +5,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -97,6 +96,11 @@ private data class DrawerAgentItem(
             "streaming",
         )
     }
+
+    fun isWaitingForReply(): Boolean {
+        return activity.orEmpty().contains("等待你回答") ||
+            activity.orEmpty().contains("等待回复")
+    }
 }
 
 private fun isDefaultRelativeProjectPath(path: String): Boolean {
@@ -129,6 +133,12 @@ private fun AdaptiveAgentDrawerSheet(
             content = content,
         )
     }
+
+}
+
+private fun Agent.isWaitingForReply(): Boolean {
+    return activity.orEmpty().contains("等待你回答") ||
+        activity.orEmpty().contains("等待回复")
 }
 
 @Composable
@@ -145,10 +155,6 @@ fun AgentDrawer(
     onDeleteAgent: (String) -> Unit,
 ) {
     val strings = LocalAppStrings.current
-    val hapticView = LocalView.current
-    fun performTapHaptic() {
-        hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-    }
     var query by remember { mutableStateOf("") }
     var searchExpanded by remember { mutableStateOf(false) }
     var debouncedQuery by remember { mutableStateOf("") }
@@ -239,8 +245,7 @@ fun AgentDrawer(
                 Text(strings.easyCodexAgents, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             IconButton(
-                onClick = {
-                    performTapHaptic()
+                onClick = rememberHapticClick {
                     searchExpanded = !searchExpanded
                     if (!searchExpanded) query = ""
                 },
@@ -280,10 +285,7 @@ fun AgentDrawer(
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 6.dp)
                 .clip(RoundedCornerShape(18.dp))
-                .clickable(role = Role.Button) {
-                    performTapHaptic()
-                    onHome()
-                },
+                .hapticClickable(role = Role.Button, onClick = onHome),
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -418,10 +420,7 @@ fun AgentDrawer(
                                 DrawerAgentProjectRow(
                                     agent = agent,
                                     selected = agent.id == activeAgentId,
-                                    onClick = {
-                                        performTapHaptic()
-                                        onSelect(agent.id)
-                                    },
+                                    onClick = { onSelect(agent.id) },
                                     onDelete = { onDeleteAgent(agent.id) },
                                 )
                             }
@@ -452,7 +451,7 @@ private fun DrawerAgentProjectRow(
             .fillMaxWidth()
             .padding(start = 28.dp, end = 12.dp, top = 2.dp, bottom = 2.dp)
             .clip(RoundedCornerShape(16.dp))
-            .clickable(role = Role.Button, onClick = onClick),
+            .hapticClickable(role = Role.Button, onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -488,7 +487,9 @@ private fun DrawerAgentProjectRow(
                 overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.width(8.dp))
-            if (agent.isBusy()) {
+            if (agent.isWaitingForReply()) {
+                WaitingReplyPill()
+            } else if (agent.isBusy()) {
                 TaskBusyIndicator(modifier = Modifier.weight(0.72f))
             } else {
                 Text(
@@ -552,7 +553,7 @@ fun ProjectHeader(
         }
         Spacer(Modifier.width(8.dp))
         IconButton(
-            onClick = onToggle,
+        onClick = rememberHapticClick(onToggle),
             modifier = Modifier.size(36.dp),
         ) {
             Icon(
@@ -566,7 +567,7 @@ fun ProjectHeader(
         }
         if (showCreate) {
             IconButton(
-                onClick = onCreate,
+                onClick = rememberHapticClick(onCreate),
                 modifier = Modifier.size(36.dp),
             ) {
                 Icon(
@@ -596,7 +597,7 @@ fun AgentProjectRow(
             .fillMaxWidth()
             .padding(start = 28.dp, end = 12.dp, top = 2.dp, bottom = 2.dp)
             .clip(RoundedCornerShape(16.dp))
-            .clickable(role = Role.Button, onClick = onClick),
+            .hapticClickable(role = Role.Button, onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -621,7 +622,9 @@ fun AgentProjectRow(
                 overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.width(8.dp))
-            if (agent.isBusy()) {
+            if (agent.isWaitingForReply()) {
+                WaitingReplyPill()
+            } else if (agent.isBusy()) {
                 TaskBusyIndicator(modifier = Modifier.weight(0.72f))
             } else {
                 Text(
@@ -651,7 +654,7 @@ private fun AgentTaskActions(
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
     IconButton(
-        onClick = { menuExpanded = true },
+        onClick = rememberHapticClick { menuExpanded = true },
         modifier = Modifier.size(36.dp),
     ) {
         Icon(
@@ -764,7 +767,7 @@ fun HomeTaskScreen(
                         .clip(RoundedCornerShape(18.dp))
                         .then(
                             if (canChangeProject) {
-                                Modifier.clickable(role = Role.Button) { showProjectPicker = true }
+                                Modifier.hapticClickable(role = Role.Button) { showProjectPicker = true }
                             } else {
                                 Modifier
                             },
@@ -828,6 +831,25 @@ private fun TaskBusyIndicator(modifier: Modifier = Modifier) {
             modifier = Modifier.size(15.dp),
             strokeWidth = 2.dp,
             color = MaterialTheme.colorScheme.primary,
+        )
+    }
+}
+
+@Composable
+private fun WaitingReplyPill(modifier: Modifier = Modifier) {
+    Surface(
+        color = Color(0xFFBFEFD3),
+        contentColor = Color(0xFF057A3A),
+        shape = RoundedCornerShape(999.dp),
+        modifier = modifier,
+    ) {
+        Text(
+            "等待回复",
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -1027,7 +1049,7 @@ private fun WorktreePickerRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable(role = Role.Button, onClick = onClick),
+            .hapticClickable(role = Role.Button, onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -1075,7 +1097,7 @@ private fun DirectoryPickerRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable(role = Role.Button, onClick = onClick),
+            .hapticClickable(role = Role.Button, onClick = onClick),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),

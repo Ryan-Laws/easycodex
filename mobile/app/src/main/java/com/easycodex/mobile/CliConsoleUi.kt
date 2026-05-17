@@ -1,10 +1,8 @@
 package com.easycodex.mobile
 
 import android.content.ClipData
-import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,7 +50,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -628,7 +625,6 @@ private fun CliRuntimeChoiceDialog(
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val hapticView = LocalView.current
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -640,10 +636,7 @@ private fun CliRuntimeChoiceDialog(
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable(role = Role.Button) {
-                                hapticView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                                onSelect(option.value)
-                            },
+                            .hapticClickable(role = Role.Button) { onSelect(option.value) },
                     ) {
                         Text(
                             option.label,
@@ -657,7 +650,7 @@ private fun CliRuntimeChoiceDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = rememberHapticClick(onDismiss)) {
                 Text("Close")
             }
         },
@@ -693,7 +686,7 @@ private fun CliHelpDialog(onDismiss: () -> Unit) {
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = rememberHapticClick(onDismiss)) {
                 Text("Close")
             }
         },
