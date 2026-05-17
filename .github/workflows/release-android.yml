@@ -182,4 +182,4 @@ jobs:
               gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file" || gh release view "$tag" >/dev/null
             fi
           fi
-          gh release upload "$tag" "${{ steps.sign.outputs.apk }}" "${{ steps.sign.outputs.apk }}.sha256"
+          gh release upload "$tag" "${{ steps.sign.outputs.apk }}" "${{ steps.sign.outputs.apk }}.sha256" --clobber
