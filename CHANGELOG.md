@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.1.7 - 2026-05-18
+
+### Added
+
+- Added cross-platform desktop relay workspace discovery so first launch uses a specific project folder without embedding a developer machine path.
+- Added relay and desktop workspace safety tests covering profile, system, sibling-prefix, and realpath/junction cases.
+- Added update-chain tests for Android APK asset selection, agent release checks, and desktop update asset verification.
+
+### Fixed
+
+- Fixed desktop relay startup being blocked when a stale default workspace pointed at a user home directory.
+- Hardened relay workspace validation so home, Desktop, Documents, Downloads, system, and application data folders are rejected even through realpath resolution.
+- Fixed packaged desktop relay builds to require the Vite renderer and exclude the legacy renderer fallback from release artifacts.
+- Rebuilt relay bundle staging and desktop runtime checks so stale or incomplete bundled relay files are regenerated before packaging.
+- Fixed Android update detection to use the installed app version and only accept trusted EasyCodex mobile APK assets from official GitHub releases.
+
 ## 0.1.6 - 2026-05-17
 
 ### Added
