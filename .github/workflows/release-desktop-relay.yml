@@ -131,19 +131,34 @@ jobs:
               gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file"
             fi
           fi
-          mapfile -d '' assets < <(find desktop-relay/release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.blockmap' \) -print0 | sort -z)
+          assets=()
+          while IFS= read -r -d '' asset; do
+            assets+=("$asset")
+          done < <(find desktop-relay/release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.blockmap' \) -print0 | sort -z)
           if [[ ${#assets[@]} -eq 0 ]]; then
             echo "No desktop release assets found." >&2
             exit 1
           fi
+          upload_assets=()
           for asset in "${assets[@]}"; do
             name="$(basename "$asset")"
             if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
-              echo "Release asset already exists and will not be clobbered: $name" >&2
-              exit 1
+              expected="sha256:$(sha256sum "$asset" | awk '{print $1}')"
+              actual="$(gh release view "$tag" --json assets --jq ".assets[] | select(.name == \"$name\") | .digest")"
+              if [[ "$actual" != "$expected" ]]; then
+                echo "Release asset already exists with a different digest: $name" >&2
+                echo "Expected: $expected" >&2
+                echo "Actual:   ${actual:-<missing>}" >&2
+                exit 1
+              fi
+              echo "Release asset already exists with matching digest: $name"
+            else
+              upload_assets+=("$asset")
             fi
           done
-          gh release upload "$tag" "${assets[@]}"
+          if [[ ${#upload_assets[@]} -gt 0 ]]; then
+            gh release upload "$tag" "${upload_assets[@]}"
+          fi
           for asset in "${assets[@]}"; do
             name="$(basename "$asset")"
             expected="sha256:$(sha256sum "$asset" | awk '{print $1}')"
