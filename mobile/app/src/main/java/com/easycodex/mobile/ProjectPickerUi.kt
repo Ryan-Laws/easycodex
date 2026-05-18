@@ -75,6 +75,7 @@ private data class DrawerAgentItem(
     val projectPath: String,
     val status: String,
     val activity: String?,
+    val preview: String,
     val updatedAt: Long,
     val pinned: Boolean,
     val hasAlert: Boolean,
@@ -100,6 +101,15 @@ private data class DrawerAgentItem(
     fun isWaitingForReply(): Boolean {
         return activity.orEmpty().contains("等待你回答") ||
             activity.orEmpty().contains("等待回复")
+    }
+
+    fun mobilePriority(): Int {
+        return when {
+            isWaitingForReply() -> 0
+            hasAlert -> 1
+            isBusy() -> 2
+            else -> 3
+        }
     }
 }
 
@@ -175,6 +185,12 @@ fun AgentDrawer(
                     ?: CONVERSATION_PROJECT_PATH,
                 status = agent.status,
                 activity = agent.activity,
+                preview = agent.preview.orEmpty().ifBlank {
+                    agent.messages.asReversed()
+                        .firstOrNull { it.text.isNotBlank() && it.type != "thinking" }
+                        ?.text
+                        .orEmpty()
+                },
                 updatedAt = agent.updatedAt,
                 pinned = agent.pinned,
                 hasAlert = agent.id in alertAgentIds,
@@ -186,7 +202,7 @@ fun AgentDrawer(
             drawerAgents
         } else {
             drawerAgents.filter { agent ->
-                listOf(agent.name, agent.projectPath, agent.status, agent.activity.orEmpty())
+                listOf(agent.name, agent.projectPath, agent.status, agent.activity.orEmpty(), agent.preview)
                     .any { it.lowercase(Locale.ROOT).contains(normalizedQuery) }
             }
         }
@@ -194,7 +210,7 @@ fun AgentDrawer(
     val pinnedAgents = remember(visibleAgents) {
         visibleAgents
             .filter { it.pinned }
-            .sortedByDescending { it.position }
+            .sortedWith(compareBy<DrawerAgentItem> { it.mobilePriority() }.thenByDescending { it.updatedAt })
     }
     val groupedAgents = remember(visibleAgents, projectOptions, normalizedQuery) {
         val visibleProjectOptions = projectOptions
@@ -206,6 +222,7 @@ fun AgentDrawer(
             }
         val groupedTasks = visibleAgents
             .filterNot { it.pinned }
+            .sortedWith(compareBy<DrawerAgentItem> { it.mobilePriority() }.thenByDescending { it.updatedAt })
             .groupBy { normalizePathKey(it.projectPath) }
         val groupedTaskPaths = visibleAgents
             .filterNot { it.pinned }
@@ -873,11 +890,15 @@ fun DirectoryPickerDialog(
     var customPath by remember(initialPath) { mutableStateOf(initialPath) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var loadRequestSeq by remember { mutableStateOf(0) }
 
     fun load(path: String?) {
+        loadRequestSeq += 1
+        val requestSeq = loadRequestSeq
         loading = true
         error = null
         onBrowseDirectories(path) { next, nextError ->
+            if (requestSeq != loadRequestSeq) return@onBrowseDirectories
             loading = false
             if (next != null) {
                 listing = next

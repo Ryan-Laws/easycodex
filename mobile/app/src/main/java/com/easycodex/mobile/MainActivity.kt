@@ -95,12 +95,14 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -187,6 +189,8 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.DateFormat
+import java.util.Date
 import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.time.Instant
@@ -222,7 +226,8 @@ const val PLAN_MODE_PROMPT = """
 1. 先优化并整理一个可执行计划。
 2. 计划可以很详细，包含关键步骤、风险点、验证方式和需要确认的问题。
 3. 不要开始执行、不要修改文件、不要运行命令。
-4. 计划最后请明确询问我是否要开始这个计划。
+4. 请把完整计划放在 <proposed_plan> 和 </proposed_plan> 标签之间，方便手机端识别。
+5. 计划最后请明确询问我是否要开始这个计划。
 
 需求：
 """
@@ -352,6 +357,129 @@ private fun buildSystemVoiceInputIntent(context: Context, prompt: String): Inten
     } else {
         baseIntent
     }
+}
+
+@Composable
+private fun HostSwitcherAction(
+    profiles: List<RelayHostProfile>,
+    activeHostId: String,
+    health: HostHealthState,
+    onSelect: (String) -> Unit,
+    onRefresh: () -> Unit,
+) {
+    val strings = LocalAppStrings.current
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(
+                Icons.Default.Wifi,
+                contentDescription = strings.hostSwitcherContentDescription,
+                tint = if (health.online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = {
+                    Column {
+                        Text(if (health.online) strings.hostOnline else strings.hostOffline)
+                        Text(
+                            listOf(health.hostname, health.platform, health.workspaceRoot)
+                                .filter { it.isNotBlank() }
+                                .joinToString(" · ")
+                                .ifBlank { health.error.orEmpty() },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (health.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                },
+                leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                onClick = {
+                    onRefresh()
+                    expanded = false
+                },
+            )
+            HorizontalDivider()
+            profiles.ifEmpty {
+                listOf(RelayHostProfile(relayHostIdFor(DEFAULT_RELAY_URL), relayHostNameFor(DEFAULT_RELAY_URL), DEFAULT_RELAY_URL, ""))
+            }.forEach { profile ->
+                val active = profile.id == activeHostId
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(
+                                if (active) "✓ ${profile.name}" else profile.name,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                listOf(
+                                    profile.hostname,
+                                    profile.platform,
+                                    profile.workspaceRoot.ifBlank { profile.relayUrl },
+                                )
+                                    .filter { it.isNotBlank() }
+                                    .joinToString(" · "),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            val metadata = listOf(
+                                formatHostSwitcherLastSeen(profile.lastSeen, strings),
+                                profile.warnings.firstOrNull()?.let { "${hostSwitcherWarningLabel(strings)}: $it" }.orEmpty(),
+                            ).filter { it.isNotBlank() }.joinToString(" · ")
+                            if (metadata.isNotBlank()) {
+                                Text(
+                                    metadata,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (profile.warnings.isNotEmpty()) {
+                                        MaterialTheme.colorScheme.error
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(profile.id)
+                    },
+                )
+            }
+            if (health.warnings.isNotEmpty() || health.error != null) {
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            health.error ?: health.warnings.first(),
+                            color = if (health.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    enabled = false,
+                    onClick = {},
+                )
+            }
+        }
+    }
+}
+
+private fun hostSwitcherWarningLabel(strings: AppStrings): String {
+    return strings.hostWarningLabel
+}
+
+private fun formatHostSwitcherLastSeen(lastSeen: Long, strings: AppStrings): String {
+    if (lastSeen <= 0L) return ""
+    val label = strings.hostLastSeenLabel
+    return runCatching {
+        "$label ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(lastSeen))}"
+    }.getOrDefault("")
 }
 
 private fun voiceRecognizerPriority(packageName: String): Int {
@@ -606,6 +734,13 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                 },
                                 actions = {
                                     if (!showCliMode) {
+                                        HostSwitcherAction(
+                                            profiles = controller.relayHostProfiles.toList(),
+                                            activeHostId = controller.activeRelayHostId,
+                                            health = controller.hostHealth,
+                                            onSelect = { controller.selectRelayHost(it) },
+                                            onRefresh = { controller.refreshHostHealth() },
+                                        )
                                         IconButton(onClick = rememberHapticClick { showCliMode = true }) {
                                             Icon(Icons.Default.Terminal, contentDescription = "Codex CLI")
                                         }
@@ -696,6 +831,7 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
                                     onServiceTierChange = { controller.updateActiveServiceTier(it) },
                                     onPermissionModeChange = { controller.updateActivePermissionMode(it) },
                                     onBrowseDirectories = { path, callback -> controller.browseDirectories(path, callback) },
+                                    onOpenDiffReview = { controller.openDiffReview() },
                                     onAttachFiles = { filePicker.launch("*/*") },
                                     onAttachImages = { imagePicker.launch("image/*") },
                                     onInsertEmoji = { controller.appendToInput(it) },
@@ -901,8 +1037,11 @@ fun EasyCodexApp(importedConnection: Boolean = false, initialAgentId: String? = 
             review = review,
             commitDraft = controller.gitCommitDraft,
             onSelectFile = { controller.selectDiffReviewFile(it) },
+            onToggleFileSelection = { controller.toggleDiffReviewFileSelection(it) },
+            onSetFileSelection = { controller.setDiffReviewFileSelection(it) },
             onCommitMessageChange = { controller.updateGitCommitMessage(it) },
             onCommit = { controller.commitDiffReviewDraft() },
+            onRestoreSelected = { controller.restoreDiffReviewSelection() },
             onDismiss = { controller.dismissDiffReview() },
         )
     }
@@ -1398,6 +1537,7 @@ fun MessageComposer(
     onServiceTierChange: (String) -> Unit,
     onPermissionModeChange: (String) -> Unit,
     onBrowseDirectories: (String?, (DirectoryListing?, String?) -> Unit) -> Unit,
+    onOpenDiffReview: () -> Unit = {},
     onAttachFiles: () -> Unit,
     onAttachImages: () -> Unit,
     onInsertEmoji: (String) -> Unit,
@@ -1408,10 +1548,11 @@ fun MessageComposer(
 ) {
     val strings = LocalAppStrings.current
     val text = textValue.text
-    var actionsExpanded by remember { mutableStateOf(false) }
-    var quickRepliesExpanded by remember { mutableStateOf(false) }
-    var runtimePicker by remember { mutableStateOf<RuntimePicker?>(null) }
-    var showProjectPicker by remember { mutableStateOf(false) }
+    val composerStateKey = agent?.id ?: "no-agent"
+    var actionsExpanded by remember(composerStateKey) { mutableStateOf(false) }
+    var quickRepliesExpanded by remember(composerStateKey) { mutableStateOf(false) }
+    var runtimePicker by remember(composerStateKey) { mutableStateOf<RuntimePicker?>(null) }
+    var showProjectPicker by remember(composerStateKey) { mutableStateOf(false) }
     var sendAnimationKey by remember { mutableStateOf(0) }
     val sendButtonScale = remember { Animatable(1f) }
     val sendIconTravel = remember { Animatable(0f) }
@@ -1421,6 +1562,8 @@ fun MessageComposer(
             strings.quickReplyFixAndTest,
             strings.quickReplyExplainLastError,
             strings.quickReplyContinueLastTask,
+            "请总结当前进展和下一步",
+            "改变方向：先停下来，按我下面的新要求调整",
         )
     }
     val hasComposerPayload = text.isNotBlank() || attachments.isNotEmpty()
@@ -1539,6 +1682,7 @@ fun MessageComposer(
                     onServiceTierClick = { runtimePicker = RuntimePicker.ServiceTier },
                     onPermissionModeClick = { runtimePicker = RuntimePicker.PermissionMode },
                     onProjectClick = { showProjectPicker = true },
+                    onOpenDiffReview = onOpenDiffReview,
                     onPlanModeChange = onPlanModeChange,
                     onQuickRepliesToggle = { quickRepliesExpanded = !quickRepliesExpanded },
                     onQuickReply = { prompt ->
@@ -2004,6 +2148,7 @@ private fun ComposerFloatingActions(
     onServiceTierClick: () -> Unit,
     onPermissionModeClick: () -> Unit,
     onProjectClick: () -> Unit,
+    onOpenDiffReview: () -> Unit,
     onPlanModeChange: (Boolean) -> Unit,
     onQuickRepliesToggle: () -> Unit,
     onQuickReply: (String) -> Unit,
@@ -2046,6 +2191,13 @@ private fun ComposerFloatingActions(
                 selected = quickRepliesExpanded,
                 enabled = enabled,
                 onClick = onQuickRepliesToggle,
+            )
+            ComposerActionBubble(
+                icon = Icons.Default.Description,
+                label = "查看改动",
+                detail = "Diff",
+                enabled = enabled,
+                onClick = onOpenDiffReview,
             )
             ComposerActionBubble(
                 icon = Icons.Default.AttachFile,
@@ -3104,21 +3256,21 @@ fun CreateAgentDialog(
     onCreate: (String, String, String, String, String) -> Unit,
 ) {
     val strings = LocalAppStrings.current
-    var name by remember { mutableStateOf("EasyCodex") }
-    var model by remember { mutableStateOf(initialModel.ifBlank { DEFAULT_AGENT_MODEL }) }
+    var name by remember(initialModel, initialCwd) { mutableStateOf("EasyCodex") }
+    var model by remember(initialModel, initialCwd) { mutableStateOf(initialModel.ifBlank { DEFAULT_AGENT_MODEL }) }
     val initialReasoningEffort = modelOptions.firstOrNull { it.model == initialModel }?.defaultReasoningEffort
         ?.ifBlank { DEFAULT_REASONING_EFFORT }
         ?: DEFAULT_REASONING_EFFORT
-    var reasoningEffort by remember { mutableStateOf(initialReasoningEffort) }
-    var permissionMode by remember { mutableStateOf(DEFAULT_PERMISSION_MODE) }
-    var cwd by remember { mutableStateOf(initialCwd.ifBlank { DEFAULT_AGENT_CWD }) }
+    var reasoningEffort by remember(initialModel, initialCwd) { mutableStateOf(initialReasoningEffort) }
+    var permissionMode by remember(initialModel, initialCwd) { mutableStateOf(DEFAULT_PERMISSION_MODE) }
+    var cwd by remember(initialModel, initialCwd) { mutableStateOf(initialCwd.ifBlank { DEFAULT_AGENT_CWD }) }
     val models = modelOptions.ifEmpty {
         listOf(CodexModelOption(model = model, displayName = model))
     }
     val currentReasoningOptions = models.firstOrNull { it.model == model }?.supportedReasoningEfforts
         ?.takeIf { it.isNotEmpty() }
         ?: reasoningOptions
-    var picker by remember { mutableStateOf<RuntimePicker?>(null) }
+    var picker by remember(initialModel, initialCwd) { mutableStateOf<RuntimePicker?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(strings.createEasyCodexSession) },

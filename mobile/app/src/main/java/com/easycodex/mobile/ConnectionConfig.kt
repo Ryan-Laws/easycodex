@@ -4,11 +4,16 @@ import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.Locale
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class EasyCodexConnectionConfig(
     val relayUrl: String,
     val apiKey: String,
 )
+
+const val PREF_RELAY_HOST_PROFILES = "relay_host_profiles"
+const val PREF_ACTIVE_RELAY_HOST_ID = "active_relay_host_id"
 
 fun parseEasyCodexConnectionUri(raw: String?): EasyCodexConnectionConfig? {
     val uri = runCatching { URI(raw?.trim().orEmpty()) }.getOrNull() ?: return null
@@ -32,6 +37,105 @@ fun parseEasyCodexConnectionUri(raw: String?): EasyCodexConnectionConfig? {
     return EasyCodexConnectionConfig(relayUrl = relayUrl, apiKey = apiKey)
 }
 
+fun relayHostIdFor(relayUrl: String): String {
+    val uri = runCatching { URI(relayUrl.trim()) }.getOrNull()
+    val host = uri?.host?.lowercase(Locale.ROOT).orEmpty().ifBlank { relayUrl.trim().lowercase(Locale.ROOT) }
+    val port = uri?.port?.takeIf { it > 0 }?.toString().orEmpty()
+    val scheme = uri?.scheme?.lowercase(Locale.ROOT).orEmpty()
+    return listOf(scheme, host, port).filter { it.isNotBlank() }.joinToString("_")
+        .replace(Regex("[^a-z0-9_.-]"), "_")
+        .ifBlank { "relay_host" }
+}
+
+fun relayHostNameFor(relayUrl: String): String {
+    val uri = runCatching { URI(relayUrl.trim()) }.getOrNull()
+    val host = uri?.host?.takeIf { it.isNotBlank() } ?: return "EasyCodex Relay"
+    return listOfNotNull(host, uri.port.takeIf { it > 0 }?.toString()).joinToString(":")
+}
+
+fun parseRelayHostProfiles(raw: String?): List<RelayHostProfile> {
+    if (raw.isNullOrBlank()) return emptyList()
+    val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+    return buildList {
+        for (index in 0 until array.length()) {
+            val json = array.optJSONObject(index) ?: continue
+            val relayUrl = json.optString("relayUrl").trim()
+            val apiKey = json.optString("apiKey").trim()
+            if (relayUrl.isBlank() || apiKey.isBlank()) continue
+            add(
+                RelayHostProfile(
+                    id = json.optString("id").ifBlank { relayHostIdFor(relayUrl) },
+                    name = json.optString("name").ifBlank { relayHostNameFor(relayUrl) },
+                    relayUrl = relayUrl,
+                    apiKey = apiKey,
+                    hostname = json.optString("hostname"),
+                    platform = json.optString("platform"),
+                    workspaceRoot = json.optString("workspaceRoot"),
+                    lastSeen = json.optLong("lastSeen", 0L),
+                    warnings = json.optJSONArray("warnings")?.let { warnings ->
+                        buildList {
+                            for (warningIndex in 0 until warnings.length()) {
+                                warnings.optString(warningIndex).takeIf { it.isNotBlank() }?.let(::add)
+                            }
+                        }
+                    } ?: emptyList(),
+                ),
+            )
+        }
+    }.distinctBy { it.id }
+}
+
+fun serializeRelayHostProfiles(profiles: List<RelayHostProfile>): String {
+    val array = JSONArray()
+    profiles.distinctBy { it.id }.forEach { profile ->
+        array.put(
+            JSONObject()
+                .put("id", profile.id)
+                .put("name", profile.name)
+                .put("relayUrl", profile.relayUrl)
+                .put("apiKey", profile.apiKey)
+                .put("hostname", profile.hostname)
+                .put("platform", profile.platform)
+                .put("workspaceRoot", profile.workspaceRoot)
+                .put("lastSeen", profile.lastSeen)
+                .put("warnings", JSONArray(profile.warnings)),
+        )
+    }
+    return array.toString()
+}
+
+fun upsertRelayHostProfile(profiles: List<RelayHostProfile>, profile: RelayHostProfile): List<RelayHostProfile> {
+    val next = profiles.filterNot { it.id == profile.id }.toMutableList()
+    next.add(0, profile)
+    return next
+}
+
+fun profileFromConnectionConfig(config: EasyCodexConnectionConfig): RelayHostProfile {
+    return RelayHostProfile(
+        id = relayHostIdFor(config.relayUrl),
+        name = relayHostNameFor(config.relayUrl),
+        relayUrl = config.relayUrl,
+        apiKey = config.apiKey,
+    )
+}
+
+fun saveRelayHostProfile(
+    prefs: android.content.SharedPreferences,
+    profile: RelayHostProfile,
+    makeActive: Boolean = true,
+) {
+    val profiles = parseRelayHostProfiles(prefs.getString(PREF_RELAY_HOST_PROFILES, "[]"))
+    val editor = prefs.edit()
+        .putString(PREF_RELAY_HOST_PROFILES, serializeRelayHostProfiles(upsertRelayHostProfile(profiles, profile)))
+    if (makeActive) {
+        editor
+            .putString(PREF_ACTIVE_RELAY_HOST_ID, profile.id)
+            .putString(PREF_RELAY_URL, profile.relayUrl)
+            .putString(PREF_API_KEY, profile.apiKey)
+    }
+    editor.apply()
+}
+
 fun validateRelayEndpoint(value: String, strings: AppStrings): String? {
     return validateRelayEndpoint(value, strings.invalidRelayUrl)
 }
@@ -39,9 +143,10 @@ fun validateRelayEndpoint(value: String, strings: AppStrings): String? {
 fun validateRelayEndpoint(value: String, invalidRelayUrl: String): String? {
     val uri = runCatching { URI(value.trim()) }.getOrNull() ?: return invalidRelayUrl
     val scheme = uri.scheme?.lowercase(Locale.ROOT).orEmpty()
+    val host = uri.host?.lowercase(Locale.ROOT).orEmpty()
+    if (host.isBlank()) return invalidRelayUrl
     if (scheme == "wss") return null
     if (scheme != "ws") return "Relay 地址必须使用 ws:// 或 wss://"
-    val host = uri.host?.lowercase(Locale.ROOT).orEmpty()
     val privateOrLocal = host == "localhost" ||
         host == "::1" ||
         host == "10.0.2.2" ||

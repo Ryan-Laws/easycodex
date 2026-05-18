@@ -182,4 +182,19 @@ jobs:
               gh release create "$tag" --title "EasyCodex ${{ steps.release.outputs.version }}" --notes-file "$notes_file" || gh release view "$tag" >/dev/null
             fi
           fi
-          gh release upload "$tag" "${{ steps.sign.outputs.apk }}" "${{ steps.sign.outputs.apk }}.sha256" --clobber
+          assets=("${{ steps.sign.outputs.apk }}" "${{ steps.sign.outputs.apk }}.sha256")
+          for asset in "${assets[@]}"; do
+            name="$(basename "$asset")"
+            if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              echo "Release asset already exists and will not be clobbered: $name" >&2
+              exit 1
+            fi
+          done
+          gh release upload "$tag" "${assets[@]}"
+          apk_name="$(basename "${{ steps.sign.outputs.apk }}")"
+          expected="sha256:$(sha256sum "${{ steps.sign.outputs.apk }}" | awk '{print $1}')"
+          actual="$(gh release view "$tag" --json assets --jq ".assets[] | select(.name == \"$apk_name\") | .digest")"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Digest mismatch for $apk_name: expected $expected, got ${actual:-<missing>}" >&2
+            exit 1
+          fi

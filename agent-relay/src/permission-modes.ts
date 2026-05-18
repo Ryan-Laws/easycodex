@@ -54,6 +54,21 @@ export function permissionModeFromRuntime(options: {
   return 'default-review';
 }
 
+export function permissionModeFromCreateAgentParams(options: {
+  permissionMode?: unknown;
+  approvalPolicy?: unknown;
+  sandboxMode?: unknown;
+  approvalsReviewer?: unknown;
+}): PermissionMode {
+  const explicit = typeof options.permissionMode === 'string' ? options.permissionMode.trim() : '';
+  if (explicit) return normalizePermissionMode(explicit);
+  return permissionModeFromRuntime({
+    approvalPolicy: options.approvalPolicy,
+    sandboxMode: options.sandboxMode,
+    approvalsReviewer: options.approvalsReviewer,
+  });
+}
+
 export function sandboxPolicyForMode(sandboxMode: SandboxMode, cwd: string): Record<string, unknown> {
   if (sandboxMode === 'danger-full-access') return { type: 'dangerFullAccess' };
   return {

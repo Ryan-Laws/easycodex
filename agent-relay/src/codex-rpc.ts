@@ -52,7 +52,11 @@ export function isRpcEvent(msg: RpcFrame): msg is RpcEvent {
 }
 
 export function isRpcReply(msg: RpcFrame): msg is RpcReply {
-  return 'id' in msg;
+  return 'id' in msg && !('method' in msg) && ('result' in msg || 'error' in msg);
+}
+
+export function isRpcRequest(msg: RpcFrame): msg is RpcEvent & { id: JsonPrimitiveId } {
+  return 'id' in msg && 'method' in msg;
 }
 
 export function codexInitializeCall(clientName: string, version: string): string {

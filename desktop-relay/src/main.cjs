@@ -8,6 +8,13 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const QRCode = require('qrcode');
+const {
+  selectReleaseForChannel,
+  selectUpdateAsset,
+  verifyDownloadedAsset,
+} = require('./update-helpers.cjs');
+
+app.disableHardwareAcceleration();
 
 const isDev = !app.isPackaged;
 const isSmokeTest = process.argv.includes('--smoke-test');
@@ -19,7 +26,9 @@ const configDir = path.join(os.homedir(), '.easycodex');
 const configPath = path.join(configDir, 'config.json');
 const desktopConfigPath = path.join(configDir, 'desktop-relay.json');
 const runtimeRelayDir = path.join(configDir, 'desktop-relay-runtime');
-const supportedLanguages = ['system', 'zh', 'zh-Hant', 'en', 'ja', 'ko', 'es', 'fr', 'de'];
+const reposDir = path.join(configDir, 'repos');
+const codexGlobalStatePath = path.join(os.homedir(), '.codex', '.codex-global-state.json');
+const supportedLanguages = ['system', 'zh', 'en'];
 const supportedUpdateChannels = ['stable', 'beta'];
 const UPDATE_REQUEST_TIMEOUT_MS = 15000;
 const UPDATE_DOWNLOAD_TIMEOUT_MS = 30000;
@@ -374,11 +383,89 @@ function loadApiKey() {
   return apiKey;
 }
 
+function uniqueResolvedPaths(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    if (typeof value !== 'string' || !value.trim()) continue;
+    const resolved = path.resolve(value);
+    const key = pathKey(resolved);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(resolved);
+  }
+  return result;
+}
+
+function stringArray(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim()) : [];
+}
+
+function readCodexDesktopState() {
+  try {
+    if (!fs.existsSync(codexGlobalStatePath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(codexGlobalStatePath, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function codexDesktopWorkspaceCandidates() {
+  const state = readCodexDesktopState();
+  const atomState = state?.['electron-persisted-atom-state'];
+  const atom = atomState && typeof atomState === 'object' && !Array.isArray(atomState) ? atomState : {};
+  const projectOrder = stringArray(state?.['project-order']).concat(stringArray(atom?.['project-order']));
+  const activeRoots = stringArray(state?.['active-workspace-roots']).concat(stringArray(atom?.['active-workspace-roots']));
+  const savedRoots = stringArray(state?.['electron-saved-workspace-roots']).concat(stringArray(atom?.['electron-saved-workspace-roots']));
+  return uniqueResolvedPaths(projectOrder.length > 0 ? projectOrder : [...activeRoots, ...savedRoots]);
+}
+
+function repoWorkspaceCandidates() {
+  try {
+    if (!fs.existsSync(reposDir)) return [];
+    return fs.readdirSync(reposDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(reposDir, entry.name));
+  } catch {
+    return [];
+  }
+}
+
+function fallbackWorkspace() {
+  const workspace = path.join(reposDir, 'default-workspace');
+  fs.mkdirSync(workspace, { recursive: true });
+  return workspace;
+}
+
+function defaultWorkspace() {
+  const candidates = uniqueResolvedPaths([
+    process.env.EASYCODEX_WORKSPACE,
+    ...(isDev ? [sourceRoot] : []),
+    ...codexDesktopWorkspaceCandidates(),
+    ...repoWorkspaceCandidates(),
+  ]);
+  return candidates.map(usableWorkspace).find(Boolean) || fallbackWorkspace();
+}
+
+function usableWorkspace(value) {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  try {
+    const workspace = path.resolve(value);
+    if (!fs.existsSync(workspace) || !fs.statSync(workspace).isDirectory()) return '';
+    const realWorkspace = fs.realpathSync(workspace);
+    if (isDisallowedWorkspaceRoot(workspace) || isDisallowedWorkspaceRoot(realWorkspace)) return '';
+    return workspace;
+  } catch {
+    return '';
+  }
+}
+
 function loadDesktopConfig() {
   const config = readJson(desktopConfigPath);
   return {
     port: Number.isInteger(config.port) ? config.port : 3001,
-    workspace: typeof config.workspace === 'string' && config.workspace.trim() ? config.workspace : os.homedir(),
+    workspace: usableWorkspace(config.workspace) || defaultWorkspace(),
     codexPath: typeof config.codexPath === 'string' && config.codexPath.trim() ? config.codexPath.trim() : '',
     languageMode: config.languageMode === 'manual' ? 'manual' : 'follow-phone',
     language: supportedLanguages.includes(config.language) ? config.language : 'system',
@@ -389,7 +476,8 @@ function loadDesktopConfig() {
 }
 
 function saveDesktopConfig(partial) {
-  writeJson(desktopConfigPath, { ...loadDesktopConfig(), ...partial });
+  const config = readJson(desktopConfigPath);
+  writeJson(desktopConfigPath, { ...config, ...partial });
 }
 
 function updateRepository() {
@@ -505,6 +593,7 @@ function serializeRelease(release, channel) {
         name: asset.name,
         url: asset.browser_download_url,
         size: typeof asset.size === 'number' ? asset.size : null,
+        digest: typeof asset.digest === 'string' ? asset.digest : '',
       }))
     : [];
   return {
@@ -518,12 +607,6 @@ function serializeRelease(release, channel) {
     publishedAt: typeof release?.published_at === 'string' ? release.published_at : null,
     assets,
   };
-}
-
-function selectReleaseForChannel(payload, channel) {
-  if (!Array.isArray(payload)) return payload;
-  if (channel === 'beta') return payload.find((release) => release?.prerelease === true) || null;
-  return payload.find((release) => release?.prerelease !== true) || null;
 }
 
 async function checkForUpdates(reason = 'manual') {
@@ -547,32 +630,6 @@ async function checkForUpdates(reason = 'manual') {
   }
   await broadcastState();
   return updateState;
-}
-
-function assetScore(asset) {
-  const name = String(asset?.name || '').toLowerCase();
-  if (process.platform === 'win32') {
-    if (name.includes('relay.setup') && name.endsWith('.exe')) return 100;
-    if (name.includes('relay.portable') && name.endsWith('.exe')) return 80;
-  }
-  if (process.platform === 'darwin') {
-    const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-    if (name.includes(`mac-${arch}`) && name.endsWith('.dmg')) return 100;
-    if (name.includes(`mac-${arch}`) && name.endsWith('.zip')) return 80;
-  }
-  if (process.platform === 'linux') {
-    if (name.endsWith('.appimage')) return 100;
-    if (name.endsWith('.deb')) return 80;
-  }
-  return 0;
-}
-
-function selectUpdateAsset(info) {
-  const assets = Array.isArray(info?.assets) ? info.assets : [];
-  return assets
-    .map((asset) => ({ asset, score: assetScore(asset) }))
-    .filter((entry) => entry.score > 0)
-    .sort((a, b) => b.score - a.score)[0]?.asset || null;
 }
 
 function downloadFileOnce(url, targetPath, redirects = 0) {
@@ -652,6 +709,10 @@ async function applyDesktopUpdate() {
       const targetPath = path.join(updatesDir, asset.name);
       appendLog(`Downloading update: ${asset.name}`);
       await downloadFile(asset.url, targetPath);
+      await verifyDownloadedAsset(asset, targetPath, {
+        allowUnsigned: process.env.EASYCODEX_ALLOW_UNSIGNED_UPDATES === '1',
+        log: appendLog,
+      });
       appendLog(`Opening update installer after EasyCodex Relay exits: ${targetPath}`);
       launchInstallerAfterQuit(targetPath);
     }
@@ -722,28 +783,101 @@ function validateWorkspace(input) {
   if (!fs.existsSync(workspace) || !fs.statSync(workspace).isDirectory()) {
     throw new Error('Workspace directory not found.');
   }
+  const realWorkspace = fs.realpathSync(workspace);
+  if (isDisallowedWorkspaceRoot(workspace) || isDisallowedWorkspaceRoot(realWorkspace)) {
+    throw new Error('Choose a specific project folder. EasyCodex will not use your home, Desktop, Documents, Downloads, system, or application data folder as the relay workspace.');
+  }
   return workspace;
+}
+
+function pathKey(targetPath) {
+  const resolved = path.resolve(targetPath);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function isWithinPath(base, targetPath) {
+  const resolvedBase = path.resolve(base);
+  const resolvedTarget = path.resolve(targetPath);
+  const baseKey = pathKey(resolvedBase);
+  const targetKey = pathKey(resolvedTarget);
+  return targetKey === baseKey || targetKey.startsWith(`${baseKey}${path.sep}`);
+}
+
+function isDisallowedWorkspaceRoot(targetPath) {
+  const resolved = path.resolve(targetPath);
+  const parsed = path.parse(resolved);
+  if (pathKey(resolved) === pathKey(parsed.root)) return true;
+  const home = path.resolve(os.homedir());
+  if (pathKey(resolved) === pathKey(home)) return true;
+  const homeBoundaries = ['Desktop', 'Documents', 'Downloads'].map((name) => path.join(home, name));
+  if (homeBoundaries.some((root) => pathKey(resolved) === pathKey(root))) return true;
+  const disallowed = [
+    process.env.SystemRoot,
+    process.env.ProgramFiles,
+    process.env['ProgramFiles(x86)'],
+    process.env.APPDATA,
+    process.env.LOCALAPPDATA,
+  ].filter((entry) => typeof entry === 'string' && entry.trim());
+  return disallowed.some((root) => isWithinPath(root, resolved));
+}
+
+function readPackageVersion(packagePath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    return typeof parsed.version === 'string' ? parsed.version : '';
+  } catch {
+    return '';
+  }
+}
+
+function assertInsidePath(base, targetPath) {
+  const resolvedBase = path.resolve(base);
+  const resolvedTarget = path.resolve(targetPath);
+  const baseKey = pathKey(resolvedBase);
+  const targetKey = pathKey(resolvedTarget);
+  if (targetKey !== baseKey && !targetKey.startsWith(`${baseKey}${path.sep}`)) {
+    throw new Error(`Refusing to manage path outside expected directory: ${resolvedTarget}`);
+  }
+}
+
+function resetRuntimeRelayDir() {
+  assertInsidePath(configDir, runtimeRelayDir);
+  if (path.basename(runtimeRelayDir) !== 'desktop-relay-runtime') {
+    throw new Error(`Refusing to reset unexpected runtime directory: ${runtimeRelayDir}`);
+  }
+  fs.rmSync(runtimeRelayDir, { recursive: true, force: true });
+  fs.mkdirSync(runtimeRelayDir, { recursive: true });
+}
+
+function relayRuntimeReady(dir) {
+  return (
+    fs.existsSync(path.join(dir, 'package.json')) &&
+    fs.existsSync(path.join(dir, 'dist', 'server.js')) &&
+    fs.existsSync(path.join(dir, 'node_modules', 'express')) &&
+    fs.existsSync(path.join(dir, 'node_modules', 'ws'))
+  );
 }
 
 function relayDir() {
   if (isDev) return sourceRelayDir;
   const sourcePackage = path.join(sourceRelayDir, 'package.json');
   if (!fs.existsSync(sourcePackage)) throw new Error(`Packaged relay resources not found: ${sourceRelayDir}`);
-  if (
-    fs.existsSync(path.join(sourceRelayDir, 'dist', 'server.js')) &&
-    fs.existsSync(path.join(sourceRelayDir, 'node_modules', 'express')) &&
-    fs.existsSync(path.join(sourceRelayDir, 'node_modules', 'ws'))
-  ) {
+  if (relayRuntimeReady(sourceRelayDir)) {
     return sourceRelayDir;
   }
 
   const runtimePackage = path.join(runtimeRelayDir, 'package.json');
-  if (!fs.existsSync(runtimePackage)) {
-    fs.mkdirSync(runtimeRelayDir, { recursive: true });
+  const sourceVersion = readPackageVersion(sourcePackage);
+  const runtimeVersion = fs.existsSync(runtimePackage) ? readPackageVersion(runtimePackage) : '';
+  if (!relayRuntimeReady(runtimeRelayDir) || (sourceVersion && sourceVersion !== runtimeVersion)) {
+    resetRuntimeRelayDir();
     fs.cpSync(sourceRelayDir, runtimeRelayDir, {
       recursive: true,
       force: true,
     });
+  }
+  if (!relayRuntimeReady(runtimeRelayDir)) {
+    throw new Error(`Relay runtime is incomplete after staging: ${runtimeRelayDir}`);
   }
   return runtimeRelayDir;
 }
@@ -1014,13 +1148,7 @@ function normalizeLanguage(value) {
 
 function systemLanguage() {
   const locale = app.getLocale().toLowerCase();
-  if (locale.startsWith('zh-tw') || locale.startsWith('zh-hk') || locale.includes('hant')) return 'zh-Hant';
   if (locale.startsWith('zh')) return 'zh';
-  if (locale.startsWith('ja')) return 'ja';
-  if (locale.startsWith('ko')) return 'ko';
-  if (locale.startsWith('es')) return 'es';
-  if (locale.startsWith('fr')) return 'fr';
-  if (locale.startsWith('de')) return 'de';
   return 'en';
 }
 
@@ -1560,7 +1688,14 @@ async function createWindow() {
     enteringLightMode = false;
     refreshTrayMenu();
   });
-  await mainWindow.loadFile(fs.existsSync(rendererDistIndex) ? rendererDistIndex : legacyRendererIndex);
+  if (fs.existsSync(rendererDistIndex)) {
+    await mainWindow.loadFile(rendererDistIndex);
+  } else if (isDev && fs.existsSync(legacyRendererIndex)) {
+    appendLog('Renderer dist is missing; loading legacy development renderer.');
+    await mainWindow.loadFile(legacyRendererIndex);
+  } else {
+    throw new Error(`Renderer build output not found: ${rendererDistIndex}`);
+  }
   ensureBackgroundServices();
   refreshTrayMenu();
   if (isSmokeTest) setTimeout(() => app.quit(), 1200);
@@ -1757,5 +1892,9 @@ ipcMain.handle('copy-text', (_event, text) => {
   clipboard.writeText(String(text || ''));
 });
 ipcMain.handle('open-external', (_event, url) => {
-  shell.openExternal(String(url || ''));
+  const target = new URL(String(url || ''));
+  if (!['https:', 'http:', 'mailto:'].includes(target.protocol)) {
+    throw new Error('Unsupported external URL scheme.');
+  }
+  shell.openExternal(target.toString());
 });

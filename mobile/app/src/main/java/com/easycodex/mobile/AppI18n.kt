@@ -79,6 +79,8 @@ class AppStrings {
     lateinit var downloadUpdate: String
     lateinit var connectionInstructions: String
     lateinit var connectionInstructionsDetail: String
+    lateinit var officialMobileBoundary: String
+    lateinit var officialMobileBoundaryDetail: String
     lateinit var themeMode: String
     lateinit var themeSubtitle: String
     lateinit var followSystem: String
@@ -112,6 +114,21 @@ class AppStrings {
     lateinit var testNotificationBody: String
     lateinit var testNotificationSent: String
     lateinit var testNotificationFailed: String
+    lateinit var notificationApprove: String
+    lateinit var notificationDeny: String
+    lateinit var notificationReply: String
+    lateinit var notificationContinue: String
+    lateinit var notificationFollowUp: String
+    lateinit var notificationAnswer: String
+    lateinit var notificationAnalyzeError: String
+    lateinit var notificationContinuePrompt: String
+    lateinit var notificationAnalyzeErrorPrompt: String
+    lateinit var notificationQuickInput: String
+    lateinit var notificationQuickInputLabel: String
+    lateinit var backgroundConnectionChannel: String
+    lateinit var backgroundConnectionChannelDescription: String
+    lateinit var agentAlertChannel: String
+    lateinit var agentAlertChannelDescription: String
     lateinit var notificationAgents: String
     lateinit var notificationRecords: String
     lateinit var all: String
@@ -141,6 +158,12 @@ class AppStrings {
     lateinit var noTasks: String
     lateinit var searchTasksOrProjects: String
     lateinit var noMatchingTasks: String
+    lateinit var hostSwitcherContentDescription: String
+    lateinit var refreshHostHealth: String
+    lateinit var hostOnline: String
+    lateinit var hostOffline: String
+    lateinit var hostWarningLabel: String
+    lateinit var hostLastSeenLabel: String
     lateinit var taskActionsContentDescription: String
     lateinit var archiveTask: String
     lateinit var archiveTaskTitle: String
@@ -154,6 +177,10 @@ class AppStrings {
     lateinit var planFirst: String
     lateinit var copyContent: String
     lateinit var copyFullText: String
+    lateinit var openSource: String
+    lateinit var shareSource: String
+    lateinit var copySource: String
+    lateinit var artifactOpenFailed: String
     lateinit var expandMore: String
     lateinit var collapse: String
     lateinit var viewFullDiff: String
@@ -191,6 +218,20 @@ class AppStrings {
     lateinit var diffReview: String
     lateinit var readingGitStatusAndDiff: String
     lateinit var fileDiff: String
+    lateinit var diffSectionFiles: String
+    lateinit var diffSectionDiff: String
+    lateinit var diffSectionPreview: String
+    lateinit var diffSectionCommit: String
+    lateinit var gitBranchLabel: (String) -> String
+    lateinit var gitCleanWorkspace: String
+    lateinit var gitChangedFilesCount: (Int) -> String
+    lateinit var selectedFilesCount: (Int, Int) -> String
+    lateinit var untrackedFilesNotRestored: (Int) -> String
+    lateinit var commitRestoreSelection: String
+    lateinit var selectAll: String
+    lateinit var clearSelection: String
+    lateinit var currentFileOnly: String
+    lateinit var untrackedBadge: String
     lateinit var fullDiff: String
     lateinit var singleFileDiff: String
     lateinit var noDiff: String
@@ -205,6 +246,10 @@ class AppStrings {
     lateinit var commitChanges: String
     lateinit var confirmCommitChanges: String
     lateinit var confirmCommit: String
+    lateinit var discardChanges: String
+    lateinit var confirmDiscardChanges: String
+    lateinit var confirmDiscardChangesBody: String
+    lateinit var confirmDiscard: String
     lateinit var commitFilesCount: (Int) -> String
     lateinit var moreFilesCount: (Int) -> String
     lateinit var attachmentFallbackName: String
@@ -335,39 +380,20 @@ val LocalAppStrings = staticCompositionLocalOf { appStringsFor(DEFAULT_APP_LANGU
 fun appLanguageOptions(): List<AppLanguageOption> = listOf(
     AppLanguageOption(DEFAULT_APP_LANGUAGE, "跟随系统 / System"),
     AppLanguageOption("zh", "简体中文"),
-    AppLanguageOption("zh-Hant", "繁體中文"),
     AppLanguageOption("en", "English"),
-    AppLanguageOption("ja", "日本語"),
-    AppLanguageOption("ko", "한국어"),
-    AppLanguageOption("es", "Español"),
-    AppLanguageOption("fr", "Français"),
-    AppLanguageOption("de", "Deutsch"),
 )
 
 fun resolvedAppLanguage(value: String?): String {
     val normalized = value?.trim()?.lowercase(Locale.ROOT).orEmpty()
     return when (normalized) {
-        "zh", "zh-cn", "zh-hans", "chinese" -> "zh"
-        "zh-hant", "zh-tw", "zh-hk", "zh-mo", "traditional-chinese" -> "zh-Hant"
+        "zh", "zh-cn", "zh-hans", "zh-hant", "zh-tw", "zh-hk", "zh-mo", "chinese", "traditional-chinese" -> "zh"
         "en", "en-us", "english" -> "en"
-        "ja", "ja-jp", "japanese" -> "ja"
-        "ko", "ko-kr", "korean" -> "ko"
-        "es", "es-es", "es-mx", "spanish" -> "es"
-        "fr", "fr-fr", "french" -> "fr"
-        "de", "de-de", "german" -> "de"
         else -> resolvedSystemAppLanguage()
     }
 }
-
 fun appStringsFor(language: String?): AppStrings {
     return when (resolvedAppLanguage(language)) {
-        "zh-Hant" -> TraditionalChineseAppStrings
         "en" -> EnglishAppStrings
-        "ja" -> JapaneseAppStrings
-        "ko" -> KoreanAppStrings
-        "es" -> SpanishAppStrings
-        "fr" -> FrenchAppStrings
-        "de" -> GermanAppStrings
         else -> ChineseAppStrings
     }
 }
@@ -378,12 +404,7 @@ private fun resolvedSystemAppLanguage(): String {
     val script = locale.script.lowercase(Locale.ROOT)
     val country = locale.country.uppercase(Locale.ROOT)
     return when (language) {
-        "zh" -> if (script == "hant" || country in setOf("TW", "HK", "MO")) "zh-Hant" else "zh"
-        "ja" -> "ja"
-        "ko" -> "ko"
-        "es" -> "es"
-        "fr" -> "fr"
-        "de" -> "de"
+        "zh" -> "zh"
         else -> "en"
     }
 }
@@ -457,6 +478,8 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     downloadUpdate = "下载更新"
     connectionInstructions = "连接说明"
     connectionInstructionsDetail = "手机相机扫描终端二维码会自动保存地址和 API Key，也可在这里手动修改。"
+    officialMobileBoundary = "移动远控边界"
+    officialMobileBoundaryDetail = "EasyCodex 对齐官方手机遥控的查看、继续、审批和结果回看体验，但仍保持本地优先：手机只连接你保存的 Relay 主机，不接入 ChatGPT 账号托管 relay。"
     themeMode = "主题模式"
     themeSubtitle = "单独设置明暗模式、主题色和 OLED 黑色背景。"
     followSystem = "跟随系统"
@@ -490,6 +513,21 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     testNotificationBody = "通知权限和通知栏展示正常。"
     testNotificationSent = "已发送本机测试通知"
     testNotificationFailed = "发送测试通知失败"
+    notificationApprove = "批准"
+    notificationDeny = "拒绝"
+    notificationReply = "回复"
+    notificationContinue = "继续"
+    notificationFollowUp = "追问"
+    notificationAnswer = "回答"
+    notificationAnalyzeError = "分析错误"
+    notificationContinuePrompt = "请继续下一步"
+    notificationAnalyzeErrorPrompt = "请分析刚才的错误并给出下一步"
+    notificationQuickInput = "快速输入"
+    notificationQuickInputLabel = "输入要发送给 Codex 的内容"
+    backgroundConnectionChannel = "EasyCodex 后台连接"
+    backgroundConnectionChannelDescription = "保持 EasyCodex 与本地中继的后台连接"
+    agentAlertChannel = "EasyCodex 任务提醒"
+    agentAlertChannelDescription = "任务完成、提问、待确认和错误提醒"
     notificationAgents = "智能体"
     notificationRecords = "记录"
     all = "全部"
@@ -519,6 +557,12 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     noTasks = "暂无任务"
     searchTasksOrProjects = "搜索任务或项目"
     noMatchingTasks = "没有匹配的任务"
+    hostSwitcherContentDescription = "切换 Relay 主机"
+    refreshHostHealth = "刷新主机状态"
+    hostOnline = "在线"
+    hostOffline = "离线"
+    hostWarningLabel = "提示"
+    hostLastSeenLabel = "最近在线"
     taskActionsContentDescription = "任务操作"
     archiveTask = "归档任务"
     archiveTaskTitle = "归档任务？"
@@ -532,6 +576,10 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     planFirst = "先计划"
     copyContent = "复制内容"
     copyFullText = "复制全文"
+    openSource = "打开来源"
+    shareSource = "分享来源"
+    copySource = "复制来源"
+    artifactOpenFailed = "无法打开来源"
     expandMore = "展开更多"
     collapse = "收起"
     viewFullDiff = "查看完整 diff"
@@ -569,6 +617,20 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     diffReview = "改动验收"
     readingGitStatusAndDiff = "正在读取 Git 状态和 diff"
     fileDiff = "文件 diff"
+    diffSectionFiles = "文件"
+    diffSectionDiff = "Diff"
+    diffSectionPreview = "预览"
+    diffSectionCommit = "提交"
+    gitBranchLabel = { "分支 $it" }
+    gitCleanWorkspace = "工作区干净"
+    gitChangedFilesCount = { "$it 个文件有改动" }
+    selectedFilesCount = { selected, total -> "$selected/$total 个文件已选择" }
+    untrackedFilesNotRestored = { "$it 个未跟踪文件不会默认丢弃" }
+    commitRestoreSelection = "提交/丢弃选择"
+    selectAll = "全选"
+    clearSelection = "清空"
+    currentFileOnly = "仅当前文件"
+    untrackedBadge = "未跟踪"
     fullDiff = "完整 diff"
     singleFileDiff = "单文件 diff"
     noDiff = "当前没有 diff。"
@@ -583,6 +645,10 @@ private val ChineseAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     commitChanges = "提交改动"
     confirmCommitChanges = "确认提交改动？"
     confirmCommit = "确认提交"
+    discardChanges = "丢弃"
+    confirmDiscardChanges = "丢弃选中文件改动？"
+    confirmDiscardChangesBody = "这会还原以下已跟踪文件的工作区改动，不会批量删除未跟踪文件。"
+    confirmDiscard = "确认丢弃"
     commitFilesCount = { "将提交 $it 个文件" }
     moreFilesCount = { "+$it 个文件" }
     attachmentFallbackName = "附件"
@@ -778,6 +844,8 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     downloadUpdate = "Download update"
     connectionInstructions = "Connection help"
     connectionInstructionsDetail = "Scan the terminal QR code with your phone camera to save the address and API Key, or edit them manually here."
+    officialMobileBoundary = "Mobile remote boundary"
+    officialMobileBoundaryDetail = "EasyCodex matches the official mobile remote flow for viewing, continuing, approving, and reviewing results, while staying local-first: this phone connects only to your saved relay hosts, not a ChatGPT-account hosted relay."
     themeMode = "Theme mode"
     themeSubtitle = "Set light or dark mode, accent color, and OLED black separately."
     followSystem = "System"
@@ -811,6 +879,21 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     testNotificationBody = "Notification permission and notification shade display are working."
     testNotificationSent = "Local test notification sent"
     testNotificationFailed = "Failed to send test notification"
+    notificationApprove = "Approve"
+    notificationDeny = "Deny"
+    notificationReply = "Reply"
+    notificationContinue = "Continue"
+    notificationFollowUp = "Follow up"
+    notificationAnswer = "Answer"
+    notificationAnalyzeError = "Analyze error"
+    notificationContinuePrompt = "Please continue with the next step"
+    notificationAnalyzeErrorPrompt = "Please analyze the last error and suggest the next step"
+    notificationQuickInput = "Quick input"
+    notificationQuickInputLabel = "Enter what you want to send to Codex"
+    backgroundConnectionChannel = "EasyCodex background connection"
+    backgroundConnectionChannelDescription = "Keeps EasyCodex connected to the local relay in the background"
+    agentAlertChannel = "EasyCodex task alerts"
+    agentAlertChannelDescription = "Task completed, question, approval, and error alerts"
     notificationAgents = "Agents"
     notificationRecords = "Records"
     all = "All"
@@ -840,6 +923,12 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     noTasks = "No tasks yet"
     searchTasksOrProjects = "Search tasks or projects"
     noMatchingTasks = "No matching tasks"
+    hostSwitcherContentDescription = "Switch relay host"
+    refreshHostHealth = "Refresh host status"
+    hostOnline = "Online"
+    hostOffline = "Offline"
+    hostWarningLabel = "Warning"
+    hostLastSeenLabel = "Last seen"
     taskActionsContentDescription = "Task actions"
     archiveTask = "Archive task"
     archiveTaskTitle = "Archive task?"
@@ -853,6 +942,10 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     planFirst = "Plan first"
     copyContent = "Copy content"
     copyFullText = "Copy full text"
+    openSource = "Open source"
+    shareSource = "Share source"
+    copySource = "Copy source"
+    artifactOpenFailed = "Cannot open source"
     expandMore = "Show more"
     collapse = "Collapse"
     viewFullDiff = "View full diff"
@@ -890,6 +983,20 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     diffReview = "Review changes"
     readingGitStatusAndDiff = "Reading Git status and diff"
     fileDiff = "File diff"
+    diffSectionFiles = "Files"
+    diffSectionDiff = "Diff"
+    diffSectionPreview = "Preview"
+    diffSectionCommit = "Commit"
+    gitBranchLabel = { "Branch $it" }
+    gitCleanWorkspace = "Working tree clean"
+    gitChangedFilesCount = { if (it == 1) "1 file changed" else "$it files changed" }
+    selectedFilesCount = { selected, total -> "$selected/$total files selected" }
+    untrackedFilesNotRestored = { if (it == 1) "1 untracked file will not be discarded by default" else "$it untracked files will not be discarded by default" }
+    commitRestoreSelection = "Commit/discard selection"
+    selectAll = "Select all"
+    clearSelection = "Clear"
+    currentFileOnly = "Current file only"
+    untrackedBadge = "untracked"
     fullDiff = "Full diff"
     singleFileDiff = "Single-file diff"
     noDiff = "No diff right now."
@@ -904,6 +1011,10 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     commitChanges = "Commit changes"
     confirmCommitChanges = "Commit these changes?"
     confirmCommit = "Confirm commit"
+    discardChanges = "Discard"
+    confirmDiscardChanges = "Discard selected file changes?"
+    confirmDiscardChangesBody = "This restores the working-tree changes for the tracked files below. It will not bulk-delete untracked files."
+    confirmDiscard = "Confirm discard"
     commitFilesCount = { if (it == 1) "Will commit 1 file" else "Will commit $it files" }
     moreFilesCount = { if (it == 1) "+1 file" else "+$it files" }
     attachmentFallbackName = "Attachment"
@@ -1029,21 +1140,3 @@ private val EnglishAppStrings: AppStrings by lazy(LazyThreadSafetyMode.NONE) {
     endpointNotFilled = "No address"
     }
 }
-
-private val TraditionalChineseAppStrings: AppStrings
-    get() = ChineseAppStrings
-
-private val JapaneseAppStrings: AppStrings
-    get() = EnglishAppStrings
-
-private val KoreanAppStrings: AppStrings
-    get() = EnglishAppStrings
-
-private val SpanishAppStrings: AppStrings
-    get() = EnglishAppStrings
-
-private val FrenchAppStrings: AppStrings
-    get() = EnglishAppStrings
-
-private val GermanAppStrings: AppStrings
-    get() = EnglishAppStrings

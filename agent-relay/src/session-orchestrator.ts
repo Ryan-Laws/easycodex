@@ -19,6 +19,7 @@ import {
   parseRpcFrame,
   isRpcEvent,
   isRpcReply,
+  isRpcRequest,
   RpcReply,
 } from './codex-rpc';
 import {
@@ -73,7 +74,17 @@ interface AgentInfo {
 export interface LocallyArchivableAgent {
   id: string;
   status: string;
-  process: { kill: () => unknown };
+  process: { kill: () => unknown; pid?: number };
+}
+
+function terminateChildProcess(child: { kill: () => unknown; pid?: number }): void {
+  if (process.platform === 'win32' && child.pid) {
+    try {
+      execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      return;
+    } catch {}
+  }
+  try { child.kill(); } catch {}
 }
 
 export function stopAgentLocallyForArchive<T extends LocallyArchivableAgent>(
@@ -83,7 +94,7 @@ export function stopAgentLocallyForArchive<T extends LocallyArchivableAgent>(
   persist: () => void,
 ): void {
   markStopped(agent);
-  try { agent.process.kill(); } catch {}
+  terminateChildProcess(agent.process);
   agent.status = 'stopped';
   agents.delete(agent.id);
   persist();
@@ -409,10 +420,40 @@ export function summarizeMessageForMobile<T extends { type: string; text: string
 
 function simplifyUserMessageForMobile(text: string): string {
   const withoutContext = stripInjectedContextForMobile(text.trim());
-  if (!withoutContext.startsWith(PLAN_MODE_PREFIX)) return withoutContext;
-  const markerIndex = withoutContext.lastIndexOf(PLAN_MODE_DEMAND_MARKER);
-  if (markerIndex < 0) return withoutContext;
-  return withoutContext.slice(markerIndex + PLAN_MODE_DEMAND_MARKER.length).trim() || withoutContext;
+  const withoutPlanPrefix = withoutContext.startsWith(PLAN_MODE_PREFIX)
+    ? (() => {
+        const markerIndex = withoutContext.lastIndexOf(PLAN_MODE_DEMAND_MARKER);
+        return markerIndex < 0
+          ? withoutContext
+          : withoutContext.slice(markerIndex + PLAN_MODE_DEMAND_MARKER.length).trim() || withoutContext;
+      })()
+    : withoutContext;
+  return summarizeInlineImagesForMobile(withoutPlanPrefix);
+}
+
+function summarizeInlineImagesForMobile(text: string): string {
+  const lines = text.split(/\r?\n/);
+  let imageMarkdownCount = 0;
+  let imagePlaceholderCount = 0;
+  const visibleLines: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^<image>$/i.test(trimmed)) {
+      imagePlaceholderCount += 1;
+      continue;
+    }
+    if (/^!\[[^\]]*]\(\s*(?:data:image\/|file:\/\/|https?:\/\/|[A-Za-z]:[\\/]|\\\\|\/)[^)]*\)\s*$/i.test(trimmed)) {
+      imageMarkdownCount += 1;
+      continue;
+    }
+    visibleLines.push(line);
+  }
+
+  const imageCount = imageMarkdownCount || imagePlaceholderCount;
+  if (imageCount === 0) return text;
+  const imageSummary = imageCount === 1 ? '已附加 1 张图片' : `已附加 ${imageCount} 张图片`;
+  return [...visibleLines.join('\n').trim().split(/\r?\n/).filter(Boolean), imageSummary].join('\n').trim();
 }
 
 function stripInjectedContextForMobile(text: string): string {
@@ -1407,6 +1448,21 @@ function isWithinBase(base: string, targetPath: string): boolean {
   return resolved === resolvedBase || resolved.startsWith(`${resolvedBase}${path.sep}`);
 }
 
+function realPathIfExistsSync(targetPath: string): string | null {
+  try {
+    return fs.realpathSync(targetPath);
+  } catch {
+    return null;
+  }
+}
+
+function isWithinBaseRealIfExistsSync(base: string, targetPath: string): boolean {
+  const realBase = realPathIfExistsSync(base);
+  const realTarget = realPathIfExistsSync(targetPath);
+  if (!realBase || !realTarget) return true;
+  return isWithinBase(realBase, realTarget);
+}
+
 function normalizeMessageAttachments(value: unknown): MessageAttachmentInput[] {
   if (!Array.isArray(value)) return [];
   const attachments: MessageAttachmentInput[] = [];
@@ -1442,6 +1498,7 @@ function turnInputForMessage(cwd: string, text: string, attachments: MessageAtta
     }
     const resolvedPath = path.resolve(resolvedCwd, attachmentPath);
     if (!isWithinBase(resolvedCwd, resolvedPath)) continue;
+    if (!isWithinBaseRealIfExistsSync(resolvedCwd, resolvedPath)) continue;
     input.push({ type: 'localImage', path: resolvedPath });
   }
 
@@ -1485,6 +1542,7 @@ function resolveAgentFile(agent: AgentInfo, rawPath: string): { absolute: string
     ? path.resolve(normalized)
     : path.resolve(cwd, normalized);
   if (!isWithinBase(cwd, absolute)) return null;
+  if (!isWithinBaseRealIfExistsSync(cwd, absolute)) return null;
   return {
     absolute,
     relative: (path.relative(cwd, absolute) || path.basename(absolute)).split(path.sep).join('/'),
@@ -2022,6 +2080,70 @@ function recentMatchingUserMessageIndex(agent: AgentInfo, text: string, now = Da
   return -1;
 }
 
+function isScreenshotLikeItem(type: string, item: Record<string, unknown>): boolean {
+  const name = itemToolName(item).toLowerCase();
+  const text = valueToText(item.text ?? item.message ?? item.path ?? item.file ?? item.url);
+  return type === 'screenshot' ||
+    type === 'imageView' ||
+    name.includes('screenshot') ||
+    /\b(screenshot|screen capture)\b/i.test(text) ||
+    /\.(png|jpe?g|webp|gif|bmp)$/i.test(text.trim());
+}
+
+function formatScreenshotItem(item: Record<string, unknown>): string {
+  const title = valueToText(item.title ?? item.name ?? item.alt).trim() || 'Screenshot';
+  const source = valueToText(item.path ?? item.file ?? item.url ?? item.source ?? item.text ?? item.message).trim();
+  const caption = valueToText(item.caption ?? item.summary ?? item.description).trim();
+  return [
+    `screenshot: ${title}`,
+    source ? `source: ${normalizeFilePath(source)}` : '',
+    caption,
+  ].filter(Boolean).join('\n');
+}
+
+function isTestResultLikeItem(type: string, item: Record<string, unknown>): boolean {
+  const name = itemToolName(item).toLowerCase();
+  const command = valueToText(item.command ?? item.cmd ?? item.text ?? item.message).toLowerCase();
+  return type === 'testResult' ||
+    name.includes('test') ||
+    (/\b(npm|pnpm|yarn|gradle|pytest|cargo|go|dotnet|swift|xcodebuild)\b/.test(command) &&
+      /\b(test|check|verify|assemble|build)\b/.test(command));
+}
+
+function formatTestResultItem(item: Record<string, unknown>): string {
+  const command = valueToText(item.command ?? item.cmd ?? item.text ?? item.message).trim();
+  const status = valueToText(item.status ?? item.result ?? item.outcome).trim();
+  const exit = valueToText(item.exitCode ?? item.exit_code ?? item.code).trim();
+  const output = valueToText(item.output ?? item.aggregatedOutput ?? item.stderr ?? item.stdout ?? item.summary ?? item.text).trim();
+  return [
+    command ? `command: ${compactSingleLine(command, 160)}` : 'command: test/check',
+    status ? `status: ${status}` : '',
+    exit ? `exit: ${exit}` : '',
+    output,
+  ].filter(Boolean).join('\n');
+}
+
+function isPluginActivityItem(type: string, item: Record<string, unknown>): boolean {
+  const name = itemToolName(item).toLowerCase();
+  const text = valueToText(item.text ?? item.message ?? item.name ?? item.title).toLowerCase();
+  return type === 'pluginActivity' ||
+    type === 'mcpToolCall' ||
+    name.includes('plugin') ||
+    name.includes('skill') ||
+    /\b(plugin|skill|mcp)\b/.test(text);
+}
+
+function formatPluginActivityItem(item: Record<string, unknown>): string {
+  const name = itemToolName(item) || valueToText(item.name ?? item.title).trim() || 'tool';
+  const status = valueToText(item.status ?? item.state).trim();
+  const summary = valueToText(item.summary ?? item.text ?? item.message ?? item.output).trim();
+  return [
+    `tool: ${name}`,
+    status ? `status: ${status}` : '',
+    summary,
+  ].filter(Boolean).join('\n');
+}
+
 function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Record<string, unknown> | null {
   const type = String(item.type || '');
   if (type === 'userMessage') {
@@ -2048,6 +2170,9 @@ function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Re
   if (type === 'commandExecution') {
     const text = formatCommandExecutionItem(item);
     const completed = String(item.status || '').toLowerCase() !== 'inprogress';
+    if (completed && isTestResultLikeItem(type, item)) {
+      return { ...item, type: 'testResult', command: valueToText(item.command) || text, output: text, text: formatTestResultItem(item) };
+    }
     return {
       ...item,
       type: completed && valueToText(item.aggregatedOutput ?? item.output) ? 'commandOutput' : 'command',
@@ -2065,6 +2190,9 @@ function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Re
   if (type === 'mcpToolCall') {
     const text = formatMcpToolCallItem(item);
     const completed = String(item.status || '').toLowerCase() !== 'inprogress';
+    if (completed && isPluginActivityItem(type, item)) {
+      return { ...item, type: 'pluginActivity', command: text, output: text, text: formatPluginActivityItem(item) };
+    }
     return { ...item, type: completed ? 'commandOutput' : 'command', command: text, output: text, text };
   }
 
@@ -2082,6 +2210,15 @@ function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Re
       };
     }
     const text = formatDynamicToolCallItem(item);
+    if (completed && isScreenshotLikeItem(type, item)) {
+      return { ...item, type: 'screenshot', command: text, output: text, text: formatScreenshotItem(item) };
+    }
+    if (completed && isTestResultLikeItem(type, item)) {
+      return { ...item, type: 'testResult', command: text, output: text, text: formatTestResultItem(item) };
+    }
+    if (completed && isPluginActivityItem(type, item)) {
+      return { ...item, type: 'pluginActivity', command: text, output: text, text: formatPluginActivityItem(item) };
+    }
     return { ...item, type: completed ? 'commandOutput' : 'command', command: text, output: text, text };
   }
 
@@ -2091,6 +2228,9 @@ function normalizedToolItem(agent: AgentInfo, item: Record<string, unknown>): Re
   }
 
   if (type === 'imageView' || type === 'imageGeneration') {
+    if (isScreenshotLikeItem(type, item)) {
+      return { ...item, type: 'screenshot', text: formatScreenshotItem(item) };
+    }
     return { ...item, type: 'status', text: imageItemToMarkdown(item) || formatJsonDetail(item) || type };
   }
 
@@ -2489,7 +2629,7 @@ export class SessionOrchestrator {
     } catch (err) {
       this.agents.delete(id);
       this.persistAgentsToDisk();
-      try { agent.process.kill(); } catch {}
+      terminateChildProcess(agent.process);
       throw err;
     }
   }
@@ -2660,7 +2800,7 @@ export class SessionOrchestrator {
 
     console.log(`  ${RED}[${agent.name}] Stopping...${RESET}`);
     this.markCodexThreadStopped(agent);
-    agent.process.kill();
+    terminateChildProcess(agent.process);
     agent.status = 'stopped';
     this.agents.delete(agentId);
     this.persistAgentsToDisk();
@@ -2942,7 +3082,7 @@ export class SessionOrchestrator {
       projectlessThreadIds,
     );
     const model = usableString(result?.model) || usableString(thread.model);
-    const approvalPolicy = usableString(result?.approvalPolicy) || usableString(thread.approvalPolicy) || 'never';
+    const approvalPolicy = usableString(result?.approvalPolicy) || usableString(thread.approvalPolicy);
     const permissionMode = permissionModeFromRuntime({
       approvalPolicy,
       sandboxMode: usableString(result?.sandbox) || usableString(thread.sandbox),
@@ -3267,7 +3407,7 @@ export class SessionOrchestrator {
       const finish = (value: RpcReply | Error, isError = false) => {
         if (settled) return;
         settled = true;
-        try { proc.kill(); } catch {}
+        terminateChildProcess(proc);
         if (isError) reject(value);
         else resolve(value as RpcReply);
       };
@@ -3373,16 +3513,17 @@ export class SessionOrchestrator {
     const msg = parseRpcFrame(line);
     if (!msg) return;
 
+    if (isRpcRequest(msg)) {
+      this.handleAgentRequest(agent, msg.id, msg.method, msg.params || {});
+      return;
+    }
+
     if (isRpcReply(msg)) {
       const cb = agent.pendingResponses.get(msg.id!);
       if (cb) {
         agent.pendingResponses.delete(msg.id!);
         cb(msg);
         return;
-      }
-      if ('method' in msg && typeof msg.method === 'string') {
-        const request = msg as RpcReply & { method: string; params?: Record<string, unknown> };
-        this.handleAgentRequest(agent, msg.id!, request.method, request.params || {});
       }
       return;
     }

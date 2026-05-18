@@ -54,6 +54,37 @@ class PlanReviewStateTest {
     }
 
     @Test
+    fun markdownPlanSectionsDoNotPromotePlainAgentMessages() {
+        val text = """
+            Test Plan
+            - 运行 mobile 单元测试，确认计划识别通过。
+            - 复测手机端计划卡片是否出现。
+
+            Assumptions
+            - 这轮只整理计划，不直接修改业务文件。
+        """.trimIndent()
+        val message = AgentMessage("agent", "agent", text, 1L, itemId = "message_plan")
+
+        assertTrue(isCompletePlanText(text))
+        assertFalse(isActionablePlanMessage(message))
+        assertFalse(normalizedAgentMessageType(message.role, message.type, message.text) == "plan")
+    }
+
+    @Test
+    fun markdownPlanSectionsRemainActionableForPlanItems() {
+        val text = """
+            Test Plan
+            - 运行 mobile 单元测试，确认计划识别通过。
+
+            Assumptions
+            - 这轮只整理计划，不直接修改业务文件。
+        """.trimIndent()
+        val message = AgentMessage("agent", "plan", text, 1L, itemId = "plan_1")
+
+        assertTrue(isActionablePlanMessage(message))
+    }
+
+    @Test
     fun planStartRequestAnswersUseDesktopStartWording() {
         val request = AgentUserInputRequest(
             id = "request_1",

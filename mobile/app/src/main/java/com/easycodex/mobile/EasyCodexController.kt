@@ -35,6 +35,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 private const val CONNECTION_STATUS_CHANNEL_ID = "easycodex-connection-status"
 private const val CONNECTION_STATUS_NOTIFICATION_ID = 72001
@@ -186,7 +187,50 @@ internal fun isCompletePlanText(text: String): Boolean {
         value.startsWith("- [ ] ") ||
             value.startsWith("- [x] ", ignoreCase = true) ||
             value.startsWith("- [~] ")
+    } || hasStructuredPlanSections(trimmed)
+}
+
+private fun hasStructuredPlanSections(text: String): Boolean {
+    var sectionCount = 0
+    var hasListItem = false
+    val planSectionNames = setOf(
+        "summary",
+        "implementation plan",
+        "test plan",
+        "validation",
+        "risks",
+        "assumptions",
+        "open questions",
+        "questions",
+        "计划",
+        "实施计划",
+        "测试计划",
+        "验证",
+        "风险",
+        "假设",
+        "需要确认",
+        "问题",
+    )
+    for (rawLine in text.lineSequence()) {
+        val line = rawLine.trim()
+            .trimEnd(':', '：')
+            .replace(Regex("""^#+\s*"""), "")
+            .trim()
+            .trim('*')
+            .trim()
+        if (line.isBlank()) continue
+        val lower = line.lowercase(Locale.ROOT)
+        if (lower in planSectionNames) sectionCount += 1
+        if (
+            line.startsWith("- ") ||
+            line.startsWith("* ") ||
+            line.startsWith("• ") ||
+            line.matches(Regex("""\d+[.)]\s+.+"""))
+        ) {
+            hasListItem = true
+        }
     }
+    return sectionCount >= 2 && hasListItem
 }
 
 internal fun proposedPlanBody(text: String): String? {
@@ -202,10 +246,18 @@ internal fun planDisplayText(text: String): String {
 }
 
 internal fun normalizedAgentMessageType(role: String, type: String, text: String): String {
-    return if (type == "agent" && role == "agent" && isCompletePlanText(text) && proposedPlanBody(text) != null) {
+    val normalized = when (type) {
+        "commandOutput" -> "command_output"
+        "fileChange" -> "file_change"
+        "subAgent", "subAgentOutput" -> "sub_agent"
+        "testResult" -> "test_result"
+        "pluginActivity" -> "plugin_activity"
+        else -> type
+    }
+    return if (normalized == "agent" && role == "agent" && proposedPlanBody(text) != null) {
         "plan"
     } else {
-        type
+        normalized
     }
 }
 
@@ -213,6 +265,16 @@ internal fun isActionablePlanMessage(message: AgentMessage): Boolean {
     return normalizedAgentMessageType(message.role, message.type, message.text) == "plan" &&
         !message.streaming &&
         isCompletePlanText(message.text)
+}
+
+internal fun pendingRequestIdsFromAgentJson(agentJson: JSONObject): Set<String> {
+    val pending = agentJson.optJSONArray("pendingRequests") ?: return emptySet()
+    return buildSet {
+        for (index in 0 until pending.length()) {
+            val requestId = pending.optJSONObject(index)?.optString("requestId").orEmpty()
+            if (requestId.isNotBlank()) add(requestId)
+        }
+    }
 }
 
 internal data class CliCommandDraft(
@@ -354,6 +416,68 @@ internal fun parseCliCommand(window: CliConsoleWindow): CliCommandDraft {
     )
 }
 
+internal fun parseGitStatusSummary(json: JSONObject): GitStatusSummary {
+    fun readPathArray(name: String): List<String> {
+        val array = json.optJSONArray(name) ?: JSONArray()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.opt(index)
+                val value = when (item) {
+                    is JSONObject -> item.optString("to")
+                        .ifBlank { item.optString("path") }
+                        .ifBlank { item.optString("file") }
+                    else -> array.optString(index)
+                }.takeIf { it.isNotBlank() } ?: continue
+                add(value)
+            }
+        }
+    }
+    val files = listOf("modified", "created", "deleted", "renamed", "notAdded", "conflicted")
+        .flatMap(::readPathArray)
+        .distinct()
+    val restorableFiles = readPathArray("restorableFiles")
+        .filter { it in files }
+        .distinct()
+        .ifEmpty {
+            listOf("modified", "created", "deleted", "renamed", "conflicted")
+                .flatMap(::readPathArray)
+                .distinct()
+        }
+    return GitStatusSummary(
+        branch = json.optString("branch"),
+        isClean = json.optBoolean("isClean", files.isEmpty()),
+        files = files,
+        restorableFiles = restorableFiles,
+    )
+}
+
+internal fun parseHostHealthState(json: JSONObject, checkedAt: Long): HostHealthState {
+    val system = json.optJSONObject("system") ?: JSONObject()
+    val runtime = json.optJSONObject("runtime") ?: JSONObject()
+    val warnings = buildList {
+        val array = json.optJSONArray("warnings") ?: JSONArray()
+        for (index in 0 until array.length()) {
+            val warning = array.optJSONObject(index)
+            val text = listOfNotNull(
+                warning?.optString("message")?.takeIf { it.isNotBlank() },
+                warning?.optString("recommendation")?.takeIf { it.isNotBlank() },
+            ).joinToString(" ")
+            if (text.isNotBlank()) add(text)
+        }
+    }
+    return HostHealthState(
+        online = json.optString("status") == "ok",
+        hostname = system.optString("hostname"),
+        platform = system.optString("platform"),
+        workspaceRoot = json.optString("workspaceRoot"),
+        uptimeMs = json.optLong("uptimeMs", 0L),
+        connectedClients = json.optInt("connectedClients", 0),
+        runtimeMode = runtime.optString("providerMode", runtime.optString("reason")),
+        warnings = warnings,
+        checkedAt = checkedAt,
+    )
+}
+
 class EasyCodexController(private val context: android.content.Context) {
     interface ConnectionStateListener {
         fun onConnectionStateChanged(status: String, text: String)
@@ -420,6 +544,7 @@ class EasyCodexController(private val context: android.content.Context) {
     private val pendingOutboundMessages = ConcurrentHashMap<String, MutableList<AgentMessage>>()
     private val pendingAgentStatusIds = ConcurrentHashMap<String, String>()
     private val pendingQuickReplies = mutableListOf<PendingQuickReply>()
+    private val pendingApprovalResponses = mutableListOf<PendingApprovalResponse>()
 
     var relayUrl by mutableStateOf(prefs.getString(PREF_RELAY_URL, DEFAULT_RELAY_URL) ?: DEFAULT_RELAY_URL)
     var apiKey by mutableStateOf(prefs.getString(PREF_API_KEY, "") ?: "")
@@ -503,11 +628,17 @@ class EasyCodexController(private val context: android.content.Context) {
     private var projectOptionsCacheRelayProjectRootsKey = ""
     private var projectOptionsCache = emptyList<String>()
     private var relayProjectRoots by mutableStateOf(emptyList<String>())
+    val relayHostProfiles = mutableStateListOf<RelayHostProfile>()
+    var activeRelayHostId by mutableStateOf(prefs.getString(PREF_ACTIVE_RELAY_HOST_ID, "") ?: "")
+        private set
+    var hostHealth by mutableStateOf(HostHealthState())
+        private set
 
     private val strings: AppStrings
         get() = appStringsFor(appLanguage)
 
     init {
+        refreshRelayHostProfilesFromPrefs()
         prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
     }
 
@@ -586,14 +717,50 @@ class EasyCodexController(private val context: android.content.Context) {
         }
     }
 
+    private fun refreshRelayHostProfilesFromPrefs() {
+        val stored = parseRelayHostProfiles(prefs.getString(PREF_RELAY_HOST_PROFILES, "[]"))
+        relayHostProfiles.clear()
+        if (stored.isNotEmpty()) {
+            relayHostProfiles.addAll(stored)
+        } else if (relayUrl.isNotBlank() && apiKey.isNotBlank()) {
+            relayHostProfiles.add(
+                RelayHostProfile(
+                    id = relayHostIdFor(relayUrl),
+                    name = relayHostNameFor(relayUrl),
+                    relayUrl = relayUrl,
+                    apiKey = apiKey,
+                ),
+            )
+        }
+        if (activeRelayHostId.isBlank() || relayHostProfiles.none { it.id == activeRelayHostId }) {
+            activeRelayHostId = relayHostProfiles.firstOrNull()?.id.orEmpty()
+        }
+    }
+
+    fun selectRelayHost(profileId: String) {
+        val profile = relayHostProfiles.firstOrNull { it.id == profileId } ?: return
+        prefs.edit()
+            .putString(PREF_ACTIVE_RELAY_HOST_ID, profile.id)
+            .putString(PREF_RELAY_URL, profile.relayUrl)
+            .putString(PREF_API_KEY, profile.apiKey)
+            .apply()
+        activeRelayHostId = profile.id
+        relayUrl = profile.relayUrl
+        apiKey = profile.apiKey
+        hostHealth = HostHealthState(loading = true)
+        connect()
+    }
+
     fun reloadSettings() {
         val nextRelayUrl = prefs.getString(PREF_RELAY_URL, DEFAULT_RELAY_URL)?.trim().orEmpty()
             .ifBlank { DEFAULT_RELAY_URL }
         val nextApiKey = prefs.getString(PREF_API_KEY, "")?.trim().orEmpty()
         val shouldReconnect = nextRelayUrl != relayUrl || nextApiKey != apiKey
         val previousLanguage = appLanguage
+        activeRelayHostId = prefs.getString(PREF_ACTIVE_RELAY_HOST_ID, "") ?: ""
         relayUrl = nextRelayUrl
         apiKey = nextApiKey
+        refreshRelayHostProfilesFromPrefs()
         defaultModel = prefs.getString(PREF_DEFAULT_MODEL, DEFAULT_AGENT_MODEL)?.ifBlank { DEFAULT_AGENT_MODEL }
             ?: DEFAULT_AGENT_MODEL
         defaultCwd = prefs.getString(PREF_DEFAULT_CWD, DEFAULT_AGENT_CWD)?.trim().orEmpty()
@@ -671,11 +838,13 @@ class EasyCodexController(private val context: android.content.Context) {
                         reconnectAttempts = 0
                         connectionStatus = "connected"
                         statusText = strings.connected
+                        refreshHostHealth()
                         syncClientLanguage()
                         refreshRuntimeOptions()
                         refreshAgents()
                         replayMissedStream()
                         flushPendingQuickReplies()
+                        flushPendingApprovalResponses()
                     } else {
                         connectionStatus = "disconnected"
                         statusText = localizedConnectionError(error)
@@ -742,9 +911,13 @@ class EasyCodexController(private val context: android.content.Context) {
         prefs.edit()
             .remove(PREF_RELAY_URL)
             .remove(PREF_API_KEY)
+            .remove(PREF_ACTIVE_RELAY_HOST_ID)
+            .remove(PREF_RELAY_HOST_PROFILES)
             .apply()
         relayUrl = DEFAULT_RELAY_URL
         apiKey = ""
+        activeRelayHostId = ""
+        relayHostProfiles.clear()
         statusText = strings.connectionConfigCleared
     }
 
@@ -1332,11 +1505,16 @@ class EasyCodexController(private val context: android.content.Context) {
             val restoreText = firstDisplayMessage ?: firstMessage
             if (error != null) {
                 statusText = error
-                if (!restoreText.isNullOrBlank()) inputText = restoreText
+                restoreDraftOnSendFailure(restoreText, firstAttachments)
                 optimisticAgentId?.let { localId ->
                     clearPendingAgentStatus(localId)
+                    val timedOut = error.contains("timeout", ignoreCase = true) || error.contains("超时")
                     updateAgent(localId) {
-                        it.copy(status = "error", activity = null, updatedAt = System.currentTimeMillis())
+                        if (timedOut) {
+                            it.copy(status = "working", activity = "创建请求超时，正在等待中继同步结果", updatedAt = System.currentTimeMillis())
+                        } else {
+                            it.copy(status = "error", activity = null, updatedAt = System.currentTimeMillis())
+                        }
                     }
                     appendMessage(localId, AgentMessage("agent", "status", "发送失败：$error", System.currentTimeMillis()))
                 }
@@ -1405,7 +1583,9 @@ class EasyCodexController(private val context: android.content.Context) {
             .joinToString("\n\n")
         draftAgent?.let { draft ->
             val projectless = draft.cwd.isBlank()
+            inputText = ""
             attachmentDrafts.clear()
+            statusText = "已发送，正在创建 EasyCodex 任务..."
             createAgent(
                 name = taskNameFromPrompt(typedText.ifBlank { text }),
                 model = draft.model,
@@ -1424,16 +1604,30 @@ class EasyCodexController(private val context: android.content.Context) {
         if (agent.resumable) {
             inputText = ""
             attachmentDrafts.clear()
+            statusText = "已发送，正在恢复任务..."
             resumeCodexThread(agent, transportText, displayText, selectedAttachments)
             return
         }
         inputText = ""
         attachmentDrafts.clear()
-        if (shouldQueueFollowUpOnCurrentAgent(agent)) {
+        val queueFollowUp = shouldQueueFollowUpOnCurrentAgent(agent)
+        statusText = if (queueFollowUp) {
+            "已排队，等待当前任务完成"
+        } else {
+            "已发送，等待 AI 接收"
+        }
+        if (queueFollowUp) {
             sendMessageToAgent(agent.id, transportText, displayText, selectedAttachments)
             return
         }
         sendMessageToAgent(agent.id, transportText, displayText, selectedAttachments)
+    }
+
+    private fun restoreDraftOnSendFailure(text: String?, attachments: List<AttachmentDraft>) {
+        if (!text.isNullOrBlank() && inputText.isBlank()) inputText = text
+        attachments.forEach { draft ->
+            if (attachmentDrafts.none { it.path == draft.path }) attachmentDrafts.add(draft)
+        }
     }
 
     fun showPlanReview(agentId: String, message: AgentMessage) {
@@ -1561,74 +1755,92 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     fun uploadActiveAttachments(uris: List<Uri>) {
-        val cwd = draftProjectCwd ?: activeAgent?.cwd ?: return
+        val cwd = draftProjectCwd ?: activeAgent?.cwd
+        if (cwd == null) {
+            statusText = "请先选择项目目录，再上传附件"
+            return
+        }
         if (uris.isEmpty()) return
-        val files = mutableListOf<Map<String, Any?>>()
-        for (uri in uris.take(12)) {
-            when (val result = attachmentPayload(uri)) {
-                is AttachmentPayloadResult.Success -> files.add(result.payload)
-                is AttachmentPayloadResult.TooLarge -> {
-                    statusText = strings.attachmentTooLarge(result.name)
-                    return
-                }
-                AttachmentPayloadResult.Unreadable -> Unit
-            }
-        }
-        if (files.isEmpty()) {
-            statusText = "没有读取到可上传的附件"
-            return
-        }
-        val oversized = files.firstOrNull { (it["size"] as? Int ?: 0) > MAX_ATTACHMENT_BYTES }
-        if (oversized != null) {
-            statusText = strings.attachmentTooLarge((oversized["name"] as? String) ?: strings.attachmentFallbackName)
-            return
-        }
-        val totalBytes = files.sumOf { it["size"] as? Int ?: 0 }
-        if (totalBytes > MAX_ATTACHMENT_BATCH_BYTES) {
-            statusText = "本次附件总大小超过 48 MB，未上传任何附件"
-            return
-        }
         isBusy = true
-        statusText = "正在上传 ${files.size} 个附件"
-        send(
-            "upload_attachments",
-            mapOf(
-                "cwd" to cwd.ifBlank { "." },
-                "files" to files,
-            ),
-        ) { data, error ->
-            isBusy = false
-            if (error != null) {
-                statusText = strings.attachmentUploadFailed(error)
-                return@send
+        statusText = "正在读取 ${uris.take(12).size} 个附件"
+        thread(name = "EasyCodexAttachmentReader") {
+            val files = mutableListOf<Map<String, Any?>>()
+            var errorText: String? = null
+            for (uri in uris.take(12)) {
+                when (val result = attachmentPayload(uri)) {
+                    is AttachmentPayloadResult.Success -> files.add(result.payload)
+                    is AttachmentPayloadResult.TooLarge -> {
+                        errorText = strings.attachmentTooLarge(result.name)
+                        break
+                    }
+                    AttachmentPayloadResult.Unreadable -> Unit
+                }
             }
-            val uploaded = data?.optJSONObject("data")?.optJSONArray("files")
-                ?: data?.optJSONArray("files")
-                ?: JSONArray()
-            val uploadedDrafts = mutableListOf<AttachmentDraft>()
-            for (index in 0 until uploaded.length()) {
-                val file = uploaded.optJSONObject(index) ?: continue
-                val name = file.optString("name", strings.attachmentFallbackName)
-                val path = file.optString("path")
-                val mimeType = file.optString("mimeType").takeIf { it.isNotBlank() }
-                val previewUri = files.getOrNull(index)?.get("previewUri") as? String
-                if (path.isNotBlank()) uploadedDrafts.add(
-                    AttachmentDraft(
-                        name = name,
-                        path = path,
-                        mimeType = mimeType,
-                        previewUri = previewUri.takeIf { mimeType?.startsWith("image/") == true },
+            main.post {
+                if (errorText != null) {
+                    isBusy = false
+                    statusText = errorText.orEmpty()
+                    return@post
+                }
+                if (files.isEmpty()) {
+                    isBusy = false
+                    statusText = "没有读取到可上传的附件"
+                    return@post
+                }
+                val oversized = files.firstOrNull { (it["size"] as? Int ?: 0) > MAX_ATTACHMENT_BYTES }
+                if (oversized != null) {
+                    isBusy = false
+                    statusText = strings.attachmentTooLarge((oversized["name"] as? String) ?: strings.attachmentFallbackName)
+                    return@post
+                }
+                val totalBytes = files.sumOf { it["size"] as? Int ?: 0 }
+                if (totalBytes > MAX_ATTACHMENT_BATCH_BYTES) {
+                    isBusy = false
+                    statusText = "本次附件总大小超过 48 MB，未上传任何附件"
+                    return@post
+                }
+                statusText = "正在上传 ${files.size} 个附件"
+                send(
+                    "upload_attachments",
+                    mapOf(
+                        "cwd" to cwd.ifBlank { "." },
+                        "files" to files,
                     ),
-                )
+                ) { data, error ->
+                    isBusy = false
+                    if (error != null) {
+                        statusText = strings.attachmentUploadFailed(error)
+                        return@send
+                    }
+                    val uploaded = data?.optJSONObject("data")?.optJSONArray("files")
+                        ?: data?.optJSONArray("files")
+                        ?: JSONArray()
+                    val uploadedDrafts = mutableListOf<AttachmentDraft>()
+                    for (index in 0 until uploaded.length()) {
+                        val file = uploaded.optJSONObject(index) ?: continue
+                        val name = file.optString("name", strings.attachmentFallbackName)
+                        val path = file.optString("path")
+                        val mimeType = file.optString("mimeType").takeIf { it.isNotBlank() }
+                        val previewUri = files.getOrNull(index)?.get("previewUri") as? String
+                        if (path.isNotBlank()) uploadedDrafts.add(
+                            AttachmentDraft(
+                                name = name,
+                                path = path,
+                                mimeType = mimeType,
+                                previewUri = previewUri.takeIf { mimeType?.startsWith("image/") == true },
+                            ),
+                        )
+                    }
+                    if (uploadedDrafts.isEmpty()) {
+                        statusText = strings.attachmentNoPath
+                        return@send
+                    }
+                    uploadedDrafts.forEach { draft ->
+                        if (attachmentDrafts.none { it.path == draft.path }) attachmentDrafts.add(draft)
+                    }
+                    statusText = "已上传 ${uploadedDrafts.size} 个附件"
+                }
             }
-            if (uploadedDrafts.isEmpty()) {
-                statusText = strings.attachmentNoPath
-                return@send
-            }
-            uploadedDrafts.forEach { draft ->
-                if (attachmentDrafts.none { it.path == draft.path }) attachmentDrafts.add(draft)
-            }
-            statusText = "已上传 ${uploadedDrafts.size} 个附件"
         }
     }
 
@@ -1748,6 +1960,7 @@ class EasyCodexController(private val context: android.content.Context) {
                     resumeCodexThread(targetAgent, text, displayText, attachments)
                     return@send
                 }
+                restoreDraftOnSendFailure(displayText, attachments)
                 appendMessage(agentId, AgentMessage("agent", "status", "发送失败：$error", System.currentTimeMillis()))
                 updateAgent(agentId) { it.copy(status = "error", activity = null) }
                 refreshAgents()
@@ -2341,6 +2554,7 @@ class EasyCodexController(private val context: android.content.Context) {
             isBusy = false
             if (error != null) {
                 statusText = "恢复 EasyCodex 任务失败：$error"
+                restoreDraftOnSendFailure(firstDisplayMessage ?: firstMessage, firstAttachments)
                 updateAgent(agent.id) { it.copy(status = "error", activity = null) }
                 return@send
             }
@@ -2393,7 +2607,8 @@ class EasyCodexController(private val context: android.content.Context) {
                 return@gitStatus
             }
             val changedFiles = status?.files.orEmpty()
-            gitCommitDraft = gitCommitDraft.copy(files = changedFiles, error = null)
+            val initiallySelectedFiles = status?.restorableFiles.orEmpty().ifEmpty { changedFiles }
+            gitCommitDraft = gitCommitDraft.copy(files = initiallySelectedFiles, error = null)
             gitDiff(agent.cwd) { diff, diffError ->
                 if (diffReview?.requestId != requestId) return@gitDiff
                 if (diffError != null) {
@@ -2405,6 +2620,7 @@ class EasyCodexController(private val context: android.content.Context) {
                     status = status,
                     diff = diff.orEmpty(),
                     files = changedFiles.map(::gitStatusFileEntry),
+                    selectedFiles = initiallySelectedFiles,
                 )
             }
         }
@@ -2483,6 +2699,60 @@ class EasyCodexController(private val context: android.content.Context) {
             if (error != null) callback(RelayResult.Failure(error))
             else callback(RelayResult.Success(data?.optJSONObject("data")?.optString("diff").orEmpty()))
         }
+    }
+
+    fun toggleDiffReviewFileSelection(path: String) {
+        val review = diffReview ?: return
+        val nextSelected = if (path in review.selectedFiles) {
+            review.selectedFiles - path
+        } else {
+            review.selectedFiles + path
+        }
+        diffReview = review.copy(selectedFiles = nextSelected, restoreError = null)
+        gitCommitDraft = gitCommitDraft.copy(files = nextSelected, error = null)
+    }
+
+    fun setDiffReviewFileSelection(files: List<String>) {
+        val review = diffReview ?: return
+        val available = review.files.mapTo(linkedSetOf()) { it.path }
+        val nextSelected = files.filter { it in available }.distinct()
+        diffReview = review.copy(selectedFiles = nextSelected, restoreError = null)
+        gitCommitDraft = gitCommitDraft.copy(files = nextSelected, error = null)
+    }
+
+    fun refreshHostHealth() {
+        if (connectionStatus != "connected") {
+            hostHealth = HostHealthState(online = false, error = statusText, checkedAt = System.currentTimeMillis())
+            return
+        }
+        hostHealth = hostHealth.copy(loading = true, error = null)
+        send("host_health") { data, error ->
+            val now = System.currentTimeMillis()
+            if (error != null) {
+                hostHealth = HostHealthState(online = false, error = localizedConnectionError(error), checkedAt = now)
+                return@send
+            }
+            val next = parseHostHealth(data?.optJSONObject("data") ?: JSONObject(), now)
+            hostHealth = next
+            updateActiveHostProfile(next)
+        }
+    }
+
+    private fun updateActiveHostProfile(health: HostHealthState) {
+        val activeId = activeRelayHostId.ifBlank { relayHostIdFor(relayUrl) }
+        val current = relayHostProfiles.firstOrNull { it.id == activeId }
+            ?: RelayHostProfile(activeId, relayHostNameFor(relayUrl), relayUrl, apiKey)
+        val updated = current.copy(
+            name = health.hostname.ifBlank { current.name },
+            hostname = health.hostname,
+            platform = health.platform,
+            workspaceRoot = health.workspaceRoot,
+            lastSeen = health.checkedAt,
+            warnings = health.warnings,
+        )
+        saveRelayHostProfile(prefs, updated, makeActive = true)
+        activeRelayHostId = updated.id
+        refreshRelayHostProfilesFromPrefs()
     }
 
     fun listFiles(cwd: String, path: String? = null, callback: (FileListing?, String?) -> Unit) {
@@ -2599,6 +2869,16 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     fun respondApprovalRequest(request: AgentApprovalRequest, approved: Boolean) {
+        if (connectionStatus != "connected") {
+            queueApprovalResponse(request.agentId, request.id, approved)
+            connect()
+            statusText = "正在重连中继，审批响应会在连接恢复后发送"
+            return
+        }
+        deliverApprovalResponse(request, approved)
+    }
+
+    private fun deliverApprovalResponse(request: AgentApprovalRequest, approved: Boolean) {
         send(
             "respond_agent_request",
             mapOf(
@@ -2613,6 +2893,69 @@ class EasyCodexController(private val context: android.content.Context) {
             } else {
                 approvalRequests.removeAll { it.id == request.id && it.agentId == request.agentId }
             }
+        }
+    }
+
+    private fun queueApprovalResponse(agentId: String, requestId: String, approved: Boolean) {
+        if (agentId.isBlank() || requestId.isBlank()) return
+        pendingApprovalResponses.removeAll { it.agentId == agentId && it.requestId == requestId }
+        pendingApprovalResponses.add(PendingApprovalResponse(agentId, requestId, approved, System.currentTimeMillis()))
+        while (pendingApprovalResponses.size > 20) pendingApprovalResponses.removeAt(0)
+    }
+
+    private fun flushPendingApprovalResponses() {
+        if (pendingApprovalResponses.isEmpty() || connectionStatus != "connected") return
+        val responses = pendingApprovalResponses.toList()
+        pendingApprovalResponses.clear()
+        responses.forEach { response ->
+            val request = approvalRequests.firstOrNull { it.agentId == response.agentId && it.id == response.requestId }
+                ?: AgentApprovalRequest(
+                    id = response.requestId,
+                    agentId = response.agentId,
+                    method = "approval",
+                    title = "EasyCodex 需要确认",
+                    detail = "",
+                    timestamp = response.createdAt,
+                )
+            deliverApprovalResponse(request, response.approved)
+        }
+    }
+
+    fun respondApprovalForAgentRequest(agentId: String, requestId: String, approved: Boolean) {
+        val request = approvalRequests.firstOrNull { it.agentId == agentId && it.id == requestId }
+            ?: approvalRequests.firstOrNull { it.agentId == agentId }
+            ?: return
+        respondApprovalRequest(request, approved)
+    }
+
+    fun restoreDiffReviewSelection() {
+        val review = diffReview ?: return
+        val restorable = review.status?.restorableFiles.orEmpty().ifEmpty { review.selectedFiles }
+        val files = review.selectedFiles.filter { it in restorable }
+        if (files.isEmpty()) {
+            diffReview = review.copy(restoreError = "请选择已跟踪文件；未跟踪文件不能通过丢弃改动删除。")
+            return
+        }
+        diffReview = review.copy(restoreBusy = true, restoreError = null)
+        gitRestoreFiles(review.cwd, files) { error ->
+            if (error != null) {
+                diffReview = diffReview?.copy(restoreBusy = false, restoreError = error)
+                return@gitRestoreFiles
+            }
+            statusText = "已丢弃选中文件改动"
+            openDiffReview(activeAgent)
+        }
+    }
+
+    fun gitRestoreFiles(cwd: String, files: List<String>, callback: (String?) -> Unit) {
+        send(
+            "git_restore_files",
+            mapOf(
+                "cwd" to cwd.ifBlank { "." },
+                "files" to JSONArray(files),
+            ),
+        ) { _, error ->
+            callback(error)
         }
     }
 
@@ -3390,7 +3733,13 @@ class EasyCodexController(private val context: android.content.Context) {
         }
     }
 
-    private fun recordAgentAlert(agentId: String, kind: AgentAlertKind, detail: String = "", notify: Boolean = true) {
+    private fun recordAgentAlert(
+        agentId: String,
+        kind: AgentAlertKind,
+        detail: String = "",
+        notify: Boolean = true,
+        requestId: String = "",
+    ) {
         val agent = agents.firstOrNull { it.id == agentId }
         val agentName = agent?.name?.takeIf { it.isNotBlank() } ?: "EasyCodex"
         val fallbackDetail = agent?.messages?.lastOrNull { it.role == "agent" && it.type == "agent" }?.text.orEmpty()
@@ -3417,6 +3766,7 @@ class EasyCodexController(private val context: android.content.Context) {
             title = title,
             detail = body,
             timestamp = System.currentTimeMillis(),
+            requestId = requestId,
         )
         alerts.add(0, alert)
         while (alerts.size > 60) alerts.removeAt(alerts.lastIndex)
@@ -3523,8 +3873,38 @@ class EasyCodexController(private val context: android.content.Context) {
                 .setShowWhen(true)
                 .setWhen(alert.timestamp)
                 .setCategory(Notification.CATEGORY_STATUS)
-            if (alert.kind != AgentAlertKind.Error) {
-                builder.addAction(quickReplyAction(context, alert.agentId, notificationId, "回复"))
+            agentNotificationActionSpecs(alert.kind, canApprove = alert.requestId.isNotBlank(), strings = strings).forEach { spec ->
+                val action = when (spec.kind) {
+                    AgentNotificationActionKind.QuickReply -> quickReplyAction(
+                        context = context,
+                        agentId = alert.agentId,
+                        notificationId = notificationId,
+                        title = spec.title,
+                        inputLabel = strings.notificationQuickInputLabel,
+                    )
+                    AgentNotificationActionKind.PresetReply -> presetReplyAction(
+                        context = context,
+                        agentId = alert.agentId,
+                        notificationId = notificationId,
+                        title = spec.title,
+                        text = spec.presetText,
+                    )
+                    AgentNotificationActionKind.Approval -> approvalAction(
+                        context = context,
+                        agentId = alert.agentId,
+                        requestId = alert.requestId,
+                        notificationId = notificationId,
+                        title = spec.title,
+                        approved = spec.approved,
+                    )
+                    AgentNotificationActionKind.Dismiss -> dismissAgentNotificationAction(
+                        context = context,
+                        agentId = alert.agentId,
+                        notificationId = notificationId,
+                        title = spec.title,
+                    )
+                }
+                builder.addAction(action)
             }
             manager.notify(notificationId, builder.build())
         }
@@ -3539,10 +3919,10 @@ class EasyCodexController(private val context: android.content.Context) {
             .build()
         val channel = NotificationChannel(
             AGENT_ALERT_CHANNEL_ID,
-            "EasyCodex 任务提醒",
+            strings.agentAlertChannel,
             NotificationManager.IMPORTANCE_DEFAULT,
         ).apply {
-            description = "任务完成、提问、待确认和错误提醒"
+            description = strings.agentAlertChannelDescription
             setSound(soundUri, attrs)
             enableVibration(true)
         }
@@ -3595,6 +3975,9 @@ class EasyCodexController(private val context: android.content.Context) {
             "command_output" -> listOf("output", "aggregatedOutput", "aggregated_output", "stdout", "stderr", "text", "message", "content")
             "file_change" -> listOf("diff", "patch", "text", "message", "changes")
             "sub_agent" -> listOf("output", "result", "error", "text", "message", "content")
+            "screenshot" -> listOf("text", "path", "file", "url", "source", "message", "summary")
+            "test_result" -> listOf("command", "output", "aggregatedOutput", "aggregated_output", "stdout", "stderr", "text", "message", "summary")
+            "plugin_activity" -> listOf("tool", "name", "status", "output", "text", "message", "summary")
             else -> emptyList()
         }
         val body = keys.firstNotNullOfOrNull { key -> itemValueText(item, key).takeIf { it.isNotBlank() } }.orEmpty()
@@ -3620,6 +4003,9 @@ class EasyCodexController(private val context: android.content.Context) {
             "command_output" -> "正在读取命令输出"
             "file_change" -> if (started) "正在修改文件，准备生成改动" else "文件改动已更新"
             "sub_agent" -> if (started) "子代理正在工作，等待返回结果" else "子代理结果已返回"
+            "screenshot" -> "截图已生成，手机端可预览"
+            "test_result" -> "测试结果已返回"
+            "plugin_activity" -> "插件/技能活动已更新"
             "thinking" -> "正在思考中，AI 正在使用中"
             "plan" -> "正在规划步骤，准备继续执行"
             "status" -> "状态已更新，等待下一步反馈"
@@ -3655,6 +4041,9 @@ class EasyCodexController(private val context: android.content.Context) {
                     .ifBlank { item.optString("agent_role") }
                 return listOf(label, name).filter { it.isNotBlank() }.joinToString(" · ")
             }
+            "screenshot" -> return artifactText(item, "screenshot", "Screenshot")
+            "test_result" -> return artifactText(item, "command", "test/check")
+            "plugin_activity" -> return artifactText(item, "tool", "plugin/skill")
             "thinking" -> return "正在思考中。"
         }
         if (type == "plan") {
@@ -3718,6 +4107,32 @@ class EasyCodexController(private val context: android.content.Context) {
         return listOf("delta", "text", "message", "content", "output")
             .firstNotNullOfOrNull { key -> data.optString(key).takeIf { it.isNotBlank() } }
             .orEmpty()
+    }
+
+    private fun artifactText(item: JSONObject, primaryKey: String, fallbackTitle: String): String {
+        val title = listOf(primaryKey, "title", "name", "command", "tool")
+            .firstNotNullOfOrNull { key -> item.optString(key).takeIf { it.isNotBlank() } }
+            ?: fallbackTitle
+        val source = listOf("source", "path", "file", "url")
+            .firstNotNullOfOrNull { key -> item.optString(key).takeIf { it.isNotBlank() } }
+            .orEmpty()
+        val status = listOf("status", "result", "outcome")
+            .firstNotNullOfOrNull { key -> item.optString(key).takeIf { it.isNotBlank() } }
+            .orEmpty()
+        val output = listOf("summary", "output", "aggregatedOutput", "aggregated_output", "stdout", "stderr", "text", "message")
+            .firstNotNullOfOrNull { key -> itemValueText(item, key).takeIf { it.isNotBlank() } }
+            .orEmpty()
+        val prefix = when (primaryKey) {
+            "screenshot" -> "screenshot"
+            "tool" -> "tool"
+            else -> "command"
+        }
+        return listOf(
+            "$prefix: $title",
+            source.takeIf { it.isNotBlank() }?.let { "source: $it" }.orEmpty(),
+            status.takeIf { it.isNotBlank() }?.let { "status: $it" }.orEmpty(),
+            output,
+        ).filter { it.isNotBlank() }.joinToString("\n")
     }
 
     private fun itemDetailPrefix(item: JSONObject, type: String): String {
@@ -3977,7 +4392,12 @@ class EasyCodexController(private val context: android.content.Context) {
         val agentId = agents.firstOrNull {
             it.id == rawAgentId || it.codexThreadId == rawAgentId || it.id == "codex_$rawAgentId"
         }?.id ?: rawAgentId
-        val pending = agentJson.optJSONArray("pendingRequests") ?: return
+        val pending = agentJson.optJSONArray("pendingRequests")
+        if (pending == null) {
+            approvalRequests.removeAll { it.agentId == agentId }
+            userInputRequests.removeAll { it.agentId == agentId }
+            return
+        }
         val seen = mutableSetOf<String>()
         for (index in 0 until pending.length()) {
             val requestJson = pending.optJSONObject(index) ?: continue
@@ -4038,6 +4458,7 @@ class EasyCodexController(private val context: android.content.Context) {
                 timestamp = timestamp,
             ),
         )
+        if (announce) recordAgentAlert(agentId, AgentAlertKind.Confirmation, text, requestId = requestId)
     }
 
     private fun isUserInputRequest(method: String): Boolean {
@@ -4121,7 +4542,11 @@ class EasyCodexController(private val context: android.content.Context) {
             status = json.optString("status", "stopped"),
             serviceTier = normalizeServiceTier(json.optString("serviceTier", DEFAULT_SERVICE_TIER).ifBlank { DEFAULT_SERVICE_TIER }),
             reasoningEffort = json.optString("reasoningEffort", DEFAULT_REASONING_EFFORT).ifBlank { DEFAULT_REASONING_EFFORT },
-            permissionMode = normalizePermissionMode(json.optString("permissionMode", DEFAULT_PERMISSION_MODE)),
+            permissionMode = permissionModeFromRuntimeFields(
+                jsonNullableString(json, "permissionMode"),
+                jsonNullableString(json, "approvalPolicy"),
+                jsonNullableString(json, "sandboxMode") ?: jsonNullableString(json, "sandbox"),
+            ),
             activity = json.optString("activityLabel")
                 .ifBlank { json.optString("activity") }
                 .takeIf { it.isNotBlank() },
@@ -4173,7 +4598,11 @@ class EasyCodexController(private val context: android.content.Context) {
             ),
             reasoningEffort = json.optString("reasoningEffort", defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT })
                 .ifBlank { defaultReasoningEffort.ifBlank { DEFAULT_REASONING_EFFORT } },
-            permissionMode = normalizePermissionMode(json.optString("permissionMode", DEFAULT_PERMISSION_MODE)),
+            permissionMode = permissionModeFromRuntimeFields(
+                jsonNullableString(json, "permissionMode"),
+                jsonNullableString(json, "approvalPolicy"),
+                jsonNullableString(json, "sandboxMode") ?: jsonNullableString(json, "sandbox"),
+            ),
             activity = queuedActivity ?: json.optString("activityLabel")
                 .ifBlank { json.optString("activity") }
                 .takeIf { it.isNotBlank() },
@@ -4299,6 +4728,10 @@ class EasyCodexController(private val context: android.content.Context) {
         )
     }
 
+    private fun parseHostHealth(json: JSONObject, checkedAt: Long): HostHealthState {
+        return parseHostHealthState(json, checkedAt)
+    }
+
     private fun parseCodexModel(json: JSONObject): CodexModelOption? {
         val model = json.optString("model").ifBlank { json.optString("id") }
         if (model.isBlank()) return null
@@ -4365,23 +4798,7 @@ class EasyCodexController(private val context: android.content.Context) {
     }
 
     private fun parseGitStatus(json: JSONObject): GitStatusSummary {
-        fun readArray(name: String): List<String> {
-            val array = json.optJSONArray(name) ?: JSONArray()
-            return buildList {
-                for (index in 0 until array.length()) {
-                    val value = array.optString(index).takeIf { it.isNotBlank() } ?: continue
-                    add(value)
-                }
-            }
-        }
-        val files = listOf("modified", "created", "deleted", "renamed", "notAdded", "conflicted")
-            .flatMap(::readArray)
-            .distinct()
-        return GitStatusSummary(
-            branch = json.optString("branch"),
-            isClean = json.optBoolean("isClean", files.isEmpty()),
-            files = files,
-        )
+        return parseGitStatusSummary(json)
     }
 
     private fun gitStatusFileEntry(path: String): FileEntry {
@@ -5120,5 +5537,12 @@ private data class PlanReviewCandidate(
 private data class PendingQuickReply(
     val agentId: String,
     val text: String,
+    val createdAt: Long,
+)
+
+private data class PendingApprovalResponse(
+    val agentId: String,
+    val requestId: String,
+    val approved: Boolean,
     val createdAt: Long,
 )

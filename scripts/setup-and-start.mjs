@@ -97,6 +97,7 @@ function startRelay(port, apiKey) {
       ...process.env,
       PORT: String(port),
       API_KEY: apiKey,
+      CODEX_CWD: rootDir,
     },
   });
 }

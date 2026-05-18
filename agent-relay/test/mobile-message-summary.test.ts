@@ -37,3 +37,14 @@ test('summarizes subagent without leaking internal parameter errors', () => {
   assert.equal(message.text, '子代理失败 · explorer');
   assert.equal(message.detailText, '子代理启动参数与 full-history fork 不兼容。');
 });
+
+test('summarizes inline user images without leaking base64 data', () => {
+  const message = summarizeMessageForMobile({
+    role: 'user',
+    type: 'user',
+    text: '为什么会报错\n<image>\n![image](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB)',
+  }) as any;
+
+  assert.equal(message.text, '为什么会报错\n已附加 1 张图片');
+  assert.doesNotMatch(message.text, /base64/);
+});

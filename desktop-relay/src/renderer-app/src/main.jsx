@@ -5,13 +5,7 @@ import './styles.css';
 const languageOptions = [
   ['system', 'System / 跟随手机'],
   ['zh', '简体中文'],
-  ['zh-Hant', '繁體中文'],
   ['en', 'English'],
-  ['ja', '日本語'],
-  ['ko', '한국어'],
-  ['es', 'Español'],
-  ['fr', 'Français'],
-  ['de', 'Deutsch'],
 ];
 
 const activeStatuses = new Set([
@@ -80,6 +74,13 @@ function statusLabel(status) {
   if (normalized === 'queued' || normalized === 'pending') return '排队中';
   if (normalized === 'resuming') return '恢复中';
   return status || '可恢复';
+}
+
+function permissionModeForTask(task) {
+  if (task?.permissionMode) return task.permissionMode;
+  if (task?.approvalPolicy === 'never' || task?.sandboxMode === 'danger-full-access' || task?.sandbox === 'danger-full-access') return 'full-access';
+  if (task?.approvalsReviewer === 'auto_review') return 'auto-review';
+  return 'default-review';
 }
 
 function messageLabel(type, role) {
@@ -455,11 +456,13 @@ function detailDisplay(message) {
 
 function useRelayWorkbench(api, appendLog, currentState) {
   const [workbench, setWorkbench] = useState(initialWorkbench);
+  const [socketEpoch, setSocketEpoch] = useState(0);
   const socketRef = useRef(null);
   const requestIdRef = useRef(1);
   const pendingRequestsRef = useRef(new Map());
   const taskRefreshTimerRef = useRef(null);
   const agentRefreshTimersRef = useRef(new Map());
+  const reconnectTimerRef = useRef(null);
   const workbenchRef = useRef(workbench);
 
   useEffect(() => {
@@ -479,6 +482,15 @@ function useRelayWorkbench(api, appendLog, currentState) {
         reject(new Error(`${action} timed out`));
       }, 30000);
       pendingRequestsRef.current.set(requestId, { resolve, reject, timer });
+    });
+  }, []);
+
+  const rejectPendingRelayRequests = useCallback((error) => {
+    const pending = Array.from(pendingRequestsRef.current.values());
+    pendingRequestsRef.current.clear();
+    pending.forEach((request) => {
+      clearTimeout(request.timer);
+      request.reject(error);
     });
   }, []);
 
@@ -660,14 +672,29 @@ function useRelayWorkbench(api, appendLog, currentState) {
   }, [appendLog, refreshSelectedThread, rememberPendingRequest, resolvePendingRequest, scheduleAgentRefresh, scheduleTaskRefresh]);
 
   useEffect(() => {
+    let disposed = false;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     if (!currentState?.relayRunning || !currentState?.relayUrl || !currentState?.apiKey) {
       if (socketRef.current) socketRef.current.close();
       socketRef.current = null;
+      rejectPendingRelayRequests(new Error('Relay WebSocket is not connected.'));
       setSocketStatus('offline', '等待中继启动');
       return;
     }
     const existing = socketRef.current;
     if (existing && [WebSocket.CONNECTING, WebSocket.OPEN].includes(existing.readyState)) return;
+
+    const scheduleReconnect = () => {
+      if (disposed || !currentState?.relayRunning || !currentState?.relayUrl || !currentState?.apiKey) return;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
+        setSocketEpoch((value) => value + 1);
+      }, 1500);
+    };
 
     setSocketStatus('offline', '正在连接任务流...');
     const socket = new WebSocket(currentState.relayUrl);
@@ -698,16 +725,28 @@ function useRelayWorkbench(api, appendLog, currentState) {
       handleRelayStream(message);
     });
     socket.addEventListener('close', () => {
+      if (disposed) return;
       if (socketRef.current === socket) socketRef.current = null;
+      rejectPendingRelayRequests(new Error('Relay WebSocket closed.'));
       setSocketStatus('offline', '任务流已断开，保留上次任务列表');
+      scheduleReconnect();
     });
     socket.addEventListener('error', () => {
+      if (disposed) return;
+      rejectPendingRelayRequests(new Error('Relay WebSocket connection failed.'));
       setSocketStatus('error', '任务流连接失败');
+      scheduleReconnect();
     });
     return () => {
+      disposed = true;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      rejectPendingRelayRequests(new Error('Relay WebSocket closed.'));
       socket.close();
     };
-  }, [currentState?.apiKey, currentState?.relayRunning, currentState?.relayUrl, handleRelayResponse, handleRelayStream, refreshTasks, setSocketStatus]);
+  }, [currentState?.apiKey, currentState?.relayRunning, currentState?.relayUrl, handleRelayResponse, handleRelayStream, refreshTasks, rejectPendingRelayRequests, setSocketStatus, socketEpoch]);
 
   const setTaskFilter = useCallback((filter) => {
     setWorkbench((current) => ({
@@ -792,6 +831,8 @@ function App() {
   const [draftCodexPath, setDraftCodexPath] = useState('');
   const [composerText, setComposerText] = useState('');
   const [portPreview, setPortPreview] = useState(null);
+  const draftDirtyRef = useRef({ port: false, workspace: false, codexPath: false });
+  const portPreviewSeqRef = useRef(0);
 
   const appendLog = useCallback((line) => {
     const text = String(line || '').trimEnd();
@@ -811,50 +852,80 @@ function App() {
     setWorkbench,
   } = useRelayWorkbench(api, appendLog, appState);
 
+  const syncDraftsFromState = useCallback((state, force = false) => {
+    if (force || !draftDirtyRef.current.port) setDraftPort(String(state.port || ''));
+    if (force || !draftDirtyRef.current.workspace) setDraftWorkspace(state.workspace || '');
+    if (force || !draftDirtyRef.current.codexPath) setDraftCodexPath(state.codexPath || state.codex?.path || '');
+  }, []);
+
+  const updateDraftPort = useCallback((value) => {
+    draftDirtyRef.current.port = true;
+    setDraftPort(value);
+  }, []);
+
+  const updateDraftWorkspace = useCallback((value) => {
+    draftDirtyRef.current.workspace = true;
+    setDraftWorkspace(value);
+  }, []);
+
+  const updateDraftCodexPath = useCallback((value) => {
+    draftDirtyRef.current.codexPath = true;
+    setDraftCodexPath(value);
+  }, []);
+
   useEffect(() => {
     api.onState((state) => {
       setAppState(state);
-      setDraftPort(String(state.port || ''));
-      setDraftWorkspace(state.workspace || '');
-      setDraftCodexPath(state.codexPath || state.codex?.path || '');
+      syncDraftsFromState(state);
     });
     api.onHealth((nextHealth) => setHealth(nextHealth));
     api.onLog(appendLog);
     api.getState().then((state) => {
       setAppState(state);
       setHealth(state.health || null);
-      setDraftPort(String(state.port || ''));
-      setDraftWorkspace(state.workspace || '');
-      setDraftCodexPath(state.codexPath || state.codex?.path || '');
+      syncDraftsFromState(state, true);
     }).catch((error) => appendLog(`Error: ${error.message || error}`));
-  }, [api, appendLog]);
+  }, [api, appendLog, syncDraftsFromState]);
 
   useEffect(() => {
     if (!appState || !draftPort) return;
+    const requestSeq = ++portPreviewSeqRef.current;
+    const requestedPort = String(draftPort).trim();
     const timer = setTimeout(() => {
-      api.previewPort({ port: draftPort })
-        .then(setPortPreview)
-        .catch((error) => setPortPreview({ portAvailable: false, portReclaimable: false, processes: [], message: error.message || String(error) }));
+      api.previewPort({ port: requestedPort })
+        .then((preview) => {
+          if (requestSeq === portPreviewSeqRef.current && requestedPort === String(draftPort).trim()) setPortPreview(preview);
+        })
+        .catch((error) => {
+          if (requestSeq === portPreviewSeqRef.current && requestedPort === String(draftPort).trim()) {
+            setPortPreview({ port: Number(requestedPort), portAvailable: false, portReclaimable: false, processes: [], message: error.message || String(error) });
+          }
+        });
     }, 260);
     return () => clearTimeout(timer);
   }, [api, appState, draftPort]);
 
-  const runAction = useCallback(async (key, action) => {
+  const runAction = useCallback(async (key, action, options = {}) => {
     setPendingAction(key);
     try {
       const nextState = await action();
       if (nextState) {
         setAppState(nextState);
-        setDraftPort(String(nextState.port || ''));
-        setDraftWorkspace(nextState.workspace || '');
-        setDraftCodexPath(nextState.codexPath || nextState.codex?.path || '');
+        const savedDrafts = options.savedDrafts || [];
+        if (savedDrafts.length > 0) {
+          draftDirtyRef.current = {
+            ...draftDirtyRef.current,
+            ...savedDrafts.reduce((acc, field) => ({ ...acc, [field]: false }), {}),
+          };
+        }
+        syncDraftsFromState(nextState);
       }
     } catch (error) {
       appendLog(`Error: ${error.message || error}`);
     } finally {
       setPendingAction('');
     }
-  }, [appendLog]);
+  }, [appendLog, syncDraftsFromState]);
 
   const activeAgent = useMemo(() => {
     const parsed = parseTarget(workbench.selectedTarget);
@@ -908,7 +979,13 @@ function App() {
     ].filter(Boolean).join(' ').toLowerCase().includes(query));
   }, [activeItems, historyItems, workbench.taskFilter, workbench.taskSearch]);
 
-  const canUsePort = portPreview?.portAvailable || portPreview?.portReclaimable || appState?.portAvailable || appState?.portReclaimable;
+  const previewMatchesDraft = portPreview && String(portPreview.port || '') === String(draftPort).trim();
+  const draftPortDirty = draftDirtyRef.current.port;
+  const canUsePort = previewMatchesDraft
+    ? portPreview?.portAvailable || portPreview?.portReclaimable
+    : draftPortDirty
+      ? false
+    : appState?.portAvailable || appState?.portReclaimable;
   const isBusy = Boolean(pendingAction || appState?.installRunning || appState?.update?.checking || appState?.update?.applying);
   const connectedClients = health?.data?.connectedClients ?? appState?.health?.data?.connectedClients ?? 0;
   const relayOnline = Boolean(appState?.relayRunning && (health?.online || appState?.health?.online));
@@ -931,7 +1008,7 @@ function App() {
           name: taskNameFromPrompt(text),
           model: activeAgent.model || 'gpt-5.5',
           cwd: activeAgent.cwd || appState?.workspace,
-          approvalPolicy: activeAgent.approvalPolicy || 'never',
+          permissionMode: permissionModeForTask(activeAgent),
           serviceTier: activeAgent.serviceTier,
           reasoningEffort: activeAgent.reasoningEffort,
         });
@@ -952,7 +1029,7 @@ function App() {
         name: selectedThread.name || selectedThread.preview || 'Resumed Codex task',
         model: selectedThread.model || 'gpt-5.5',
         cwd: selectedThread.cwd || selectedThread.projectRoot || appState?.workspace,
-        approvalPolicy: selectedThread.approvalPolicy || 'never',
+        permissionMode: permissionModeForTask(selectedThread),
         serviceTier: selectedThread.serviceTier,
         reasoningEffort: selectedThread.reasoningEffort,
         codexThreadId: selectedThread.id,
@@ -1013,9 +1090,9 @@ function App() {
             draftPort={draftPort}
             draftWorkspace={draftWorkspace}
             draftCodexPath={draftCodexPath}
-            setDraftPort={setDraftPort}
-            setDraftWorkspace={setDraftWorkspace}
-            setDraftCodexPath={setDraftCodexPath}
+            setDraftPort={updateDraftPort}
+            setDraftWorkspace={updateDraftWorkspace}
+            setDraftCodexPath={updateDraftCodexPath}
             runAction={runAction}
             updateText={updateInfoText(appState)}
           />
@@ -1140,7 +1217,7 @@ function ConfigScreen({
             <h2>快速连接</h2>
             <span>{appState?.relayRunning ? '可扫码' : '等待启动'}</span>
           </div>
-          <QuickConnect state={appState} api={api} />
+          <QuickConnect state={appState} api={api} portPreview={portPreview} draftPort={draftPort} />
         </section>
         <section className="config-card settings-card">
           <div className="card-heading">
@@ -1306,17 +1383,19 @@ function Disclosure({ title, badge, open, onToggle, children }) {
   );
 }
 
-function QuickConnect({ state, api }) {
+function QuickConnect({ state, api, portPreview, draftPort }) {
+  const previewMatchesDraft = portPreview && String(portPreview.port || '') === String(draftPort || '').trim();
+  const displayState = previewMatchesDraft ? { ...state, ...portPreview } : state;
   return (
     <div className="quick-connect">
       <div className="qr-frame">
-        {state?.qrDataUrl ? <img src={state.qrDataUrl} alt="EasyCodex relay QR" /> : <span>等待二维码</span>}
+        {displayState?.qrDataUrl ? <img src={displayState.qrDataUrl} alt="EasyCodex relay QR" /> : <span>等待二维码</span>}
       </div>
       <div className="quick-copy">
-        <p>{state?.relayRunning ? `Relay: ${state.relayUrl}` : '启动中继后，手机扫码即可导入地址和 API Key。'}</p>
+        <p>{displayState?.relayUrl ? `Relay: ${displayState.relayUrl}` : '启动中继后，手机扫码即可导入地址和 API Key。'}</p>
         <div className="button-row">
-          <button className="secondary" type="button" disabled={!state} onClick={() => api.copyText(connectionText(state))}>复制连接</button>
-          <button className="secondary" type="button" disabled={!state?.deepLink} onClick={() => api.copyText(state.deepLink)}>复制深链</button>
+          <button className="secondary" type="button" disabled={!displayState} onClick={() => api.copyText(connectionText(displayState))}>复制连接</button>
+          <button className="secondary" type="button" disabled={!displayState?.deepLink} onClick={() => api.copyText(displayState.deepLink)}>复制深链</button>
         </div>
       </div>
     </div>
@@ -1404,10 +1483,17 @@ function SetupPanel({
         <div className="input-row">
           <input value={draftCodexPath} disabled={isBusy || appState?.relayRunning} onInput={(event) => setDraftCodexPath(event.currentTarget.value)} placeholder="codex" />
           <button className="icon-button" type="button" disabled={isBusy || appState?.relayRunning} onClick={async () => {
-            const codexPath = await api.browseCodex();
+            const browseResult = await api.browseCodex();
+            const codexPath = typeof browseResult === 'string'
+              ? browseResult
+              : browseResult?.codexPath || browseResult?.codex?.path || '';
             if (codexPath) {
               setDraftCodexPath(codexPath);
-              runAction('saving', () => api.saveConfig({ codexPath }));
+              runAction(
+                'saving',
+                () => (typeof browseResult === 'string' ? api.saveConfig({ codexPath }) : Promise.resolve(browseResult)),
+                { savedDrafts: ['codexPath'] },
+              );
             }
           }}>...</button>
         </div>
@@ -1417,7 +1503,7 @@ function SetupPanel({
       </label>
       <div className="wide button-row">
         <button className="secondary" type="button" disabled={isBusy || appState?.relayRunning} onClick={() => runAction('installing', () => api.installAndBuild())}>安装/构建</button>
-        <button className="secondary" type="button" disabled={isBusy} onClick={() => runAction('saving', () => api.saveConfig({ port: draftPort, workspace: draftWorkspace, codexPath: draftCodexPath }))}>保存设置</button>
+        <button className="secondary" type="button" disabled={isBusy} onClick={() => runAction('saving', () => api.saveConfig({ port: draftPort, workspace: draftWorkspace, codexPath: draftCodexPath }), { savedDrafts: ['port', 'workspace', 'codexPath'] })}>保存设置</button>
         <button className="secondary" type="button" disabled={isBusy} onClick={() => runAction('checking', () => api.checkUpdate())}>检查更新</button>
         <button className="primary" type="button" disabled={isBusy || appState?.update?.applying || !appState?.update?.info?.updateAvailable} onClick={() => runAction('updating', () => api.applyUpdate())}>应用更新</button>
       </div>

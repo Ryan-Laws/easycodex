@@ -19,8 +19,8 @@ npm run dist:win
 
 Windows artifacts are written to `desktop-relay/release/`:
 
-- installer: `EasyCodex Relay Setup <version>.exe`
-- portable app: `EasyCodex Relay <version>.exe`
+- installer: `EasyCodex.Relay.Setup.<version>-<arch>.exe`
+- portable app: `EasyCodex.Relay.Portable.<version>-<arch>.exe`
 - unpacked app: `win-unpacked/`
 
 ## Package macOS
@@ -68,6 +68,6 @@ The workflow uploads the Windows installer, Windows portable app, macOS DMG/ZIP 
 ## Behavior
 
 - Development mode uses the repository `agent-relay/` directly.
-- Packaged mode copies `agent-relay` into `~/.easycodex/desktop-relay-runtime/` so dependencies and builds can be written safely.
+- Packaged mode prefers the bundled `agent-relay` resources shipped inside the app. If those resources are incomplete, it falls back to `~/.easycodex/desktop-relay-runtime/`.
 - The relay API key is read from or generated into `~/.easycodex/config.json`.
 - The desktop app follows the latest connected phone language reported by the relay. If no phone language is available, it follows the desktop system language.

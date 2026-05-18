@@ -1,9 +1,12 @@
 package com.easycodex.mobile
 
 import android.content.ClipData
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
+import android.widget.Toast
+import androidx.core.content.FileProvider
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -38,10 +41,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Science
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
@@ -133,6 +142,9 @@ import org.commonmark.node.StrongEmphasis
 import org.commonmark.node.Text as MarkdownTextNode
 import org.commonmark.node.ThematicBreak
 import org.commonmark.parser.Parser
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 
@@ -151,9 +163,23 @@ private const val LONG_MESSAGE_TEXT_LIMIT = 1_600
 private const val MESSAGE_PREVIEW_TEXT_LIMIT = 900
 private const val MESSAGE_PREVIEW_LINE_LIMIT = 14
 private const val STREAMING_REVEAL_FRAME_MS = 24L
+private const val MARKDOWN_IMAGE_CONNECT_TIMEOUT_MS = 5_000
+private const val MARKDOWN_IMAGE_READ_TIMEOUT_MS = 10_000
+private const val MARKDOWN_IMAGE_MAX_BYTES = 16 * 1024 * 1024
+private const val ATTACHMENT_PREVIEW_MAX_DIMENSION = 900
 
 private fun AttachmentDraft.isPreviewImage(): Boolean {
     return !previewUri.isNullOrBlank() && mimeType?.startsWith("image/") == true
+}
+
+private fun sampledBitmapFromBytes(bytes: ByteArray, maxDimension: Int): android.graphics.Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    val largestDimension = maxOf(bounds.outWidth, bounds.outHeight)
+    val sampleSize = generateSequence(1) { it * 2 }
+        .first { largestDimension / it <= maxDimension || it >= 16 }
+    val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
 }
 
 private suspend fun LazyListState.scrollToBottomAnchor(bottomIndex: Int, animated: Boolean = false) {
@@ -300,6 +326,8 @@ fun Conversation(
                             messages = item.messages,
                             kind = item.kind,
                             metrics = metrics,
+                            relayUrl = relayUrl,
+                            apiKey = apiKey,
                             onOpenDiffReview = onOpenDiffReview,
                         )
 
@@ -496,6 +524,24 @@ private data class DetailDisplay(
     val deletions: Int = 0,
     val files: List<String> = emptyList(),
     val fileEntries: List<FileChangeEntry> = emptyList(),
+    val artifact: StructuredArtifactDisplay? = null,
+)
+
+internal enum class StructuredArtifactStatus {
+    Passed,
+    Failed,
+    Running,
+    Unknown,
+}
+
+internal data class StructuredArtifactDisplay(
+    val type: String,
+    val label: String,
+    val title: String,
+    val status: String = "",
+    val statusKind: StructuredArtifactStatus = StructuredArtifactStatus.Unknown,
+    val source: String = "",
+    val summary: String = "",
 )
 
 private data class FileChangeStats(
@@ -661,6 +707,9 @@ private fun AgentMessage.isDetailMessage(): Boolean {
     return type == "command" ||
         type == "command_output" ||
         type == "file_change" ||
+        type == "screenshot" ||
+        type == "test_result" ||
+        type == "plugin_activity" ||
         type == "tool" ||
         type == "tool_call"
 }
@@ -694,6 +743,9 @@ private fun messageTypeLabel(type: String, strings: AppStrings): String {
         "command" -> strings.commandLabel
         "command_output" -> strings.commandOutputLabel
         "file_change" -> strings.fileChangeLabel
+        "screenshot" -> "截图"
+        "test_result" -> "测试结果"
+        "plugin_activity" -> "插件/技能"
         "sub_agent" -> strings.subAgentLabel
         "plan" -> strings.planLabel
         "thinking" -> strings.thinkingLabel
@@ -707,6 +759,7 @@ private fun AgentMessage.detailDisplay(strings: AppStrings): DetailDisplay {
     return when (type) {
         "file_change" -> fileChangeDisplay(bodyText, strings)
         "sub_agent" -> commandDisplay(bodyText, isOutput = true, strings = strings).copy(label = strings.subAgentLabel)
+        "screenshot", "test_result", "plugin_activity" -> artifactDisplay(type, bodyText)
         "command" -> commandDisplay(bodyText, isOutput = false, strings = strings)
         "command_output" -> commandDisplay(bodyText, isOutput = true, strings = strings)
         else -> DetailDisplay(messageTypeLabel(type, strings), text.lineSequence().firstOrNull { it.isNotBlank() } ?: messageTypeLabel(type, strings), "", bodyText)
@@ -757,6 +810,103 @@ private fun commandDisplay(raw: String, isOutput: Boolean, strings: AppStrings):
     }
     val subtitle = subtitleParts.filter { it.isNotBlank() }.joinToString(" · ")
     return DetailDisplay(if (isOutput) strings.commandOutputLabel else strings.commandLabel, title, subtitle, raw)
+}
+
+private fun artifactDisplay(type: String, raw: String): DetailDisplay {
+    val artifact = parseStructuredArtifactDisplay(type, raw)
+    val subtitle = listOf(artifact.status, artifact.source, artifact.summary)
+        .filter { it.isNotBlank() && it != artifact.title }
+        .joinToString(" · ")
+    return DetailDisplay(
+        label = artifact.label,
+        title = artifact.title.compactDetailTitle(),
+        subtitle = subtitle.compactDetailTitle(72),
+        body = raw,
+        artifact = artifact,
+    )
+}
+
+internal fun parseStructuredArtifactDisplay(type: String, raw: String): StructuredArtifactDisplay {
+    val label = structuredArtifactLabel(type)
+    var title = ""
+    var status = ""
+    var source = ""
+    var summary = ""
+    var markdownAlt = ""
+    raw.lineSequence().take(80).forEach { line ->
+        val trimmed = line.trim()
+        if (trimmed.isBlank()) return@forEach
+        val image = markdownImage(trimmed)
+        if (image != null) {
+            markdownAlt = image.alt
+            if (source.isBlank()) source = image.source
+            if (title.isBlank()) title = image.alt
+            return@forEach
+        }
+        val key = trimmed.substringBefore(':', "").trim().lowercase().replace("-", "_")
+        val value = trimmed.substringAfter(':', "").trim()
+        when {
+            key in setOf("title", "name") && title.isBlank() -> title = value
+            key == "screenshot" && title.isBlank() -> title = value
+            key == "command" && title.isBlank() -> title = value
+            key in setOf("tool", "plugin", "skill") && title.isBlank() -> title = value
+            key in setOf("source", "path", "file", "url") && source.isBlank() -> source = value
+            key == "status" && status.isBlank() -> status = value
+            ':' !in trimmed && summary.isBlank() -> summary = trimmed
+        }
+    }
+    if (title.isBlank()) {
+        title = when {
+            markdownAlt.isNotBlank() -> markdownAlt
+            source.isNotBlank() -> source.substringAfterLast('/').substringAfterLast('\\')
+            summary.isNotBlank() -> summary
+            else -> label
+        }
+    }
+    return StructuredArtifactDisplay(
+        type = type,
+        label = label,
+        title = title.ifBlank { label },
+        status = status,
+        statusKind = structuredArtifactStatusKind(status),
+        source = source,
+        summary = summary,
+    )
+}
+
+private fun structuredArtifactLabel(type: String): String {
+    return when (type) {
+        "screenshot" -> "截图"
+        "test_result" -> "测试结果"
+        "plugin_activity" -> "插件/技能"
+        else -> type.replace('_', ' ')
+    }
+}
+
+internal fun structuredArtifactStatusKind(status: String): StructuredArtifactStatus {
+    val normalized = status.trim().lowercase()
+    return when {
+        normalized in setOf("pass", "passed", "success", "succeeded", "ok", "green") ||
+            normalized.contains("passed") ||
+            normalized.contains("success") ||
+            normalized.contains("通过") ||
+            normalized.contains("成功") -> StructuredArtifactStatus.Passed
+
+        normalized in setOf("fail", "failed", "failure", "error", "errored", "red") ||
+            normalized.contains("failed") ||
+            normalized.contains("failure") ||
+            normalized.contains("error") ||
+            normalized.contains("失败") ||
+            normalized.contains("错误") -> StructuredArtifactStatus.Failed
+
+        normalized in setOf("running", "started", "pending", "in_progress", "working") ||
+            normalized.contains("running") ||
+            normalized.contains("progress") ||
+            normalized.contains("运行") ||
+            normalized.contains("进行中") -> StructuredArtifactStatus.Running
+
+        else -> StructuredArtifactStatus.Unknown
+    }
 }
 
 private fun fileChangeDisplay(raw: String, strings: AppStrings): DetailDisplay {
@@ -931,6 +1081,7 @@ private fun LightweightDetailHeader(
     onToggleExpanded: () -> Unit,
     modifier: Modifier = Modifier,
     icon: ImageVector = Icons.Default.Description,
+    iconTint: Color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.66f),
 ) {
     val strings = LocalAppStrings.current
     Row(
@@ -945,7 +1096,7 @@ private fun LightweightDetailHeader(
         Icon(
             icon,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.66f),
+            tint = iconTint,
             modifier = Modifier.size(15.dp),
         )
         Text(
@@ -1029,6 +1180,8 @@ private fun DetailGroupBubble(
     messages: List<AgentMessage>,
     kind: DetailGroupKind,
     metrics: ConversationLayoutMetrics,
+    relayUrl: String = "",
+    apiKey: String = "",
     onOpenDiffReview: () -> Unit = {},
 ) {
     val strings = LocalAppStrings.current
@@ -1090,7 +1243,7 @@ private fun DetailGroupBubble(
                     ) {
                         messages.forEachIndexed { index, message ->
                             if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.34f))
-                            DetailMessageCard(message, onOpenDiffReview)
+                            DetailMessageCard(message, relayUrl = relayUrl, apiKey = apiKey, onOpenDiffReview = onOpenDiffReview)
                         }
                     }
                 }
@@ -1326,7 +1479,7 @@ private fun MessageBubble(
             horizontalArrangement = Arrangement.Start,
         ) {
             Box(Modifier.fillMaxWidth(metrics.detailBubbleWidth)) {
-                DetailMessageCard(message, onOpenDiffReview)
+                DetailMessageCard(message, relayUrl = relayUrl, apiKey = apiKey, onOpenDiffReview = onOpenDiffReview)
             }
         }
         return
@@ -1508,15 +1661,19 @@ private fun AttachmentImagePreview(attachment: AttachmentDraft, wide: Boolean) {
     val context = LocalContext.current
     var image by remember(attachment.previewUri) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
     LaunchedEffect(attachment.previewUri) {
-        image = attachment.previewUri
-            ?.let { uri -> runCatching { Uri.parse(uri) }.getOrNull() }
-            ?.let { uri ->
-                runCatching {
-                    context.contentResolver.openInputStream(uri)?.use { stream ->
-                        BitmapFactory.decodeStream(stream)?.asImageBitmap()
-                    }
-                }.getOrNull()
-            }
+        image = null
+        image = withContext(Dispatchers.IO) {
+            attachment.previewUri
+                ?.let { uri -> runCatching { Uri.parse(uri) }.getOrNull() }
+                ?.let { uri ->
+                    runCatching {
+                        val bytes = context.contentResolver.openInputStream(uri)?.use { stream ->
+                            readBytesWithinLimit(stream, MARKDOWN_IMAGE_MAX_BYTES)
+                        } ?: return@runCatching null
+                        sampledBitmapFromBytes(bytes, ATTACHMENT_PREVIEW_MAX_DIMENSION)?.asImageBitmap()
+                    }.getOrNull()
+                }
+        }
     }
     Surface(
         shape = RoundedCornerShape(10.dp),
@@ -1576,7 +1733,12 @@ private fun PlanMessageCard(message: AgentMessage, onOpenPlan: () -> Unit) {
 }
 
 @Composable
-private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Unit = {}) {
+private fun DetailMessageCard(
+    message: AgentMessage,
+    relayUrl: String = "",
+    apiKey: String = "",
+    onOpenDiffReview: () -> Unit = {},
+) {
     val strings = LocalAppStrings.current
     var expanded by remember(message.stableKey()) { mutableStateOf(detailMessageDefaultExpanded(message)) }
     val detail = remember(message.text, message.detailText, message.type, strings) { message.detailDisplay(strings) }
@@ -1585,11 +1747,62 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
     }.ifBlank { "..." }
     val bodyIsLong = body.length > LONG_DETAIL_TEXT_LIMIT
     val visibleBody = body
+    val artifact = detail.artifact
+    val context = LocalContext.current
     val clipboard = LocalClipboard.current
     val clipboardScope = rememberCoroutineScope()
     fun copyText(text: String) {
         clipboardScope.launch {
             clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("EasyCodex", text)))
+        }
+    }
+    fun openDirectSource(source: String) {
+        val target = artifactOpenSource(source)
+        if (target.isBlank()) return
+        val uri = runCatching { Uri.parse(target) }.getOrNull() ?: return
+        val scheme = uri.scheme?.lowercase().orEmpty()
+        if (scheme !in setOf("http", "https", "content")) return
+        runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, uri)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }
+    }
+    fun openArtifactSource(source: String) {
+        if (source.isLocalArtifactSource() && relayUrl.isNotBlank()) {
+            clipboardScope.launch {
+                val cached = withContext(Dispatchers.IO) {
+                    downloadArtifactSourceToCache(context, source, relayUrl, apiKey)
+                }
+                if (cached == null) {
+                    Toast.makeText(context, strings.artifactOpenFailed, Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW)
+                            .setDataAndType(cached.uri, cached.mimeType)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                    )
+                }.onFailure {
+                    Toast.makeText(context, strings.artifactOpenFailed, Toast.LENGTH_SHORT).show()
+                }
+            }
+        } else {
+            openDirectSource(source)
+        }
+    }
+    fun shareSource(source: String) {
+        runCatching {
+            context.startActivity(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_SEND)
+                        .setType("text/plain")
+                        .putExtra(Intent.EXTRA_TEXT, source),
+                    strings.shareSource,
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
         }
     }
     if (message.type == "file_change") {
@@ -1614,6 +1827,8 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
             subtitle = detail.subtitle,
             expanded = expanded,
             onToggleExpanded = { expanded = !expanded },
+            icon = artifactIcon(artifact) ?: Icons.Default.Description,
+            iconTint = artifactIconTint(artifact),
         )
         AnimatedVisibility(
             visible = expanded,
@@ -1630,6 +1845,28 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
                         leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp)) },
                         label = { Text(if (bodyIsLong) strings.copyFullText else strings.copyContent) },
                     )
+                    val artifactSource = artifact?.source.orEmpty()
+                    if (artifactSource.isNotBlank()) {
+                        val openableSource = artifactOpenSource(artifactSource)
+                        val sourceScheme = runCatching { Uri.parse(openableSource).scheme?.lowercase().orEmpty() }.getOrDefault("")
+                        if (sourceScheme in setOf("http", "https", "content") || (artifactSource.isLocalArtifactSource() && relayUrl.isNotBlank())) {
+                            AssistChip(
+                                onClick = rememberHapticClick { openArtifactSource(artifactSource) },
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                                label = { Text(strings.openSource) },
+                            )
+                        }
+                        AssistChip(
+                            onClick = rememberHapticClick { shareSource(artifactSource) },
+                            leadingIcon = { Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            label = { Text(strings.shareSource) },
+                        )
+                        AssistChip(
+                            onClick = rememberHapticClick { copyText(artifactSource) },
+                            leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            label = { Text(strings.copySource) },
+                        )
+                    }
                     if (message.type == "file_change") {
                         AssistChip(
                             onClick = rememberHapticClick(onOpenDiffReview),
@@ -1643,6 +1880,21 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
                                 label = { Text(path.substringAfterLast('/').substringAfterLast('\\'), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             )
                         }
+                    }
+                }
+                artifact?.let { display ->
+                    if (display.type == "test_result" && display.status.isNotBlank()) {
+                        ArtifactStatusBadge(display.status, display.statusKind)
+                    }
+                    if (display.type == "screenshot" && display.source.isNotBlank()) {
+                        MarkdownImage(MarkdownImageRef(display.title, display.source), relayUrl, apiKey)
+                        Text(
+                            display.source,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
                 Surface(
@@ -1660,6 +1912,63 @@ private fun DetailMessageCard(message: AgentMessage, onOpenDiffReview: () -> Uni
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun artifactIcon(artifact: StructuredArtifactDisplay?): ImageVector? {
+    return when (artifact?.type) {
+        "screenshot" -> Icons.Default.Image
+        "test_result" -> when (artifact.statusKind) {
+            StructuredArtifactStatus.Passed -> Icons.Default.TaskAlt
+            StructuredArtifactStatus.Failed -> Icons.Default.Error
+            else -> Icons.Default.Science
+        }
+        "plugin_activity" -> Icons.Default.Extension
+        else -> null
+    }
+}
+
+@Composable
+private fun artifactIconTint(artifact: StructuredArtifactDisplay?): Color {
+    return when (artifact?.statusKind) {
+        StructuredArtifactStatus.Passed -> Color(0xFF16A34A)
+        StructuredArtifactStatus.Failed -> MaterialTheme.colorScheme.error
+        StructuredArtifactStatus.Running -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.66f)
+    }
+}
+
+@Composable
+private fun ArtifactStatusBadge(status: String, statusKind: StructuredArtifactStatus) {
+    val color = when (statusKind) {
+        StructuredArtifactStatus.Passed -> Color(0xFF16A34A)
+        StructuredArtifactStatus.Failed -> MaterialTheme.colorScheme.error
+        StructuredArtifactStatus.Running -> MaterialTheme.colorScheme.primary
+        StructuredArtifactStatus.Unknown -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Surface(
+        color = color.copy(alpha = 0.10f),
+        contentColor = color,
+        shape = RoundedCornerShape(999.dp),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.34f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                when (statusKind) {
+                    StructuredArtifactStatus.Passed -> Icons.Default.TaskAlt
+                    StructuredArtifactStatus.Failed -> Icons.Default.Error
+                    else -> Icons.Default.Science
+                },
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+            )
+            Text(status, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
         }
     }
 }
@@ -2316,34 +2625,158 @@ private fun relayHttpBase(relayUrl: String): String {
         .trimEnd('/')
 }
 
-private fun imageLoadSource(source: String, relayUrl: String, apiKey: String): String {
+private fun imageLoadSource(source: String, relayUrl: String): String {
     val clean = source.trim()
-    if (!clean.isLocalImagePath() || relayUrl.isBlank() || apiKey.isBlank()) return clean
+    if (!clean.isLocalImagePath() || relayUrl.isBlank()) return clean
     val localPath = if (clean.startsWith("file://", ignoreCase = true)) {
         runCatching { Uri.parse(clean).path }.getOrNull().orEmpty().ifBlank { clean.removePrefix("file://") }
     } else {
         clean
     }
-    return "${relayHttpBase(relayUrl)}/media/image?key=${URLEncoder.encode(apiKey, "UTF-8")}&path=${URLEncoder.encode(localPath, "UTF-8")}"
+    return "${relayHttpBase(relayUrl)}/media/image?path=${URLEncoder.encode(localPath, "UTF-8")}"
+}
+
+private fun String.isLocalArtifactSource(): Boolean = isLocalImagePath()
+
+private fun localArtifactPath(source: String): String {
+    val clean = source.trim()
+    return if (clean.startsWith("file://", ignoreCase = true)) {
+        runCatching { Uri.parse(clean).path }.getOrNull().orEmpty().ifBlank { clean.removePrefix("file://") }
+    } else {
+        clean
+    }
+}
+
+private fun artifactFileLoadSource(source: String, relayUrl: String): String {
+    val clean = source.trim()
+    if (!clean.isLocalArtifactSource() || relayUrl.isBlank()) return clean
+    return "${relayHttpBase(relayUrl)}/media/file?path=${URLEncoder.encode(localArtifactPath(clean), "UTF-8")}"
+}
+
+internal fun artifactOpenSource(source: String): String {
+    val clean = source.trim()
+    if (clean.isLocalImagePath()) return ""
+    return clean
+}
+
+private data class CachedArtifactSource(val uri: Uri, val mimeType: String)
+
+private fun artifactCacheFileName(source: String, contentType: String): String {
+    val base = localArtifactPath(source)
+        .substringAfterLast('/')
+        .substringAfterLast('\\')
+        .replace(Regex("[^A-Za-z0-9._-]"), "_")
+        .ifBlank { "artifact" }
+        .take(96)
+    val fallbackExtension = when {
+        contentType.startsWith("image/png") -> ".png"
+        contentType.startsWith("image/jpeg") -> ".jpg"
+        contentType.startsWith("image/webp") -> ".webp"
+        contentType.startsWith("application/pdf") -> ".pdf"
+        contentType.startsWith("text/") -> ".txt"
+        else -> ""
+    }
+    return if (base.contains('.')) base else base + fallbackExtension
+}
+
+private fun mimeTypeForArtifact(name: String, contentType: String): String {
+    val cleanContentType = contentType.substringBefore(';').trim().lowercase()
+    if (cleanContentType.isNotBlank() && cleanContentType != "application/octet-stream") return cleanContentType
+    return when (name.substringAfterLast('.', "").lowercase()) {
+        "png" -> "image/png"
+        "jpg", "jpeg" -> "image/jpeg"
+        "gif" -> "image/gif"
+        "webp" -> "image/webp"
+        "pdf" -> "application/pdf"
+        "txt", "log", "md", "json", "csv", "tsv", "xml", "html", "css", "js", "ts", "kt", "java", "py", "rs", "go" -> "text/plain"
+        else -> "application/octet-stream"
+    }
+}
+
+private fun downloadArtifactSourceToCache(
+    context: android.content.Context,
+    source: String,
+    relayUrl: String,
+    apiKey: String,
+): CachedArtifactSource? {
+    return runCatching {
+        val loadSource = artifactFileLoadSource(source, relayUrl)
+        if (!loadSource.isHttpImageSource()) return null
+        val relayBase = relayHttpBase(relayUrl)
+        val connection = (URL(loadSource).openConnection() as? HttpURLConnection) ?: return null
+        connection.useCaches = false
+        connection.instanceFollowRedirects = false
+        if (apiKey.isNotBlank() && loadSource.startsWith("$relayBase/media/file?", ignoreCase = true)) {
+            connection.setRequestProperty("Authorization", "Bearer $apiKey")
+        }
+        connection.connectTimeout = MARKDOWN_IMAGE_CONNECT_TIMEOUT_MS
+        connection.readTimeout = MARKDOWN_IMAGE_READ_TIMEOUT_MS
+        if (connection.responseCode !in 200..299) return null
+        val contentType = connection.contentType.orEmpty()
+        val bytes = connection.inputStream.use { stream ->
+            readBytesWithinLimit(stream, MARKDOWN_IMAGE_MAX_BYTES)
+        } ?: return null
+        val fileName = artifactCacheFileName(source, contentType)
+        val cacheDir = File(context.cacheDir, "artifacts").apply { mkdirs() }
+        val target = File(cacheDir, fileName)
+        target.writeBytes(bytes)
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", target)
+        CachedArtifactSource(uri, mimeTypeForArtifact(fileName, contentType))
+    }.getOrNull()
+}
+
+private fun readBytesWithinLimit(input: java.io.InputStream, maxBytes: Int): ByteArray? {
+    val output = ByteArrayOutputStream()
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var total = 0
+    while (true) {
+        val read = input.read(buffer)
+        if (read == -1) break
+        total += read
+        if (total > maxBytes) return null
+        output.write(buffer, 0, read)
+    }
+    return output.toByteArray()
+}
+
+private fun decodeHttpImage(source: String, apiKey: String, relayHttpBase: String): android.graphics.Bitmap? {
+    val connection = URL(source).openConnection()
+    connection.useCaches = false
+    if (apiKey.isNotBlank() && source.startsWith("$relayHttpBase/media/image?", ignoreCase = true)) {
+        connection.setRequestProperty("Authorization", "Bearer $apiKey")
+        (connection as? HttpURLConnection)?.instanceFollowRedirects = false
+    }
+    connection.connectTimeout = MARKDOWN_IMAGE_CONNECT_TIMEOUT_MS
+    connection.readTimeout = MARKDOWN_IMAGE_READ_TIMEOUT_MS
+    val contentLength = connection.contentLengthLong
+    if (contentLength > MARKDOWN_IMAGE_MAX_BYTES) return null
+    val bytes = connection.getInputStream().use { stream ->
+        readBytesWithinLimit(stream, MARKDOWN_IMAGE_MAX_BYTES)
+    } ?: return null
+    return sampledBitmapFromBytes(bytes, ATTACHMENT_PREVIEW_MAX_DIMENSION)
 }
 
 @Composable
 private fun MarkdownImage(image: MarkdownImageRef, relayUrl: String, apiKey: String) {
     var bitmap by remember(image.source, relayUrl, apiKey) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
     var failed by remember(image.source, relayUrl, apiKey) { mutableStateOf(false) }
-    val loadSource = remember(image.source, relayUrl, apiKey) { imageLoadSource(image.source, relayUrl, apiKey) }
+    val relayBase = remember(relayUrl) { relayHttpBase(relayUrl) }
+    val loadSource = remember(image.source, relayUrl) { imageLoadSource(image.source, relayUrl) }
     LaunchedEffect(loadSource) {
+        bitmap = null
         failed = false
         bitmap = withContext(Dispatchers.IO) {
             runCatching {
                 when {
                     loadSource.isDataImageSource() -> {
                         val encoded = loadSource.substringAfter(',', "")
+                        if ((encoded.length * 3L) / 4L > MARKDOWN_IMAGE_MAX_BYTES) return@runCatching null
                         val bytes = Base64.decode(encoded, Base64.DEFAULT)
-                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (bytes.size > MARKDOWN_IMAGE_MAX_BYTES) return@runCatching null
+                        sampledBitmapFromBytes(bytes, ATTACHMENT_PREVIEW_MAX_DIMENSION)
                     }
                     loadSource.isHttpImageSource() -> {
-                        URL(loadSource).openStream().use { stream -> BitmapFactory.decodeStream(stream) }
+                        decodeHttpImage(loadSource, apiKey, relayBase)
                     }
                     else -> null
                 }?.asImageBitmap()
@@ -2440,4 +2873,3 @@ private fun MarkdownCodeBlock(block: MarkdownBlock) {
         }
     }
 }
-

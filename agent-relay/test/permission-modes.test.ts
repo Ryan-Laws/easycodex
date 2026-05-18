@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { codexThreadResumeCall, codexThreadStartCall, codexTurnStartCall } from '../src/codex-rpc';
-import { permissionModeFromRuntime, permissionRuntimeConfig } from '../src/permission-modes';
+import { codexThreadResumeCall, codexThreadStartCall, codexTurnStartCall, isRpcReply, isRpcRequest } from '../src/codex-rpc';
+import {
+  permissionModeFromCreateAgentParams,
+  permissionModeFromRuntime,
+  permissionRuntimeConfig,
+} from '../src/permission-modes';
 
 function paramsOf(payload: string): Record<string, unknown> {
   return JSON.parse(payload).params;
@@ -31,6 +35,26 @@ test('infers permission mode from runtime fields when no explicit mode exists', 
   assert.equal(permissionModeFromRuntime({}), 'default-review');
   assert.equal(permissionModeFromRuntime({ approvalPolicy: 'never' }), 'full-access');
   assert.equal(permissionModeFromRuntime({ approvalsReviewer: 'auto_review' }), 'auto-review');
+});
+
+test('create agent params preserve legacy full access permissions', () => {
+  assert.equal(permissionModeFromCreateAgentParams({ approvalPolicy: 'never' }), 'full-access');
+  assert.equal(permissionModeFromCreateAgentParams({ sandboxMode: 'danger-full-access' }), 'full-access');
+});
+
+test('create agent params default safely when runtime permissions are missing', () => {
+  assert.equal(permissionModeFromCreateAgentParams({}), 'default-review');
+});
+
+test('create agent explicit permission mode wins over legacy fields', () => {
+  assert.equal(
+    permissionModeFromCreateAgentParams({
+      permissionMode: 'default-review',
+      approvalPolicy: 'never',
+      sandboxMode: 'danger-full-access',
+    }),
+    'default-review',
+  );
 });
 
 test('thread and turn rpc payloads carry permission fields', () => {
@@ -71,4 +95,10 @@ test('thread and turn rpc payloads carry permission fields', () => {
       sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['C:/repo'], networkAccess: false },
     },
   );
+});
+
+test('json-rpc server requests are not misclassified as replies', () => {
+  assert.equal(isRpcRequest({ id: 1, method: 'request/user_input', params: {} }), true);
+  assert.equal(isRpcReply({ id: 1, method: 'request/user_input', params: {} }), false);
+  assert.equal(isRpcReply({ id: 1, result: { ok: true } }), true);
 });

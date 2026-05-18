@@ -26,6 +26,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -49,6 +50,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 
@@ -369,188 +372,330 @@ private fun PlanReviewPreview(text: String, modifier: Modifier = Modifier) {
     }
 }
 
+private enum class DiffReviewSection {
+    Files,
+    Diff,
+    Preview,
+    Commit,
+}
+
 @Composable
 fun DiffReviewDialog(
     review: DiffReviewState,
     commitDraft: GitCommitDraft,
     onSelectFile: (String?) -> Unit,
+    onToggleFileSelection: (String) -> Unit,
+    onSetFileSelection: (List<String>) -> Unit,
     onCommitMessageChange: (String) -> Unit,
     onCommit: () -> Unit,
+    onRestoreSelected: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val strings = LocalAppStrings.current
     val clipboard = LocalClipboard.current
     val clipboardScope = rememberCoroutineScope()
     var showCommitConfirm by remember(review.agentId, review.cwd) { mutableStateOf(false) }
+    var showRestoreConfirm by remember(review.agentId, review.cwd) { mutableStateOf(false) }
+    var activeSection by remember(review.agentId, review.cwd, review.requestId) { mutableStateOf(DiffReviewSection.Diff) }
+    val restorableSelection = remember(review.selectedFiles, review.status?.restorableFiles) {
+        val restorableFiles = review.status?.restorableFiles.orEmpty()
+        if (restorableFiles.isEmpty()) review.selectedFiles else review.selectedFiles.filter { it in restorableFiles }
+    }
     fun copyText(text: String) {
         clipboardScope.launch {
             clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("EasyCodex", text)))
         }
     }
-    AlertDialog(
+    val displayDiff = remember(review.diff, review.selectedFile) {
+        review.diff.take(12_000) + if (review.diff.length > 12_000) "\n\n... ${strings.diffTruncated}" else ""
+    }
+
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text(strings.diffReview) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    review.cwd,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (review.loading) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Text(strings.readingGitStatusAndDiff)
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp),
+            shape = RoundedCornerShape(18.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(strings.diffReview, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            review.cwd,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    TextButton(onClick = rememberHapticClick(onDismiss)) {
+                        Text(strings.close)
                     }
                 }
-                review.error?.let { error ->
-                    Text(error, color = MaterialTheme.colorScheme.error)
-                }
-                review.status?.let { status ->
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (review.loading) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                Text(strings.readingGitStatusAndDiff)
+                            }
+                        }
+                        review.error?.let { error ->
+                            Text(error, color = MaterialTheme.colorScheme.error)
+                        }
+                        review.status?.let { status ->
                             Text(
                                 listOf(
-                                    status.branch.takeIf { it.isNotBlank() }?.let { "分支 $it" },
-                                    if (status.isClean) "工作区干净" else "${status.files.size} 个文件有改动",
+                                    status.branch.takeIf { it.isNotBlank() }?.let { strings.gitBranchLabel(it) },
+                                    if (status.isClean) strings.gitCleanWorkspace else strings.gitChangedFilesCount(status.files.size),
+                                    strings.selectedFilesCount(review.selectedFiles.size, review.files.size),
                                 ).filterNotNull().joinToString(" · "),
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.SemiBold,
                             )
-                            status.files.take(8).forEach { file ->
-                                FilePathLine(file)
-                            }
-                        }
-                    }
-                }
-                if (review.files.isNotEmpty()) {
-                    Text(strings.fileDiff, style = MaterialTheme.typography.labelLarge)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FilterChip(
-                            selected = review.selectedFile == null,
-                            onClick = rememberHapticClick { onSelectFile(null) },
-                            label = { Text("全部") },
-                        )
-                        review.files.take(10).forEach { file ->
-                            FilterChip(
-                                selected = review.selectedFile == file.path,
-                                onClick = rememberHapticClick { onSelectFile(file.path) },
-                                leadingIcon = { FileTypeIcon(file.path, modifier = Modifier.size(18.dp)) },
-                                label = { Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            )
-                        }
-                    }
-                }
-                Text(if (review.selectedFile == null) strings.fullDiff else strings.singleFileDiff, style = MaterialTheme.typography.labelLarge)
-                val displayDiff = remember(review.diff, review.selectedFile) {
-                    review.diff.take(12_000) + if (review.diff.length > 12_000) "\n\n... ${strings.diffTruncated}" else ""
-                }
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        displayDiff.ifBlank { if (review.loading) "..." else strings.noDiff },
-                        modifier = Modifier
-                            .heightIn(max = 360.dp)
-                            .verticalScroll(rememberScrollState())
-                            .padding(10.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                }
-                if (review.selectedFile != null) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(strings.filePreview, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
-                        TextButton(onClick = rememberHapticClick { copyText(review.selectedFile) }) {
-                            Text(strings.copyPath)
-                        }
-                    }
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            when {
-                                review.fileLoading -> strings.readingFile
-                                review.fileContent.isBlank() -> strings.fileEmptyOrUnavailable
-                                else -> review.fileContent
-                            },
-                            modifier = Modifier
-                                .heightIn(max = 220.dp)
-                                .verticalScroll(rememberScrollState())
-                                .padding(10.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                    }
-                }
-                if (commitDraft.files.isNotEmpty()) {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(strings.commitPreview, style = MaterialTheme.typography.labelLarge)
-                            OutlinedTextField(
-                                value = commitDraft.message,
-                                onValueChange = onCommitMessageChange,
-                                singleLine = true,
-                                label = { Text(strings.commitMessage) },
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            Text(
-                                strings.commitFilesCount(commitDraft.files.size),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            commitDraft.files.take(6).forEach { file ->
-                                FilePathLine(file)
-                            }
-                            if (commitDraft.files.size > 6) {
+                            status.files.take(3).forEach { file -> FilePathLine(file) }
+                            if (status.files.size > 3) {
                                 Text(
-                                    strings.moreFilesCount(commitDraft.files.size - 6),
+                                    strings.moreFilesCount(status.files.size - 3),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            commitDraft.error?.let {
-                                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(
+                        DiffReviewSection.Files to strings.diffSectionFiles,
+                        DiffReviewSection.Diff to strings.diffSectionDiff,
+                        DiffReviewSection.Preview to strings.diffSectionPreview,
+                        DiffReviewSection.Commit to strings.diffSectionCommit,
+                    ).forEach { (section, label) ->
+                        val enabled = section != DiffReviewSection.Preview || review.selectedFile != null
+                        FilterChip(
+                            selected = activeSection == section,
+                            onClick = rememberHapticClick { if (enabled) activeSection = section },
+                            enabled = enabled,
+                            label = { Text(label) },
+                        )
+                    }
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    when (activeSection) {
+                        DiffReviewSection.Files -> {
+                            Text(strings.fileDiff, style = MaterialTheme.typography.labelLarge)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                FilterChip(
+                                    selected = review.selectedFile == null,
+                                    onClick = rememberHapticClick { onSelectFile(null) },
+                                    label = { Text(strings.all) },
+                                )
+                                review.files.forEach { file ->
+                                    FilterChip(
+                                        selected = review.selectedFile == file.path,
+                                        onClick = rememberHapticClick {
+                                            onSelectFile(file.path)
+                                            activeSection = DiffReviewSection.Diff
+                                        },
+                                        leadingIcon = { FileTypeIcon(file.path, modifier = Modifier.size(18.dp)) },
+                                        label = { Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    )
+                                }
                             }
-                            Button(
-                                onClick = rememberHapticClick { showCommitConfirm = true },
-                                enabled = !commitDraft.busy && commitDraft.message.isNotBlank(),
+                            Text(strings.commitRestoreSelection, style = MaterialTheme.typography.labelLarge)
+                            val restorableFiles = review.status?.restorableFiles.orEmpty()
+                            Text(
+                                strings.selectedFilesCount(review.selectedFiles.size, review.files.size) +
+                                    if (restorableFiles.isNotEmpty() && restorableFiles.size < review.files.size) {
+                                        " · ${strings.untrackedFilesNotRestored(review.files.size - restorableFiles.size)}"
+                                    } else {
+                                        ""
+                                    },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                FilterChip(
+                                    selected = false,
+                                    onClick = rememberHapticClick { onSetFileSelection(review.files.map { it.path }) },
+                                    label = { Text(strings.selectAll) },
+                                )
+                                FilterChip(
+                                    selected = false,
+                                    onClick = rememberHapticClick { onSetFileSelection(emptyList()) },
+                                    label = { Text(strings.clearSelection) },
+                                )
+                                review.selectedFile?.let { currentFile ->
+                                    FilterChip(
+                                        selected = review.selectedFiles == listOf(currentFile),
+                                        onClick = rememberHapticClick { onSetFileSelection(listOf(currentFile)) },
+                                        label = { Text(strings.currentFileOnly) },
+                                    )
+                                }
+                            }
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                review.files.forEach { file ->
+                                    val trackedForRestore = restorableFiles.isEmpty() || file.path in restorableFiles
+                                    FilterChip(
+                                        selected = file.path in review.selectedFiles,
+                                        onClick = rememberHapticClick { onToggleFileSelection(file.path) },
+                                        leadingIcon = { FileTypeIcon(file.path, modifier = Modifier.size(18.dp)) },
+                                        label = {
+                                            Text(
+                                                file.name + if (!trackedForRestore) " · ${strings.untrackedBadge}" else "",
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        },
+                                    )
+                                }
+                            }
+                        }
+
+                        DiffReviewSection.Diff -> {
+                            Text(if (review.selectedFile == null) strings.fullDiff else strings.singleFileDiff, style = MaterialTheme.typography.labelLarge)
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                if (commitDraft.busy) {
-                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                    Spacer(Modifier.width(8.dp))
+                                Text(
+                                    displayDiff.ifBlank { if (review.loading) "..." else strings.noDiff },
+                                    modifier = Modifier.padding(10.dp),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
+                        }
+
+                        DiffReviewSection.Preview -> {
+                            Text(strings.filePreview, style = MaterialTheme.typography.labelLarge)
+                            review.selectedFile?.let { selected ->
+                                TextButton(onClick = rememberHapticClick { copyText(selected) }) {
+                                    Text(strings.copyPath)
                                 }
-                                Text(strings.commitChanges)
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    when {
+                                        review.fileLoading -> strings.readingFile
+                                        review.fileContent.isBlank() -> strings.fileEmptyOrUnavailable
+                                        else -> review.fileContent
+                                    },
+                                    modifier = Modifier.padding(10.dp),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
+                        }
+
+                        DiffReviewSection.Commit -> {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(strings.commitPreview, style = MaterialTheme.typography.labelLarge)
+                                    OutlinedTextField(
+                                        value = commitDraft.message,
+                                        onValueChange = onCommitMessageChange,
+                                        singleLine = true,
+                                        label = { Text(strings.commitMessage) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                    Text(
+                                        if (commitDraft.files.isEmpty()) strings.noChangesToCommit else strings.commitFilesCount(commitDraft.files.size),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    commitDraft.files.take(10).forEach { file -> FilePathLine(file) }
+                                    if (commitDraft.files.size > 10) {
+                                        Text(
+                                            strings.moreFilesCount(commitDraft.files.size - 10),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    commitDraft.error?.let {
+                                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                    review.restoreError?.let {
+                                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
                             }
                         }
                     }
                 }
+
+                HorizontalDivider()
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = rememberHapticClick { copyText(review.diff) }, enabled = review.diff.isNotBlank()) {
+                        Text(strings.copyDiff)
+                    }
+                    TextButton(
+                        onClick = rememberHapticClick {
+                            activeSection = DiffReviewSection.Commit
+                            showRestoreConfirm = true
+                        },
+                        enabled = !review.restoreBusy && restorableSelection.isNotEmpty(),
+                    ) {
+                        if (review.restoreBusy) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text(strings.discardChanges)
+                    }
+                    Button(
+                        onClick = rememberHapticClick {
+                            activeSection = DiffReviewSection.Commit
+                            showCommitConfirm = true
+                        },
+                        enabled = !commitDraft.busy && commitDraft.message.isNotBlank() && commitDraft.files.isNotEmpty(),
+                    ) {
+                        if (commitDraft.busy) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text(strings.commitChanges)
+                    }
+                    TextButton(onClick = rememberHapticClick(onDismiss)) {
+                        Text(strings.close)
+                    }
+                }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = rememberHapticClick { copyText(review.diff) }, enabled = review.diff.isNotBlank()) {
-                Text(strings.copyDiff)
-            }
-        },
-        dismissButton = { TextButton(onClick = rememberHapticClick(onDismiss)) { Text(strings.close) } },
-    )
+        }
+    }
     if (showCommitConfirm) {
         AlertDialog(
             onDismissRequest = { showCommitConfirm = false },
@@ -577,6 +722,44 @@ fun DiffReviewDialog(
             },
             dismissButton = {
                 TextButton(onClick = rememberHapticClick { showCommitConfirm = false }) {
+                    Text(strings.cancel)
+                }
+            },
+        )
+    }
+    if (showRestoreConfirm) {
+        AlertDialog(
+            onDismissRequest = { showRestoreConfirm = false },
+            title = { Text(strings.confirmDiscardChanges) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(strings.confirmDiscardChangesBody)
+                    Text(strings.commitFilesCount(restorableSelection.size))
+                    restorableSelection.take(10).forEach { file ->
+                        FilePathLine(file)
+                    }
+                    if (restorableSelection.size > 10) {
+                        Text(
+                            strings.moreFilesCount(restorableSelection.size - 10),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = rememberHapticClick {
+                        showRestoreConfirm = false
+                        onRestoreSelected()
+                    },
+                    enabled = !review.restoreBusy,
+                ) {
+                    Text(strings.confirmDiscard)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = rememberHapticClick { showRestoreConfirm = false }) {
                     Text(strings.cancel)
                 }
             },

@@ -54,6 +54,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.QrCodeScanner
@@ -91,6 +93,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -121,6 +124,8 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.DateFormat
+import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -156,7 +161,6 @@ const val DEFAULT_UPDATE_CHANNEL = "stable"
 private const val TEST_NOTIFICATION_CHANNEL_ID = "easycodex-test"
 private const val TEST_NOTIFICATION_ID = 71801
 private const val SETTINGS_RELAY_REQUEST_TIMEOUT_MS = 30_000L
-private const val EASY_CODEX_APP_VERSION = "0.1.2-beta.2"
 private const val EASY_CODEX_RELEASE_API_BASE_URL = "https://api.github.com/repos/Ryan-Laws/easycodex"
 
 private fun normalizeDefaultServiceTier(value: String): String {
@@ -164,6 +168,18 @@ private fun normalizeDefaultServiceTier(value: String): String {
         "", "auto", "standard", "default" -> DEFAULT_SERVICE_TIER
         else -> value.trim().lowercase()
     }
+}
+
+private fun installedAppVersion(context: Context): String {
+    return runCatching {
+        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }
+        info.versionName?.takeIf { it.isNotBlank() } ?: "0.0.0"
+    }.getOrDefault("0.0.0")
 }
 
 private fun compareVersions(left: String, right: String): Int {
@@ -229,6 +245,31 @@ private fun selectReleaseForChannel(json: String, channel: String): JSONObject? 
     }
 }
 
+internal fun isTrustedApkDownloadUrl(value: String): Boolean {
+    val uri = runCatching { java.net.URI(value) }.getOrNull() ?: return false
+    val host = uri.host?.lowercase() ?: return false
+    val path = uri.rawPath.orEmpty()
+    return uri.scheme.equals("https", ignoreCase = true) &&
+        host == "github.com" &&
+        path.startsWith("/Ryan-Laws/easycodex/releases/download/")
+}
+
+internal fun selectApkAssetUrl(assets: JSONArray, version: String): String {
+    val exactName = "EasyCodex.Mobile.$version.apk"
+    var fallbackUrl = ""
+    for (index in 0 until assets.length()) {
+        val asset = assets.optJSONObject(index) ?: continue
+        val name = asset.optString("name")
+        if (!name.endsWith(".apk", ignoreCase = true)) continue
+        if (!name.startsWith("EasyCodex.Mobile.", ignoreCase = true)) continue
+        val url = asset.optString("browser_download_url")
+        if (!isTrustedApkDownloadUrl(url)) continue
+        if (name.equals(exactName, ignoreCase = true)) return url
+        if (fallbackUrl.isBlank()) fallbackUrl = url
+    }
+    return fallbackUrl
+}
+
 fun applyDaylightThemeDefault(prefs: android.content.SharedPreferences) {
     if (prefs.getBoolean(PREF_DAYLIGHT_THEME_DEFAULT_APPLIED, false)) return
     prefs.edit()
@@ -262,11 +303,8 @@ fun parseEasyCodexConnectionUri(uri: Uri?): EasyCodexConnectionConfig? {
 
 fun applyEasyCodexConnectionUri(context: Context, uri: Uri?): Boolean {
     val config = parseEasyCodexConnectionUri(uri) ?: return false
-    context.getSharedPreferences(EASY_CODEX_PREFS, Context.MODE_PRIVATE)
-        .edit()
-        .putString(PREF_RELAY_URL, config.relayUrl)
-        .putString(PREF_API_KEY, config.apiKey)
-        .apply()
+    val prefs = context.getSharedPreferences(EASY_CODEX_PREFS, Context.MODE_PRIVATE)
+    saveRelayHostProfile(prefs, profileFromConnectionConfig(config), makeActive = true)
     return true
 }
 
@@ -294,6 +332,31 @@ private enum class PendingSettingsAction {
     ClearApiKey,
 }
 
+private data class HostManagementStrings(
+    val title: String,
+    val subtitle: String,
+    val noHosts: String,
+    val active: String,
+    val select: String,
+    val rename: String,
+    val delete: String,
+    val relay: String,
+    val hostname: String,
+    val platform: String,
+    val workspace: String,
+    val lastSeen: String,
+    val neverSeen: String,
+    val warnings: String,
+    val unnamedHost: String,
+    val hostSelected: String,
+    val hostRenamed: String,
+    val hostDeleted: String,
+    val renameTitle: String,
+    val deleteTitle: String,
+    val deleteBody: (String) -> String,
+    val save: String,
+)
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsApp(onClose: () -> Unit) {
@@ -318,6 +381,10 @@ fun SettingsApp(onClose: () -> Unit) {
     var updateChannel by remember { mutableStateOf(normalizeUpdateChannel(prefs.getString(PREF_UPDATE_CHANNEL, DEFAULT_UPDATE_CHANNEL))) }
     var appLanguage by remember { mutableStateOf(prefs.getString(PREF_APP_LANGUAGE, DEFAULT_APP_LANGUAGE) ?: DEFAULT_APP_LANGUAGE) }
     var oledMode by remember { mutableStateOf(prefs.getBoolean(PREF_OLED_MODE, false)) }
+    var relayHostProfiles by remember {
+        mutableStateOf(parseRelayHostProfiles(prefs.getString(PREF_RELAY_HOST_PROFILES, "[]")))
+    }
+    var activeRelayHostId by remember { mutableStateOf(prefs.getString(PREF_ACTIVE_RELAY_HOST_ID, "") ?: "") }
     var connectionStatus by remember { mutableStateOf("") }
     var sessionStatus by remember { mutableStateOf("") }
     var languageStatus by remember { mutableStateOf("") }
@@ -326,6 +393,7 @@ fun SettingsApp(onClose: () -> Unit) {
     var apiKeyVisible by remember { mutableStateOf(false) }
     var connectionTesting by remember { mutableStateOf(false) }
     val strings = appStringsFor(appLanguage)
+    val appVersion = remember(context) { installedAppVersion(context) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val updateClient = remember {
         OkHttpClient.Builder()
@@ -340,9 +408,13 @@ fun SettingsApp(onClose: () -> Unit) {
     var notificationHistory by remember { mutableStateOf<List<NotificationHistoryItem>>(emptyList()) }
     var notificationStatus by remember { mutableStateOf("") }
     var notificationSyncing by remember { mutableStateOf(false) }
+    var notificationAutoSyncedFor by remember { mutableStateOf("") }
     var updateChecking by remember { mutableStateOf(false) }
     var pendingApkUpdate by remember { mutableStateOf<ApkUpdateCandidate?>(null) }
     var pendingAction by remember { mutableStateOf<PendingSettingsAction?>(null) }
+    var hostPendingRename by remember { mutableStateOf<RelayHostProfile?>(null) }
+    var hostRenameValue by remember { mutableStateOf("") }
+    var hostPendingDelete by remember { mutableStateOf<RelayHostProfile?>(null) }
     var relayClient by remember { mutableStateOf<SettingsRelayClient?>(null) }
     var connectionTestClient by remember { mutableStateOf<SettingsRelayClient?>(null) }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -361,10 +433,57 @@ fun SettingsApp(onClose: () -> Unit) {
     }
 
     fun persistConnectionSettings(nextRelayUrl: String = relayUrl, nextApiKey: String = apiKey) {
+        val profileId = relayHostIdFor(nextRelayUrl.trim())
+        val existing = relayHostProfiles.firstOrNull { it.id == profileId }
+        val profile = RelayHostProfile(
+            id = profileId,
+            name = existing?.name?.takeIf { it.isNotBlank() } ?: relayHostNameFor(nextRelayUrl.trim()),
+            relayUrl = nextRelayUrl.trim(),
+            apiKey = nextApiKey.trim(),
+            hostname = existing?.hostname.orEmpty(),
+            platform = existing?.platform.orEmpty(),
+            workspaceRoot = existing?.workspaceRoot.orEmpty(),
+            lastSeen = existing?.lastSeen ?: 0L,
+            warnings = existing?.warnings ?: emptyList(),
+        )
+        saveRelayHostProfile(prefs, profile, makeActive = true)
+        relayHostProfiles = parseRelayHostProfiles(prefs.getString(PREF_RELAY_HOST_PROFILES, "[]"))
+        activeRelayHostId = profile.id
+        markSettingsChanged()
+    }
+
+    fun selectRelayHost(profile: RelayHostProfile) {
+        relayUrl = profile.relayUrl
+        apiKey = profile.apiKey
+        connectionTesting = false
+        connectionTestClient?.close()
+        connectionTestClient = null
+        saveRelayHostProfile(prefs, profile, makeActive = true)
+        relayHostProfiles = parseRelayHostProfiles(prefs.getString(PREF_RELAY_HOST_PROFILES, "[]"))
+        activeRelayHostId = profile.id
+        connectionStatus = hostManagementStrings(strings).hostSelected
+        markSettingsChanged()
+    }
+
+    fun renameRelayHost(profile: RelayHostProfile, nextName: String) {
+        val renamed = profile.copy(name = nextName.trim().ifBlank { relayHostNameFor(profile.relayUrl) })
+        val nextProfiles = relayHostProfiles.map { if (it.id == profile.id) renamed else it }
         prefs.edit()
-            .putString(PREF_RELAY_URL, nextRelayUrl.trim())
-            .putString(PREF_API_KEY, nextApiKey.trim())
+            .putString(PREF_RELAY_HOST_PROFILES, serializeRelayHostProfiles(nextProfiles))
             .apply()
+        relayHostProfiles = nextProfiles
+        connectionStatus = hostManagementStrings(strings).hostRenamed
+        markSettingsChanged()
+    }
+
+    fun deleteRelayHost(profile: RelayHostProfile) {
+        if (profile.id == activeRelayHostId) return
+        val nextProfiles = relayHostProfiles.filterNot { it.id == profile.id }
+        prefs.edit()
+            .putString(PREF_RELAY_HOST_PROFILES, serializeRelayHostProfiles(nextProfiles))
+            .apply()
+        relayHostProfiles = nextProfiles
+        connectionStatus = hostManagementStrings(strings).hostDeleted
         markSettingsChanged()
     }
 
@@ -454,17 +573,27 @@ fun SettingsApp(onClose: () -> Unit) {
         connectionTesting = false
         notificationAgents = emptyList()
         notificationHistory = emptyList()
+        relayHostProfiles = emptyList()
         prefs.edit()
             .remove(PREF_RELAY_URL)
             .remove(PREF_API_KEY)
+            .remove(PREF_ACTIVE_RELAY_HOST_ID)
+            .remove(PREF_RELAY_HOST_PROFILES)
             .apply()
+        activeRelayHostId = ""
         markSettingsChanged()
         connectionStatus = strings.connectionConfigCleared
     }
 
     fun clearLocalApiKey() {
         apiKey = ""
-        prefs.edit().remove(PREF_API_KEY).apply()
+        relayHostProfiles = emptyList()
+        activeRelayHostId = ""
+        prefs.edit()
+            .remove(PREF_API_KEY)
+            .remove(PREF_ACTIVE_RELAY_HOST_ID)
+            .remove(PREF_RELAY_HOST_PROFILES)
+            .apply()
         markSettingsChanged()
         appStatus = strings.apiKeyCleared
     }
@@ -525,6 +654,7 @@ fun SettingsApp(onClose: () -> Unit) {
         val relayError = validateRelayEndpoint(relayUrl.trim().ifBlank { DEFAULT_RELAY_URL }, strings)
         if (relayError != null) {
             notificationStatus = relayError
+            notificationAutoSyncedFor = ""
             return
         }
         notificationSyncing = true
@@ -536,6 +666,7 @@ fun SettingsApp(onClose: () -> Unit) {
             if (connectError != null) {
                 notificationSyncing = false
                 notificationStatus = connectError
+                notificationAutoSyncedFor = ""
                 return@connect
             }
             nextClient.loadNotifications(
@@ -548,6 +679,7 @@ fun SettingsApp(onClose: () -> Unit) {
                 onError = { error ->
                     notificationStatus = error
                     notificationSyncing = false
+                    notificationAutoSyncedFor = ""
                 },
             )
         }
@@ -559,11 +691,17 @@ fun SettingsApp(onClose: () -> Unit) {
             notificationStatus = strings.unsynced
             return
         }
+        val previousAgents = notificationAgents
         notificationAgents = notificationAgents.map {
             if (it.id == agent.id) it.copy(level = level) else it
         }
         activeClient.updateNotificationLevel(agent.id, level) { error ->
-            notificationStatus = error ?: strings.saved
+            if (error != null) {
+                notificationAgents = previousAgents
+                notificationStatus = error
+            } else {
+                notificationStatus = strings.saved
+            }
         }
     }
 
@@ -619,21 +757,13 @@ fun SettingsApp(onClose: () -> Unit) {
                     val tag = release.optString("tag_name").orEmpty().ifBlank {
                         release.optString("name").orEmpty()
                     }
-                    val latestVersion = tag.trim().removePrefix("v").ifBlank { EASY_CODEX_APP_VERSION }
-                    if (compareVersions(latestVersion, EASY_CODEX_APP_VERSION) <= 0) {
-                        appStatus = strings.appUpToDate(EASY_CODEX_APP_VERSION)
+                    val latestVersion = tag.trim().removePrefix("v").ifBlank { appVersion }
+                    if (compareVersions(latestVersion, appVersion) <= 0) {
+                        appStatus = strings.appUpToDate(appVersion)
                         return@post
                     }
                     val assets = release.optJSONArray("assets") ?: JSONArray()
-                    var apkUrl = ""
-                    for (index in 0 until assets.length()) {
-                        val asset = assets.optJSONObject(index) ?: continue
-                        val name = asset.optString("name")
-                        if (name.contains("Mobile", ignoreCase = true) && name.endsWith(".apk", ignoreCase = true)) {
-                            apkUrl = asset.optString("browser_download_url")
-                            break
-                        }
-                    }
+                    val apkUrl = selectApkAssetUrl(assets, latestVersion)
                     if (apkUrl.isBlank()) {
                         appStatus = strings.noApkFound(latestVersion)
                         return@post
@@ -643,6 +773,14 @@ fun SettingsApp(onClose: () -> Unit) {
                 }
             }
         })
+    }
+
+    LaunchedEffect(destination, relayUrl, apiKey) {
+        if (destination != SettingsDestination.Notifications) return@LaunchedEffect
+        val syncKey = "${relayUrl.trim()}\u0000${apiKey.trim()}"
+        if (syncKey == notificationAutoSyncedFor) return@LaunchedEffect
+        notificationAutoSyncedFor = syncKey
+        syncRelayNotifications()
     }
 
     BackHandler(enabled = destination != null) {
@@ -810,6 +948,17 @@ fun SettingsApp(onClose: () -> Unit) {
                                 InfoRow(
                                     title = strings.connectionSecurity,
                                     detail = strings.connectionSecurityDetail,
+                                )
+                                HostManagementSection(
+                                    profiles = relayHostProfiles,
+                                    activeHostId = activeRelayHostId,
+                                    labels = hostManagementStrings(strings),
+                                    onSelect = ::selectRelayHost,
+                                    onRename = { profile ->
+                                        hostPendingRename = profile
+                                        hostRenameValue = profile.name
+                                    },
+                                    onDelete = { profile -> hostPendingDelete = profile },
                                 )
                                 FlowRow(
                                     modifier = Modifier.fillMaxWidth(),
@@ -1016,7 +1165,7 @@ fun SettingsApp(onClose: () -> Unit) {
                                 subtitle = strings.appSubtitle,
                                 icon = { Icon(Icons.Default.Settings, contentDescription = null) },
                             ) {
-                                InfoRow(title = strings.version, detail = EASY_CODEX_APP_VERSION)
+                                InfoRow(title = strings.version, detail = appVersion)
                                 Text(strings.updateChannel, style = MaterialTheme.typography.labelLarge)
                                 Text(
                                     strings.updateChannelSubtitle,
@@ -1061,6 +1210,8 @@ fun SettingsApp(onClose: () -> Unit) {
                                 }
                                 InfoRow(title = strings.connectionInstructions, detail = strings.connectionInstructionsDetail)
                                 HorizontalDivider()
+                                InfoRow(title = strings.officialMobileBoundary, detail = strings.officialMobileBoundaryDetail)
+                                HorizontalDivider()
                                 InfoRow(
                                     title = strings.dataAndSecurity,
                                     detail = strings.dataAndSecurityDetail,
@@ -1077,6 +1228,62 @@ fun SettingsApp(onClose: () -> Unit) {
                 }
             }
         }
+    }
+
+    hostPendingRename?.let { profile ->
+        val labels = hostManagementStrings(strings)
+        AlertDialog(
+            onDismissRequest = { hostPendingRename = null },
+            title = { Text(labels.renameTitle) },
+            text = {
+                OutlinedTextField(
+                    value = hostRenameValue,
+                    onValueChange = { hostRenameValue = it },
+                    label = { Text(labels.rename) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        renameRelayHost(profile, hostRenameValue)
+                        hostPendingRename = null
+                    },
+                ) {
+                    Text(labels.save)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { hostPendingRename = null }) {
+                    Text(strings.cancel)
+                }
+            },
+        )
+    }
+
+    hostPendingDelete?.let { profile ->
+        val labels = hostManagementStrings(strings)
+        AlertDialog(
+            onDismissRequest = { hostPendingDelete = null },
+            title = { Text(labels.deleteTitle) },
+            text = { Text(labels.deleteBody(profile.name.ifBlank { labels.unnamedHost })) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deleteRelayHost(profile)
+                        hostPendingDelete = null
+                    },
+                ) {
+                    Text(labels.delete)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { hostPendingDelete = null }) {
+                    Text(strings.cancel)
+                }
+            },
+        )
     }
 
     pendingAction?.let { action ->
@@ -1133,6 +1340,221 @@ private fun StatusText(status: String) {
             status,
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.primary,
+        )
+    }
+}
+
+@Composable
+private fun HostManagementSection(
+    profiles: List<RelayHostProfile>,
+    activeHostId: String,
+    labels: HostManagementStrings,
+    onSelect: (RelayHostProfile) -> Unit,
+    onRename: (RelayHostProfile) -> Unit,
+    onDelete: (RelayHostProfile) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(labels.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text(labels.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (profiles.isEmpty()) {
+            InfoRow(title = labels.noHosts, detail = labels.subtitle)
+            return@Column
+        }
+        profiles.forEach { profile ->
+            HostProfileRow(
+                profile = profile,
+                isActive = profile.id == activeHostId,
+                labels = labels,
+                onSelect = { onSelect(profile) },
+                onRename = { onRename(profile) },
+                onDelete = { onDelete(profile) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun HostProfileRow(
+    profile: RelayHostProfile,
+    isActive: Boolean,
+    labels: HostManagementStrings,
+    onSelect: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(
+            1.dp,
+            if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f) else MaterialTheme.colorScheme.outlineVariant,
+        ),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            profile.name.ifBlank { labels.unnamedHost },
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        if (isActive) {
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary,
+                            ) {
+                                Text(
+                                    labels.active,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        listOf(profile.hostname, profile.platform).filter { it.isNotBlank() }.joinToString(" · ")
+                            .ifBlank { profile.relayUrl },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(onClick = rememberHapticClick(onRename)) {
+                    Icon(Icons.Default.Edit, contentDescription = labels.rename)
+                }
+                IconButton(onClick = rememberHapticClick(onDelete), enabled = !isActive) {
+                    Icon(Icons.Default.Delete, contentDescription = labels.delete)
+                }
+            }
+            HostDetailText(labels.relay, profile.relayUrl)
+            HostDetailText(labels.hostname, profile.hostname.ifBlank { labels.neverSeen })
+            HostDetailText(labels.platform, profile.platform.ifBlank { labels.neverSeen })
+            if (profile.workspaceRoot.isNotBlank()) {
+                HostDetailText(labels.workspace, profile.workspaceRoot)
+            }
+            HostDetailText(labels.lastSeen, formatRelayHostLastSeen(profile.lastSeen, labels))
+            if (profile.warnings.isNotEmpty()) {
+                HostDetailText(labels.warnings, profile.warnings.take(2).joinToString(" · "))
+            }
+            if (!isActive) {
+                TextButton(onClick = rememberHapticClick(onSelect)) {
+                    Text(labels.select)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HostDetailText(label: String, value: String) {
+    Text(
+        "$label: $value",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+private fun formatRelayHostLastSeen(lastSeen: Long, labels: HostManagementStrings): String {
+    if (lastSeen <= 0L) return labels.neverSeen
+    return runCatching { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(lastSeen)) }
+        .getOrDefault(labels.neverSeen)
+}
+
+private fun hostManagementStrings(strings: AppStrings): HostManagementStrings {
+    return when (strings.settings) {
+        "设置" -> HostManagementStrings(
+            title = "主机管理",
+            subtitle = "保存的 Relay 主机，可快速切换或整理名称。",
+            noHosts = "还没有保存的主机",
+            active = "当前",
+            select = "设为当前",
+            rename = "重命名",
+            delete = "删除",
+            relay = "Relay",
+            hostname = "主机名",
+            platform = "平台",
+            workspace = "工作区",
+            lastSeen = "最近在线",
+            neverSeen = "未记录",
+            warnings = "提示",
+            unnamedHost = "未命名主机",
+            hostSelected = "已切换主机",
+            hostRenamed = "主机名称已保存",
+            hostDeleted = "主机已删除",
+            renameTitle = "重命名主机",
+            deleteTitle = "删除主机",
+            deleteBody = { name -> "删除“$name”？当前主机不能删除。" },
+            save = "保存",
+        )
+        "設定" -> HostManagementStrings(
+            title = "主機管理",
+            subtitle = "已儲存的 Relay 主機，可快速切換或整理名稱。",
+            noHosts = "還沒有儲存的主機",
+            active = "目前",
+            select = "設為目前",
+            rename = "重新命名",
+            delete = "刪除",
+            relay = "Relay",
+            hostname = "主機名",
+            platform = "平台",
+            workspace = "工作區",
+            lastSeen = "最近上線",
+            neverSeen = "未記錄",
+            warnings = "提示",
+            unnamedHost = "未命名主機",
+            hostSelected = "已切換主機",
+            hostRenamed = "主機名稱已儲存",
+            hostDeleted = "主機已刪除",
+            renameTitle = "重新命名主機",
+            deleteTitle = "刪除主機",
+            deleteBody = { name -> "刪除「$name」？目前主機不能刪除。" },
+            save = "儲存",
+        )
+        else -> HostManagementStrings(
+            title = "Host Management",
+            subtitle = "Saved relay hosts for quick switching and local naming.",
+            noHosts = "No saved hosts yet",
+            active = "Active",
+            select = "Make active",
+            rename = "Rename",
+            delete = "Delete",
+            relay = "Relay",
+            hostname = "Hostname",
+            platform = "Platform",
+            workspace = "Workspace",
+            lastSeen = "Last seen",
+            neverSeen = "Not recorded",
+            warnings = "Warnings",
+            unnamedHost = "Unnamed host",
+            hostSelected = "Host selected",
+            hostRenamed = "Host name saved",
+            hostDeleted = "Host deleted",
+            renameTitle = "Rename host",
+            deleteTitle = "Delete host",
+            deleteBody = { name -> "Delete \"$name\"? The active host cannot be deleted." },
+            save = "Save",
         )
     }
 }
@@ -1826,8 +2248,17 @@ private class SettingsRelayClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 main.post {
+                    if (socket === webSocket) socket = null
                     failPending(t.message ?: strings.connectionFailed)
                     callback(t.message ?: strings.connectionFailed)
+                }
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                main.post {
+                    if (socket === webSocket) socket = null
+                    val error = reason.ifBlank { strings.connectionClosed }
+                    failPending(error)
                 }
             }
         })

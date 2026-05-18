@@ -7,10 +7,10 @@ import org.junit.Test
 class CliCommandParsingTest {
     @Test
     fun keepsQuotedWindowsPathsWithSpaces() {
-        val tokens = splitCliInput("/image \"C:\\Users\\liuch\\Desktop\\easy codex\\shot.png\" describe it")
+        val tokens = splitCliInput("/image \"C:\\Projects\\easycodex workspace\\shot.png\" describe it")
 
         assertEquals(
-            listOf("/image", "C:\\Users\\liuch\\Desktop\\easy codex\\shot.png", "describe", "it"),
+            listOf("/image", "C:\\Projects\\easycodex workspace\\shot.png", "describe", "it"),
             tokens,
         )
     }
@@ -20,14 +20,14 @@ class CliCommandParsingTest {
         val draft = parseCliCommand(
             CliConsoleWindow(
                 id = "cli_test",
-                input = "/json /image \"C:\\Users\\liuch\\Desktop\\easy codex\\shot.png\" /add-dir \"C:\\Users\\liuch\\Desktop\\other repo\" summarize",
+                input = "/json /image \"C:\\Projects\\easycodex workspace\\shot.png\" /add-dir \"C:\\Projects\\other repo\" summarize",
             ),
         )
 
         assertEquals("exec", draft.mode)
         assertTrue(draft.jsonOutput)
-        assertEquals(listOf("C:\\Users\\liuch\\Desktop\\easy codex\\shot.png"), draft.images)
-        assertEquals(listOf("C:\\Users\\liuch\\Desktop\\other repo"), draft.addDirs)
+        assertEquals(listOf("C:\\Projects\\easycodex workspace\\shot.png"), draft.images)
+        assertEquals(listOf("C:\\Projects\\other repo"), draft.addDirs)
         assertEquals("summarize", draft.prompt)
     }
 

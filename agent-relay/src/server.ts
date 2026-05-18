@@ -29,6 +29,25 @@ import {
   type CliRunOptions,
   type StreamHistoryEntry,
 } from './cli-helpers';
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_BATCH_BYTES,
+  assertMediaFileWithinLimit,
+  assertMediaImageWithinLimit,
+  assertAttachmentBatchWithinLimit,
+  assertReadableFileWithinLimit,
+  capGitDiff,
+} from './safety-limits';
+import { permissionModeFromCreateAgentParams } from './permission-modes';
+import { mobileGitStatusPayload, normalizeGitCommitFiles, normalizeGitRestoreFiles } from './git-paths';
+import {
+  assertWorkspaceRootAllowed,
+  isDisallowedWorkspaceRoot,
+  isWithinBase,
+  isWorkspaceRootAllowed,
+  normalizePathKey,
+  uniqueResolvedPaths,
+} from './workspace-safety';
 
 const PORT = Number(process.env.PORT || 3001);
 const CONFIG_DIR = path.join(os.homedir(), '.easycodex');
@@ -70,6 +89,32 @@ interface RelayWarning {
   code: string;
   message: string;
   recommendation?: string;
+}
+
+interface HostHealthPayload {
+  status: 'ok';
+  sessionId: string;
+  workspaceRoot: string;
+  reposRoot: string;
+  allowedWorkspaceRoots: string[];
+  uptimeMs: number;
+  agents: number;
+  connectedClients: number;
+  notificationClients: number;
+  notificationTokens: number;
+  lastClientLanguage: string | null;
+  warnings: RelayWarning[];
+  update: UpdateInfo | null;
+  runtime: ReturnType<SessionOrchestrator['getRuntimeCapabilities']>;
+  system: {
+    hostname: string;
+    platform: NodeJS.Platform;
+    arch: string;
+    nodeVersion: string;
+    cpus: number;
+    totalMemory: number;
+    freeMemory: number;
+  };
 }
 
 function generateApiKey(): string {
@@ -139,6 +184,13 @@ function extractAuthKey(req: express.Request): string | null {
   return null;
 }
 
+function isValidApiKey(candidate: string | null | undefined): boolean {
+  if (!candidate) return false;
+  const expected = Buffer.from(config.apiKey);
+  const actual = Buffer.from(candidate);
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
 function buildConnectDeepLink(relayUrl: string, apiKey: string): string {
   return `easycodex://connect?relayUrl=${encodeURIComponent(relayUrl)}&apiKey=${encodeURIComponent(apiKey)}`;
 }
@@ -194,6 +246,16 @@ function codexCliCommandLine(args: string[]): string {
   return [quoteCommandArg(executable), ...args.map(quoteCommandArg)].join(' ');
 }
 
+function terminateChildProcess(child: ChildProcess): void {
+  if (process.platform === 'win32' && child.pid) {
+    try {
+      execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      return;
+    } catch {}
+  }
+  try { child.kill(); } catch {}
+}
+
 function resolveWithinCwd(cwd: string, relativePath?: string): string {
   const safeCwd = path.resolve(cwd || process.cwd());
   const resolved = path.resolve(safeCwd, relativePath || '.');
@@ -203,12 +265,44 @@ function resolveWithinCwd(cwd: string, relativePath?: string): string {
   throw new Error('Path escapes cwd');
 }
 
-function isWithinBase(base: string, targetPath: string): boolean {
-  const resolvedBaseRaw = path.resolve(base);
-  const resolvedRaw = path.resolve(targetPath);
-  const resolvedBase = process.platform === 'win32' ? resolvedBaseRaw.toLowerCase() : resolvedBaseRaw;
-  const resolved = process.platform === 'win32' ? resolvedRaw.toLowerCase() : resolvedRaw;
-  return resolved === resolvedBase || resolved.startsWith(`${resolvedBase}${path.sep}`);
+async function realPathIfExists(targetPath: string): Promise<string> {
+  return fsPromises.realpath(targetPath);
+}
+
+function realPathIfExistsSync(targetPath: string): string {
+  return fs.realpathSync(targetPath);
+}
+
+async function isWithinBaseReal(base: string, targetPath: string): Promise<boolean> {
+  const [realBase, realTarget] = await Promise.all([
+    realPathIfExists(base),
+    realPathIfExists(targetPath),
+  ]);
+  return isWithinBase(realBase, realTarget);
+}
+
+function isWithinBaseRealSync(base: string, targetPath: string): boolean {
+  return isWithinBase(realPathIfExistsSync(base), realPathIfExistsSync(targetPath));
+}
+
+async function assertWithinAllowedWorkspaceReal(targetPath: string): Promise<void> {
+  const allowedRoots = getAllowedWorkspaceRoots();
+  for (const root of allowedRoots) {
+    try {
+      if (await isWithinBaseReal(root, targetPath)) return;
+    } catch {}
+  }
+  throw new Error('Path resolves outside the allowed EasyCodex workspace roots.');
+}
+
+function assertWithinAllowedWorkspaceRealSync(targetPath: string): void {
+  const allowedRoots = getAllowedWorkspaceRoots();
+  for (const root of allowedRoots) {
+    try {
+      if (isWithinBaseRealSync(root, targetPath)) return;
+    } catch {}
+  }
+  throw new Error('Path resolves outside the allowed EasyCodex workspace roots.');
 }
 
 function getReposRoot(): string {
@@ -330,47 +424,31 @@ function discoverRelayGitWorktrees(): string[] {
 
 function getAllowedWorkspaceRoots(): string[] {
   return uniqueResolvedPaths([
-    getPrimaryWorkspaceRoot(),
+    ...(isWorkspaceRootAllowed(getPrimaryWorkspaceRoot()) ? [getPrimaryWorkspaceRoot()] : []),
     getReposRoot(),
     ...Array.from(customWorkspaceRoots),
-    ...codexDesktopVisibleWorkspaceRoots(),
-    ...discoverRelayGitWorktrees(),
+    ...codexDesktopVisibleWorkspaceRoots().filter(isWorkspaceRootAllowed),
+    ...discoverRelayGitWorktrees().filter(isWorkspaceRootAllowed),
   ]);
-}
-
-function isDisallowedCustomWorkspaceRoot(targetPath: string): boolean {
-  const resolved = path.resolve(targetPath);
-  const parsed = path.parse(resolved);
-  if (resolved === parsed.root) return true;
-  const home = path.resolve(os.homedir());
-  if (normalizePathKey(resolved) === normalizePathKey(home)) return true;
-  const homeBoundaries = ['Desktop', 'Documents', 'Downloads'].map((name) => path.join(home, name));
-  if (homeBoundaries.some((root) => normalizePathKey(resolved) === normalizePathKey(root))) return true;
-  const disallowed = [
-    process.env.SystemRoot,
-    process.env.ProgramFiles,
-    process.env['ProgramFiles(x86)'],
-    process.env.APPDATA,
-    process.env.LOCALAPPDATA,
-  ].filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '');
-  return disallowed.some((root) => isWithinBase(root, resolved));
 }
 
 function trustCustomWorkspaceRoot(targetPath: string): string {
   const resolved = resolveExistingDirectory(targetPath);
-  if (isDisallowedCustomWorkspaceRoot(resolved)) {
-    throw new Error('Refusing to use a system, profile, or application data directory as a project workspace.');
-  }
+  assertWorkspaceRootAllowed(resolved);
   customWorkspaceRoots.add(resolved);
   return resolved;
 }
 
 function resolveWorkspaceCwd(cwd?: string): string {
   const requested = resolveSafePath(cwd || getPrimaryWorkspaceRoot());
+  if (isDisallowedWorkspaceRoot(requested)) {
+    throw new Error('Refusing to use a system, profile, or application data directory as a project workspace. Choose a specific project folder.');
+  }
   const allowedRoots = getAllowedWorkspaceRoots();
   if (allowedRoots.some((root) => isWithinBase(root, requested))) {
     const stat = fs.statSync(requested);
     if (!stat.isDirectory()) throw new Error(`Path is not a directory: ${requested}`);
+    assertWithinAllowedWorkspaceRealSync(requested);
     return requested;
   }
   throw new Error('Path is outside the allowed EasyCodex workspace roots. Use trust_workspace_root before accessing a new project directory.');
@@ -394,10 +472,29 @@ function dateStampForAttachment(): string {
   return new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 }
 
+function estimateBase64DecodedBytes(value: string): number {
+  const clean = value.replace(/\s/g, '');
+  if (!clean) return 0;
+  const padding = clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0;
+  return Math.floor((clean.length * 3) / 4) - padding;
+}
+
 function repoNameFromUrl(url: string): string {
   const normalized = url.replace(/\/$/, '');
-  const base = normalized.split('/').pop() || 'repo';
-  return base.replace(/\.git$/i, '') || 'repo';
+  const base = normalized.split(/[\\/]/).pop() || 'repo';
+  const clean = base
+    .replace(/\.git$/i, '')
+    .replace(/[^A-Za-z0-9._-]/g, '-')
+    .replace(/^\.+$/, '')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  return clean || 'repo';
+}
+
+function assertSafeGitArgument(value: string, label: string): void {
+  if (!value.trim() || value.trim().startsWith('-') || /[\0\r\n]/.test(value)) {
+    throw new Error(`${label} is not a safe git argument.`);
+  }
 }
 
 function parseBooleanEnv(value: string | undefined): boolean {
@@ -441,24 +538,6 @@ async function detectPortWarnings(): Promise<void> {
   }
 }
 
-function uniqueResolvedPaths(paths: string[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const entry of paths) {
-    const resolved = path.resolve(entry);
-    const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(resolved);
-  }
-  return result;
-}
-
-function normalizePathKey(targetPath: string): string {
-  const resolved = path.resolve(targetPath);
-  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-}
-
 function directoryLabel(targetPath: string): string {
   const parsed = path.parse(targetPath);
   const trimmed = targetPath.replace(/[\\/]+$/, '');
@@ -472,6 +551,7 @@ async function browseDirectories(targetPath?: string) {
     throw new Error('Path is outside the allowed EasyCodex workspace roots. Use trust_workspace_root before browsing a new project directory.');
   }
   const current = resolveExistingDirectory(requested);
+  await assertWithinAllowedWorkspaceReal(current);
   const roots = uniqueResolvedPaths(allowedRoots).map((root) => ({
     name: directoryLabel(root),
     path: root,
@@ -503,20 +583,6 @@ async function browseDirectories(targetPath?: string) {
   };
 }
 
-function normalizeGitCommitFiles(cwd: string, files: unknown): string[] {
-  if (!Array.isArray(files) || files.length === 0) {
-    throw new Error('files is required; choose the exact files to commit.');
-  }
-  const normalized = files.map((file) => {
-    if (typeof file !== 'string' || !file.trim()) {
-      throw new Error('files must contain non-empty path strings.');
-    }
-    const target = resolveWithinCwd(cwd, file.trim());
-    return path.relative(cwd, target).split(path.sep).join('/');
-  });
-  return Array.from(new Set(normalized));
-}
-
 async function maybeAutoPullRepo(cwd: string): Promise<void> {
   if (!parseBooleanEnv(process.env.AUTO_PULL_REPOS)) return;
 
@@ -531,6 +597,7 @@ async function maybeAutoPullRepo(cwd: string): Promise<void> {
   if (!fs.existsSync(path.join(safePath, '.git'))) return;
 
   try {
+    if (!isWithinBaseRealSync(reposRoot, safePath)) return;
     await simpleGit({ baseDir: safePath }).pull();
     console.log(`[relay] Auto-pulled repo before agent start: ${safePath}`);
   } catch (err) {
@@ -540,6 +607,7 @@ async function maybeAutoPullRepo(cwd: string): Promise<void> {
 
 function gitForCwd(cwd: string) {
   const safeCwd = resolveWorkspaceCwd(cwd);
+  assertWithinAllowedWorkspaceRealSync(safeCwd);
   return simpleGit({
     baseDir: safeCwd,
   });
@@ -730,7 +798,7 @@ function stopCliRun(windowId?: string): boolean {
     ? activeCliRuns.get(windowId.trim())
     : activeCliRuns.values().next().value;
   if (!run) return false;
-  run.process.kill();
+  terminateChildProcess(run.process);
   return true;
 }
 
@@ -739,7 +807,9 @@ const relaySessionId = crypto.randomUUID();
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const RELAY_WS_MAX_PAYLOAD_BYTES = Number(process.env.EASY_CODEX_WS_MAX_PAYLOAD_BYTES || Math.ceil((MAX_ATTACHMENT_BATCH_BYTES * 4) / 3) + 1024 * 1024);
+const RELAY_WS_MAX_BUFFERED_BYTES = Number(process.env.EASY_CODEX_WS_MAX_BUFFERED_BYTES || 8 * 1024 * 1024);
+const wss = new WebSocketServer({ server, maxPayload: RELAY_WS_MAX_PAYLOAD_BYTES });
 const clients = new Map<WebSocket, ClientSession>();
 const STREAM_HISTORY_LIMIT = Number(process.env.STREAM_HISTORY_LIMIT || 5000);
 const CODEX_WATCH_DEBOUNCE_MS = Number(process.env.CODEX_WATCH_DEBOUNCE_MS || 150);
@@ -922,7 +992,16 @@ function sendStreamEvent(agentId: string, event: string, data: unknown) {
   for (const session of clients.values()) {
     if (!session.authenticated) continue;
     if (session.ws.readyState === WebSocket.OPEN) {
-      session.ws.send(message);
+      if (session.ws.bufferedAmount > RELAY_WS_MAX_BUFFERED_BYTES) {
+        console.warn(`[ws] Closing slow client ${session.clientId || 'unknown'} with ${session.ws.bufferedAmount} buffered bytes.`);
+        session.ws.close(1013, 'Client is too slow');
+        continue;
+      }
+      try {
+        session.ws.send(message);
+      } catch (err) {
+        console.warn('[ws] Failed to send stream event:', err);
+      }
     }
   }
 }
@@ -957,6 +1036,10 @@ function flushStreamBatch(key: string) {
   if (!batch) return;
   pendingStreamBatches.delete(key);
   if (batch.timer) clearTimeout(batch.timer);
+  const text = batch.data[batch.textKey];
+  if (typeof text === 'string') {
+    batch.data[batch.textKey] = capStreamDelta(text);
+  }
   sendStreamEvent(batch.agentId, batch.event, batch.data);
 }
 
@@ -1101,14 +1184,8 @@ const manager = new SessionOrchestrator(broadcast);
 const startedAt = Date.now();
 let lastClientLanguage: string | null = null;
 
-app.get('/health', (req, res) => {
-  const key = extractAuthKey(req);
-  if (!key || key !== config.apiKey) {
-    res.status(401).json({ error: 'Unauthorized' });
-    return;
-  }
-
-  res.json({
+function hostHealthPayload(): HostHealthPayload {
+  return {
     status: 'ok',
     sessionId: relaySessionId,
     workspaceRoot: getPrimaryWorkspaceRoot(),
@@ -1132,7 +1209,18 @@ app.get('/health', (req, res) => {
       totalMemory: os.totalmem(),
       freeMemory: os.freemem(),
     },
-  });
+  };
+}
+
+app.get('/health', (req, res) => {
+  const key = extractAuthKey(req);
+  res.setHeader('Cache-Control', 'no-store');
+  if (!isValidApiKey(key)) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  res.json(hostHealthPayload());
 });
 
 function imageContentType(filePath: string): string | null {
@@ -1153,9 +1241,63 @@ function imageContentType(filePath: string): string | null {
   }
 }
 
+function fileContentType(filePath: string): string {
+  switch (path.extname(filePath).toLowerCase()) {
+    case '.txt':
+    case '.log':
+    case '.md':
+    case '.json':
+    case '.csv':
+    case '.tsv':
+    case '.xml':
+    case '.html':
+    case '.css':
+    case '.js':
+    case '.ts':
+    case '.kt':
+    case '.java':
+    case '.py':
+    case '.rs':
+    case '.go':
+      return 'text/plain; charset=utf-8';
+    case '.pdf':
+      return 'application/pdf';
+    case '.zip':
+      return 'application/zip';
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.gif':
+      return 'image/gif';
+    case '.webp':
+      return 'image/webp';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+function safeContentDispositionName(filePath: string): string {
+  return path.basename(filePath).replace(/[\r\n"]/g, '_') || 'artifact';
+}
+
+async function readTextFileChecked(filePath: string): Promise<{ content: string; size: number }> {
+  const handle = await fsPromises.open(filePath, 'r');
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error('Target is not a file');
+    assertReadableFileWithinLimit(stat.size);
+    const content = await handle.readFile('utf8');
+    return { content, size: stat.size };
+  } finally {
+    await handle.close();
+  }
+}
+
 app.get('/media/image', async (req, res) => {
   const key = extractAuthKey(req);
-  if (!key || key !== config.apiKey) {
+  if (!isValidApiKey(key)) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
@@ -1172,19 +1314,84 @@ app.get('/media/image', async (req, res) => {
       res.status(403).json({ error: 'Path is outside the allowed EasyCodex workspace roots.' });
       return;
     }
-    const stat = await fsPromises.stat(target);
-    if (!stat.isFile()) {
-      res.status(404).json({ error: 'Image not found' });
+    try {
+      await assertWithinAllowedWorkspaceReal(target);
+    } catch (err) {
+      res.status(403).json({ error: err instanceof Error ? err.message : String(err) });
       return;
     }
-    const contentType = imageContentType(target);
+    const realTarget = await fsPromises.realpath(target);
+    const contentType = imageContentType(realTarget);
     if (!contentType) {
       res.status(415).json({ error: 'Unsupported image type' });
       return;
     }
+    const handle = await fsPromises.open(realTarget, 'r');
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      await handle.close();
+      res.status(404).json({ error: 'Image not found' });
+      return;
+    }
+    try {
+      assertMediaImageWithinLimit(stat.size);
+    } catch (err) {
+      await handle.close();
+      res.status(413).json({ error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'private, max-age=60');
-    fs.createReadStream(target).pipe(res);
+    res.setHeader('Cache-Control', 'no-store');
+    handle.createReadStream({ autoClose: true }).pipe(res);
+  } catch (err) {
+    res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get('/media/file', async (req, res) => {
+  const key = extractAuthKey(req);
+  if (!isValidApiKey(key)) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const rawPath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
+  if (!rawPath) {
+    res.status(400).json({ error: 'path is required' });
+    return;
+  }
+
+  try {
+    const target = path.resolve(rawPath);
+    if (!getAllowedWorkspaceRoots().some((root) => isWithinBase(root, target))) {
+      res.status(403).json({ error: 'Path is outside the allowed EasyCodex workspace roots.' });
+      return;
+    }
+    try {
+      await assertWithinAllowedWorkspaceReal(target);
+    } catch (err) {
+      res.status(403).json({ error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    const realTarget = await fsPromises.realpath(target);
+    const handle = await fsPromises.open(realTarget, 'r');
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      await handle.close();
+      res.status(404).json({ error: 'File not found' });
+      return;
+    }
+    try {
+      assertMediaFileWithinLimit(stat.size);
+    } catch (err) {
+      await handle.close();
+      res.status(413).json({ error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    res.setHeader('Content-Type', fileContentType(realTarget));
+    res.setHeader('Content-Disposition', `inline; filename="${safeContentDispositionName(realTarget)}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    handle.createReadStream({ autoClose: true }).pipe(res);
   } catch (err) {
     res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
   }
@@ -1206,6 +1413,7 @@ function handleConnectPage(req: express.Request, res: express.Response) {
 
   const deepLink = buildConnectDeepLink(relayUrl, apiKey);
   const escapedDeepLink = escapeHtml(deepLink);
+  res.setHeader('Cache-Control', 'no-store');
   res.type('html').send(`<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1262,12 +1470,26 @@ wss.on('connection', (ws, req) => {
 
     const { action, params = {}, requestId } = msg;
 
+    const sendToClient = (payload: unknown) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      if (ws.bufferedAmount > RELAY_WS_MAX_BUFFERED_BYTES) {
+        console.warn(`[ws] Closing slow client ${session.clientId || 'unauthenticated'} with ${ws.bufferedAmount} buffered bytes.`);
+        ws.close(1013, 'Client is too slow');
+        return;
+      }
+      try {
+        ws.send(JSON.stringify(payload));
+      } catch (err) {
+        console.warn(`Failed to send response to ${session.clientId || 'unauthenticated'}:`, err);
+      }
+    };
+
     const reply = (data: unknown) => {
-      ws.send(JSON.stringify({ type: 'response', action, requestId, data }));
+      sendToClient({ type: 'response', action, requestId, data });
     };
 
     const replyError = (error: string) => {
-      ws.send(JSON.stringify({ type: 'error', action, requestId, error }));
+      sendToClient({ type: 'error', action, requestId, error });
     };
 
     if (!session.authenticated) {
@@ -1279,7 +1501,7 @@ wss.on('connection', (ws, req) => {
 
       const key = typeof params.key === 'string' ? params.key : '';
       const requestedClientId = typeof params.clientId === 'string' ? params.clientId.trim() : '';
-      if (!key || key !== config.apiKey) {
+      if (!isValidApiKey(key)) {
         replyError('Invalid API key');
         ws.close(4001, 'Invalid API key');
         return;
@@ -1398,6 +1620,9 @@ wss.on('connection', (ws, req) => {
             model,
             cwd,
             permissionMode,
+            approvalPolicy,
+            sandboxMode,
+            approvalsReviewer,
             systemPrompt,
             agentId,
             serviceTier,
@@ -1411,6 +1636,9 @@ wss.on('connection', (ws, req) => {
             model: string;
             cwd?: string;
             permissionMode?: string;
+            approvalPolicy?: string;
+            sandboxMode?: string;
+            approvalsReviewer?: string;
             systemPrompt?: string;
             agentId?: string;
             serviceTier?: string;
@@ -1423,11 +1651,17 @@ wss.on('connection', (ws, req) => {
           const isProjectless = projectless === true;
           const resolvedCwd = resolveWorkspaceCwd(isProjectless ? getPrimaryWorkspaceRoot() : cwd);
           if (!isProjectless) await maybeAutoPullRepo(resolvedCwd);
+          const resolvedPermissionMode = permissionModeFromCreateAgentParams({
+            permissionMode,
+            approvalPolicy,
+            sandboxMode,
+            approvalsReviewer,
+          });
           const agent = await manager.createAgent(
             name || 'Agent',
             model || 'gpt-5.5',
             resolvedCwd,
-            permissionMode || 'default-review',
+            resolvedPermissionMode,
             systemPrompt || '',
             agentId,
             {
@@ -1489,16 +1723,37 @@ wss.on('connection', (ws, req) => {
           const safeCwd = resolveWorkspaceCwd(cwd);
           const attachmentRoot = resolveWithinCwd(safeCwd, '.easycodex-attachments');
           await fsPromises.mkdir(attachmentRoot, { recursive: true });
+          if (!(await isWithinBaseReal(safeCwd, attachmentRoot))) {
+            throw new Error('Attachment directory resolves outside the selected workspace.');
+          }
 
           const uploaded: Array<{ name: string; path: string; size: number; mimeType: string | null }> = [];
+          const decodedFiles: Array<{ file: NonNullable<typeof files>[number]; buffer: Buffer; safeName: string }> = [];
+          let totalDecodedBytes = 0;
           for (const file of files) {
             const encoded = typeof file?.base64 === 'string' ? file.base64 : '';
             if (!encoded) throw new Error('Attachment data is missing');
-            const buffer = Buffer.from(encoded, 'base64');
-            if (buffer.length > 12 * 1024 * 1024) {
+            const estimatedSize = estimateBase64DecodedBytes(encoded);
+            if (estimatedSize > MAX_ATTACHMENT_BYTES) {
               throw new Error(`${file.name || 'Attachment'} exceeds the 12 MB per-file limit.`);
             }
+            if (totalDecodedBytes + estimatedSize > MAX_ATTACHMENT_BATCH_BYTES) {
+              throw new Error('Attachment batch exceeds the 48 MB total limit.');
+            }
+            const buffer = Buffer.from(encoded, 'base64');
+            if (buffer.length > MAX_ATTACHMENT_BYTES) {
+              throw new Error(`${file.name || 'Attachment'} exceeds the 12 MB per-file limit.`);
+            }
+            totalDecodedBytes += buffer.length;
+            if (totalDecodedBytes > MAX_ATTACHMENT_BATCH_BYTES) {
+              throw new Error('Attachment batch exceeds the 48 MB total limit.');
+            }
             const safeName = sanitizeAttachmentName(file.name || 'attachment');
+            decodedFiles.push({ file, buffer, safeName });
+          }
+          assertAttachmentBatchWithinLimit(decodedFiles.map((entry) => ({ name: entry.safeName, size: entry.buffer.length })));
+
+          for (const { file, buffer, safeName } of decodedFiles) {
             const stampedName = `${dateStampForAttachment()}-${crypto.randomBytes(3).toString('hex')}-${safeName}`;
             const relativePath = path.join('.easycodex-attachments', stampedName);
             const target = resolveWithinCwd(safeCwd, relativePath);
@@ -1645,6 +1900,11 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'host_health': {
+          reply(hostHealthPayload());
+          break;
+        }
+
         case 'check_update': {
           reply(await runUpdateCheck('client_request'));
           break;
@@ -1713,6 +1973,7 @@ wss.on('connection', (ws, req) => {
           const { cwd, path: relativePath } = params as { cwd: string; path?: string };
           const resolved = resolveWithinWorkspace(cwd, relativePath);
           const target = resolved.target;
+          await assertWithinAllowedWorkspaceReal(target);
           const entries = await fsPromises.readdir(target, { withFileTypes: true });
           const serialized = entries
             .map((entry) => ({
@@ -1736,6 +1997,7 @@ wss.on('connection', (ws, req) => {
           const { cwd, path: relativePath } = params as { cwd: string; path?: string };
           const resolved = resolveWithinWorkspace(cwd, relativePath);
           const target = resolved.target;
+          await assertWithinAllowedWorkspaceReal(target);
           const entries = await fsPromises.readdir(target, { withFileTypes: true });
           const directories = entries
             .filter((entry) => entry.isDirectory())
@@ -1776,9 +2038,9 @@ wss.on('connection', (ws, req) => {
           if (!relativePath) throw new Error('path is required');
           const resolved = resolveWithinWorkspace(cwd, relativePath);
           const target = resolved.target;
-          const stat = await fsPromises.stat(target);
-          if (!stat.isFile()) throw new Error('Target is not a file');
-          const content = await fsPromises.readFile(target, 'utf8');
+          await assertWithinAllowedWorkspaceReal(target);
+          const realTarget = await fsPromises.realpath(target);
+          const { content } = await readTextFileChecked(realTarget);
           reply({
             cwd: resolved.cwd,
             path: relativePath,
@@ -1791,18 +2053,14 @@ wss.on('connection', (ws, req) => {
           const { cwd } = params as { cwd: string };
           const git = gitForCwd(cwd || getPrimaryWorkspaceRoot());
           const status = await git.status();
-          reply({
-            branch: status.current,
-            isClean: status.isClean(),
-            ahead: status.ahead,
-            behind: status.behind,
-            modified: status.modified,
-            created: status.created,
-            deleted: status.deleted,
-            renamed: status.renamed,
-            notAdded: status.not_added,
-            conflicted: status.conflicted,
-          });
+          const trackedOutput = await git.raw(['ls-files']);
+          const trackedFiles = new Set(
+            trackedOutput
+              .split(/\r?\n/)
+              .map((entry) => entry.trim())
+              .filter(Boolean),
+          );
+          reply(mobileGitStatusPayload(status, trackedFiles));
           break;
         }
 
@@ -1819,8 +2077,11 @@ wss.on('connection', (ws, req) => {
           const safeCwd = resolveWorkspaceCwd(cwd || getPrimaryWorkspaceRoot());
           const git = gitForCwd(safeCwd);
           const safeFile = file ? path.relative(safeCwd, resolveWithinCwd(safeCwd, file)) : '';
-          const diff = safeFile ? await git.diff([safeFile]) : await git.diff();
-          reply({ diff });
+          if (safeFile && (safeFile === '.' || safeFile.startsWith('-'))) {
+            throw new Error('file must be an explicit file path, not a git option or repository root.');
+          }
+          const diff = safeFile ? await git.raw(['diff', '--', safeFile]) : await git.diff();
+          reply(capGitDiff(diff));
           break;
         }
 
@@ -1829,9 +2090,26 @@ wss.on('connection', (ws, req) => {
           const safeCwd = resolveWorkspaceCwd(cwd || getPrimaryWorkspaceRoot());
           const git = gitForCwd(safeCwd);
           const safeFiles = normalizeGitCommitFiles(safeCwd, files);
-          await git.add(safeFiles);
+          await git.raw(['add', '--', ...safeFiles]);
           const result = await git.commit(message || 'chore: update via EasyCodex mobile');
           reply(result);
+          break;
+        }
+
+        case 'git_restore_files': {
+          const { cwd, files } = params as { cwd: string; files?: unknown };
+          const safeCwd = resolveWorkspaceCwd(cwd || getPrimaryWorkspaceRoot());
+          const git = gitForCwd(safeCwd);
+          const trackedOutput = await git.raw(['ls-files']);
+          const trackedFiles = new Set(
+            trackedOutput
+              .split(/\r?\n/)
+              .map((entry) => entry.trim())
+              .filter(Boolean),
+          );
+          const safeFiles = normalizeGitRestoreFiles(safeCwd, files, trackedFiles);
+          await git.raw(['restore', '--worktree', '--', ...safeFiles]);
+          reply({ ok: true, files: safeFiles });
           break;
         }
 
@@ -1861,6 +2139,7 @@ wss.on('connection', (ws, req) => {
         case 'git_checkout': {
           const { cwd, branch } = params as { cwd: string; branch: string };
           if (!branch) throw new Error('branch is required');
+          assertSafeGitArgument(branch, 'branch');
           const git = gitForCwd(cwd || getPrimaryWorkspaceRoot());
           await git.checkout(branch);
           reply({ ok: true });
@@ -1870,12 +2149,13 @@ wss.on('connection', (ws, req) => {
         case 'clone_repo': {
           const { url } = params as { url: string };
           if (!url?.trim()) throw new Error('url is required');
+          assertSafeGitArgument(url, 'url');
           const reposRoot = getReposRoot();
           const baseName = repoNameFromUrl(url.trim());
-          let targetPath = path.join(reposRoot, baseName);
+          let targetPath = resolveWithinBase(reposRoot, path.join(reposRoot, baseName));
           let suffix = 1;
           while (fs.existsSync(targetPath)) {
-            targetPath = path.join(reposRoot, `${baseName}-${suffix}`);
+            targetPath = resolveWithinBase(reposRoot, path.join(reposRoot, `${baseName}-${suffix}`));
             suffix += 1;
           }
           await simpleGit().clone(url.trim(), targetPath);
@@ -1913,6 +2193,9 @@ wss.on('connection', (ws, req) => {
           if (!repoPath?.trim()) throw new Error('path is required');
           const reposRoot = getReposRoot();
           const safePath = resolveWithinBase(reposRoot, repoPath.trim());
+          if (!(await isWithinBaseReal(reposRoot, safePath))) {
+            throw new Error('Path resolves outside the EasyCodex repos directory.');
+          }
           const git = simpleGit({ baseDir: safePath });
           const result = await git.pull();
           reply({ ok: true, summary: result.summary });

@@ -1,13 +1,7 @@
 const languageOptions = [
   ['system', 'System / 跟随手机'],
   ['zh', '简体中文'],
-  ['zh-Hant', '繁體中文'],
   ['en', 'English'],
-  ['ja', '日本語'],
-  ['ko', '한국어'],
-  ['es', 'Español'],
-  ['fr', 'Français'],
-  ['de', 'Deutsch'],
 ];
 
 const dictionaries = {
@@ -452,9 +446,11 @@ const elements = {
 let currentState = null;
 let currentLanguage = 'en';
 let portPreviewTimer = null;
+let portPreviewSeq = 0;
 let pendingAction = null;
 let relaySocket = null;
 let relaySocketState = 'offline';
+let relayReconnectTimer = null;
 let relayRequestId = 1;
 let selectedAgentId = null;
 let selectedThreadId = null;
@@ -469,6 +465,7 @@ const loadingGitCwds = new Set();
 const pendingRelayRequests = new Map();
 const refreshTimers = new Map();
 const nonBlockingPendingActions = new Set(['updateChecking']);
+const dirtyInputs = new Set();
 
 function t(key, ...args) {
   const dict = dictionaries[currentLanguage] || dictionaries.en;
@@ -522,6 +519,13 @@ function statusLabel(status) {
   if (normalized === 'stopped') return '已停止';
   if (normalized === 'initializing') return '初始化';
   return status || '未知';
+}
+
+function permissionModeForTask(task) {
+  if (task?.permissionMode) return task.permissionMode;
+  if (task?.approvalPolicy === 'never' || task?.sandboxMode === 'danger-full-access' || task?.sandbox === 'danger-full-access') return 'full-access';
+  if (task?.approvalsReviewer === 'auto_review') return 'auto-review';
+  return 'default-review';
 }
 
 function messageLabel(type, role) {
@@ -761,6 +765,15 @@ function relaySend(action, params = {}) {
   });
 }
 
+function rejectPendingRelayRequests(error) {
+  const pending = Array.from(pendingRelayRequests.values());
+  pendingRelayRequests.clear();
+  pending.forEach((request) => {
+    clearTimeout(request.timer);
+    request.reject(error);
+  });
+}
+
 function handleRelayResponse(message) {
   const pending = pendingRelayRequests.get(message.requestId);
   if (!pending) return;
@@ -822,14 +835,28 @@ function handleRelayStream(entry) {
 }
 
 function connectRelaySocket() {
+  if (relayReconnectTimer) {
+    clearTimeout(relayReconnectTimer);
+    relayReconnectTimer = null;
+  }
   if (!currentState?.relayRunning || !currentState?.relayUrl || !currentState?.apiKey) {
     if (relaySocket) relaySocket.close();
     relaySocket = null;
+    rejectPendingRelayRequests(new Error('Relay WebSocket is not connected.'));
     setSocketStatus('offline', '等待中继启动');
     renderWorkbench();
     return;
   }
   if (relaySocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(relaySocket.readyState)) return;
+
+  const scheduleReconnect = () => {
+    if (!currentState?.relayRunning || !currentState?.relayUrl || !currentState?.apiKey) return;
+    if (relayReconnectTimer) clearTimeout(relayReconnectTimer);
+    relayReconnectTimer = setTimeout(() => {
+      relayReconnectTimer = null;
+      connectRelaySocket();
+    }, 1500);
+  };
 
   setSocketStatus('offline', '正在连接任务流...');
   relaySocket = new WebSocket(currentState.relayUrl);
@@ -859,12 +886,17 @@ function connectRelaySocket() {
     handleRelayStream(message);
   });
   relaySocket.addEventListener('close', () => {
-    if (relaySocketState !== 'offline') setSocketStatus('offline', '任务流已断开');
+    relaySocket = null;
+    rejectPendingRelayRequests(new Error('Relay WebSocket closed.'));
+    if (relaySocketState !== 'offline') setSocketStatus('offline', '任务流已断开，正在重连...');
     renderWorkbench();
+    scheduleReconnect();
   });
   relaySocket.addEventListener('error', () => {
+    rejectPendingRelayRequests(new Error('Relay WebSocket connection failed.'));
     setSocketStatus('error', '任务流连接失败');
     renderWorkbench();
+    scheduleReconnect();
   });
 }
 
@@ -1177,10 +1209,10 @@ function renderState(state) {
   applyLanguage(state.effectiveLanguage);
   renderLanguageOptions(state);
   elements.relayPath.textContent = state.relayDir;
-  elements.portInput.value = state.port;
+  if (!dirtyInputs.has('port')) elements.portInput.value = state.port;
   elements.updateChannelSelect.value = state.updateChannel || 'stable';
-  elements.workspaceInput.value = state.workspace;
-  elements.codexPathInput.value = state.codexPath || state.codex?.path || '';
+  if (!dirtyInputs.has('workspace')) elements.workspaceInput.value = state.workspace;
+  if (!dirtyInputs.has('codexPath')) elements.codexPathInput.value = state.codexPath || state.codex?.path || '';
   elements.relayUrlInput.value = state.relayUrl;
   elements.apiKeyInput.value = state.apiKey;
   elements.qrImage.src = state.qrDataUrl;
@@ -1239,7 +1271,10 @@ async function runAction(button, action, pendingKey) {
     appendLog(`Error: ${error.message || error}`);
   } finally {
     pendingAction = null;
-    if (nextState) renderState(nextState);
+    if (nextState) {
+      dirtyInputs.clear();
+      renderState(nextState);
+    }
     else {
       if (currentState) renderState(currentState);
       else button.disabled = false;
@@ -1273,7 +1308,10 @@ elements.stopButton.addEventListener('click', () => {
 
 elements.browseButton.addEventListener('click', async () => {
   const workspace = await window.easyCodexRelay.browseWorkspace();
-  if (workspace) elements.workspaceInput.value = workspace;
+  if (workspace) {
+    dirtyInputs.add('workspace');
+    elements.workspaceInput.value = workspace;
+  }
 });
 
 elements.browseCodexButton.addEventListener('click', () => {
@@ -1287,6 +1325,7 @@ elements.codexPathInput.addEventListener('change', () => {
 });
 
 elements.portInput.addEventListener('input', () => {
+  dirtyInputs.add('port');
   clearTimeout(portPreviewTimer);
   const rawPort = elements.portInput.value.trim();
   const port = Number(rawPort);
@@ -1296,9 +1335,11 @@ elements.portInput.addEventListener('input', () => {
     return;
   }
 
+  const requestSeq = ++portPreviewSeq;
   portPreviewTimer = setTimeout(async () => {
     try {
       const preview = await window.easyCodexRelay.previewPort({ port });
+      if (requestSeq !== portPreviewSeq || elements.portInput.value.trim() !== rawPort) return;
       elements.relayUrlInput.value = preview.relayUrl;
       elements.qrImage.src = preview.qrDataUrl;
       currentState = { ...currentState, ...preview };
@@ -1309,6 +1350,8 @@ elements.portInput.addEventListener('input', () => {
       }
       setPortStatus('ok', preview.portReclaimable ? t('portRelayBusy') : t('portAvailable'));
       const state = await window.easyCodexRelay.saveConfig({ port });
+      if (requestSeq !== portPreviewSeq || elements.portInput.value.trim() !== rawPort) return;
+      dirtyInputs.delete('port');
       renderState(state);
     } catch (error) {
       setPortStatus('error', error.message || t('invalidPort'));
@@ -1316,6 +1359,9 @@ elements.portInput.addEventListener('input', () => {
     }
   }, 250);
 });
+
+elements.workspaceInput.addEventListener('input', () => dirtyInputs.add('workspace'));
+elements.codexPathInput.addEventListener('input', () => dirtyInputs.add('codexPath'));
 
 elements.updateChannelSelect.addEventListener('change', () => {
   runAction(elements.updateChannelSelect, () => window.easyCodexRelay.saveConfig({
@@ -1433,7 +1479,7 @@ elements.agentComposer.addEventListener('submit', async (event) => {
         name: taskNameFromPrompt(text),
         model: agent.model || 'gpt-5.5',
         cwd: agent.cwd || currentState?.workspace,
-        approvalPolicy: agent.approvalPolicy || 'never',
+        permissionMode: permissionModeForTask(agent),
         serviceTier: agent.serviceTier,
         reasoningEffort: agent.reasoningEffort,
       });
@@ -1479,7 +1525,7 @@ elements.resumeThreadButton.addEventListener('click', async () => {
       name: thread.name || thread.preview || 'Resumed Codex task',
       model: thread.model || 'gpt-5.5',
       cwd: thread.cwd || thread.projectRoot || currentState?.workspace,
-      approvalPolicy: thread.approvalPolicy || 'never',
+      permissionMode: permissionModeForTask(thread),
       serviceTier: thread.serviceTier,
       reasoningEffort: thread.reasoningEffort,
       codexThreadId: thread.id,

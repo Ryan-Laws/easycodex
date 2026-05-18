@@ -13,6 +13,20 @@ fun normalizePermissionMode(value: String?): String {
     }
 }
 
+fun permissionModeFromRuntimeFields(
+    permissionMode: String?,
+    approvalPolicy: String?,
+    sandboxMode: String?,
+): String {
+    val explicit = permissionMode?.trim().orEmpty()
+    if (explicit.isNotBlank()) return normalizePermissionMode(explicit)
+    return when {
+        approvalPolicy?.trim()?.lowercase() == "never" -> PERMISSION_MODE_FULL_ACCESS
+        sandboxMode?.trim()?.lowercase() == "danger-full-access" -> PERMISSION_MODE_FULL_ACCESS
+        else -> DEFAULT_PERMISSION_MODE
+    }
+}
+
 data class AgentMessage(
     val role: String,
     val type: String,
@@ -73,6 +87,7 @@ data class AgentAlert(
     val title: String,
     val detail: String,
     val timestamp: Long,
+    val requestId: String = "",
 )
 
 data class AgentApprovalRequest(
@@ -119,6 +134,40 @@ data class RuntimeCapabilities(
     val supportsServiceTier: Boolean = true,
     val supportsReasoningEffort: Boolean = true,
     val reason: String = "official Codex runtime",
+)
+
+data class RelayHostProfile(
+    val id: String,
+    val name: String,
+    val relayUrl: String,
+    val apiKey: String,
+    val hostname: String = "",
+    val platform: String = "",
+    val workspaceRoot: String = "",
+    val lastSeen: Long = 0L,
+    val warnings: List<String> = emptyList(),
+)
+
+data class HostHealthState(
+    val loading: Boolean = false,
+    val online: Boolean = false,
+    val hostname: String = "",
+    val platform: String = "",
+    val workspaceRoot: String = "",
+    val uptimeMs: Long = 0L,
+    val connectedClients: Int = 0,
+    val runtimeMode: String = "",
+    val warnings: List<String> = emptyList(),
+    val error: String? = null,
+    val checkedAt: Long = 0L,
+)
+
+data class MobileContextArtifact(
+    val kind: String,
+    val title: String,
+    val source: String = "",
+    val status: String = "",
+    val summary: String = "",
 )
 
 data class CodexModelOption(
@@ -190,7 +239,9 @@ data class CliConsoleState(
     val windows: List<CliConsoleWindow> = listOf(CliConsoleWindow(id = "cli_1", title = "CLI 1")),
 ) {
     val activeWindow: CliConsoleWindow
-        get() = windows.firstOrNull { it.id == activeWindowId } ?: windows.first()
+        get() = windows.firstOrNull { it.id == activeWindowId }
+            ?: windows.firstOrNull()
+            ?: CliConsoleWindow(id = activeWindowId.ifBlank { "cli_1" }, title = "CLI 1")
 }
 
 data class AttachmentDraft(
@@ -204,6 +255,7 @@ data class GitStatusSummary(
     val branch: String = "",
     val isClean: Boolean = true,
     val files: List<String> = emptyList(),
+    val restorableFiles: List<String> = emptyList(),
 )
 
 data class FileEntry(
@@ -231,10 +283,13 @@ data class DiffReviewState(
     val error: String? = null,
     val status: GitStatusSummary? = null,
     val selectedFile: String? = null,
+    val selectedFiles: List<String> = emptyList(),
     val diff: String = "",
     val files: List<FileEntry> = emptyList(),
     val fileContent: String = "",
     val fileLoading: Boolean = false,
+    val restoreBusy: Boolean = false,
+    val restoreError: String? = null,
 )
 
 data class GitCommitDraft(

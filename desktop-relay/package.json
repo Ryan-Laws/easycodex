@@ -17,6 +17,7 @@
     "dev:renderer": "vite --config vite.config.mjs",
     "build:renderer": "vite build --config vite.config.mjs",
     "build:relay": "npm --prefix ../agent-relay run build",
+    "test": "node --test test/*.test.cjs",
     "prepare:relay-bundle": "node scripts/prepare-relay-bundle.cjs",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
@@ -45,9 +46,18 @@
     "directories": {
       "output": "release"
     },
+    "compression": "maximum",
     "afterPack": "scripts/after-pack.cjs",
+    "electronLanguages": [
+      "en-US",
+      "zh-CN",
+      "zh-TW"
+    ],
     "files": [
       "src/**/*",
+      "!src/renderer/index.html",
+      "!src/renderer/renderer.js",
+      "!src/renderer/styles.css",
       "package.json"
     ],
     "extraResources": [
@@ -64,17 +74,31 @@
         "to": "agent-relay",
         "filter": [
           "package.json",
-          "package-lock.json",
-          "dist/**/*",
-          "src/**/*",
-          "tsconfig.json"
+          "dist/cli-helpers.js",
+          "dist/codex-rpc.js",
+          "dist/git-paths.js",
+          "dist/notifier.js",
+          "dist/permission-modes.js",
+          "dist/safety-limits.js",
+          "dist/server.js",
+          "dist/session-orchestrator.js",
+          "dist/updater.js"
         ]
       },
       {
         "from": ".relay-bundle/node_modules",
         "to": "agent-relay/node_modules",
         "filter": [
-          "**/*"
+          "**/*",
+          "!**/*.map",
+          "!**/*.ts",
+          "!**/*.md",
+          "!**/test{,s}/**/*",
+          "!**/__test{,s}__/**/*",
+          "!**/example{,s}/**/*",
+          "!**/CHANGELOG*",
+          "!**/README*",
+          "!**/readme*"
         ]
       }
     ],

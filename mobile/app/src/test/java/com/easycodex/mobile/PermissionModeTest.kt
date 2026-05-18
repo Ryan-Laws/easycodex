@@ -23,4 +23,19 @@ class PermissionModeTest {
         assertEquals(PERMISSION_MODE_FULL_ACCESS, normalizePermissionMode("full-control"))
         assertEquals(PERMISSION_MODE_FULL_ACCESS, normalizePermissionMode("full_control"))
     }
+
+    @Test
+    fun infersLegacyRuntimeFullAccessWhenExplicitModeIsMissing() {
+        assertEquals(PERMISSION_MODE_FULL_ACCESS, permissionModeFromRuntimeFields(null, "never", null))
+        assertEquals(PERMISSION_MODE_FULL_ACCESS, permissionModeFromRuntimeFields(null, null, "danger-full-access"))
+        assertEquals(PERMISSION_MODE_DEFAULT_REVIEW, permissionModeFromRuntimeFields(null, null, null))
+    }
+
+    @Test
+    fun explicitPermissionModeWinsOverLegacyRuntimeFields() {
+        assertEquals(
+            PERMISSION_MODE_DEFAULT_REVIEW,
+            permissionModeFromRuntimeFields("default-review", "never", "danger-full-access"),
+        )
+    }
 }
